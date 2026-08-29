@@ -776,7 +776,7 @@ class JournalStore:
     def _filename(event: str, attempt: int) -> str:
         return f"{event}.{attempt:06d}.json"
 
-    def _read_file(self, name: str) -> InFlightRecord | CompletedRecord:
+    def _open_retained_file(self, name: str) -> int:
         flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(name, flags, dir_fd=self._dir_fd)
@@ -784,6 +784,17 @@ class JournalStore:
             raise _journal_error(name, f"cannot open attempt: {exc.strerror}") from None
         try:
             self._verify_fd(fd, name, stat.S_ISREG, 0o600)
+        except Exception:
+            os.close(fd)
+            raise
+        return fd
+
+    def _verify_retained_file(self, name: str) -> None:
+        os.close(self._open_retained_file(name))
+
+    def _read_file(self, name: str) -> InFlightRecord | CompletedRecord:
+        fd = self._open_retained_file(name)
+        try:
             chunks: list[bytes] = []
             while chunk := os.read(fd, 65536):
                 chunks.append(chunk)
@@ -797,12 +808,16 @@ class JournalStore:
             raise _journal_error("$.event", "must be a slug")
         indexed: dict[int, str] = {}
         for name in os.listdir(self._dir_fd):
-            if name == ".lock" or name.startswith(".tmp-"):
+            if name == ".lock":
+                continue
+            if name.startswith(".tmp-"):
+                self._verify_retained_file(name)
                 continue
             match = _ATTEMPT_FILE.fullmatch(name)
             if match is None:
                 raise _journal_error("$", "state directory contains an invalid record name")
             if match.group(1) != event:
+                self._verify_retained_file(name)
                 continue
             attempt = int(match.group(2))
             if attempt in indexed:

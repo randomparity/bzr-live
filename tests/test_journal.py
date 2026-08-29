@@ -124,6 +124,30 @@ class JournalTests(unittest.TestCase):
             ).stdout
             self.assertFalse(listing.split()[0].endswith("+"))
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL semantics")
+    def test_retained_files_for_other_events_and_temporary_files_reject_acls(self) -> None:
+        with JournalStore(self.state) as store:
+            attempt = store.write_in_flight(self.in_flight())
+        attempt_document = json.loads(attempt.read_text(encoding="utf-8"))
+        attempt_document["event"] = "other"
+        candidates = {
+            ".tmp-crash": "{}",
+            "other.000001.json": json.dumps(attempt_document),
+        }
+        for name, content in candidates.items():
+            with self.subTest(name=name):
+                candidate = self.state / name
+                candidate.write_text(content, encoding="utf-8")
+                candidate.chmod(0o600)
+                subprocess.run(
+                    ["chmod", "+a", "everyone allow read", str(candidate)],
+                    check=True,
+                )
+                with JournalStore(self.state) as store:
+                    with self.assertRaises(ScenarioValidationError):
+                        store.read("comment")
+                candidate.unlink()
+
     def test_second_store_fails_while_lock_is_held(self) -> None:
         with JournalStore(self.state):
             with self.assertRaises(ScenarioValidationError):
