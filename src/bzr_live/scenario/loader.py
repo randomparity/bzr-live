@@ -135,6 +135,14 @@ def _version(value: object, source: str, field: str) -> int:
     return 1
 
 
+def _utf8(value: str, source: str, field: str) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _error(source, field, "must not contain an unpaired surrogate") from None
+    return value
+
+
 def _name(value: object, source: str, field: str) -> str:
     if not isinstance(value, str) or _NAME.fullmatch(value) is None:
         raise _error(source, field, "must be an ASCII slug")
@@ -144,7 +152,7 @@ def _name(value: object, source: str, field: str) -> str:
 def _text(value: object, source: str, field: str, *, empty: bool = False) -> str:
     if not isinstance(value, str) or (not empty and not value.strip()):
         raise _error(source, field, "must be a non-empty string")
-    return value
+    return _utf8(value, source, field)
 
 
 def _list(value: object, source: str, field: str) -> list[object]:
@@ -184,6 +192,7 @@ def _unique_strings(value: object, source: str, field: str, *, nonempty: bool) -
     for index, item in enumerate(_list(value, source, field)):
         if not isinstance(item, str) or (nonempty and not item.strip()):
             raise _error(source, f"{field}[{index}]", "must be a non-empty string")
+        _utf8(item, source, f"{field}[{index}]")
         if item in seen:
             raise _error(source, f"{field}[{index}]", "duplicate value")
         seen.add(item)
@@ -210,6 +219,7 @@ def _parse_resource(item: object, index: int, source: str) -> PlannedResource:
         email = obj["email"]
         if not isinstance(email, str) or _EMAIL.fullmatch(email) is None:
             raise _error(source, f"{field}.email", "must be an email address")
+        _utf8(email, source, f"{field}.email")
         data["email"] = email
         data["display_name"] = _text(obj["display_name"], source, f"{field}.display_name")
         groups = _unique_refs(obj.get("groups", []), "group", source, f"{field}.groups")
@@ -379,9 +389,11 @@ def _validate_assets(
         obj = _object(item, source, field, {"name", "path", "sha256"}, {"name", "path", "sha256"})
         name = _name(obj["name"], source, f"{field}.name")
         path = obj["path"]
+        if not isinstance(path, str):
+            raise _error(source, f"{field}.path", "must be a canonical path below assets/")
+        _utf8(path, source, f"{field}.path")
         if (
-            not isinstance(path, str)
-            or "\\" in path
+            "\\" in path
             or path.startswith("/")
             or re.match(r"[A-Za-z]:", path)
             or len(path.split("/")) < 2
@@ -489,6 +501,7 @@ def _custom_assignments(
         if field_type == "text":
             if not isinstance(assigned, str):
                 raise _error(source, f"{item_field}.value", "text field requires a string")
+            _utf8(assigned, source, f"{item_field}.value")
         elif field_type == "single-select":
             if not isinstance(assigned, str) or assigned not in choices:
                 raise _error(source, f"{item_field}.value", "value is outside the select catalog")

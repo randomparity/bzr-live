@@ -12,8 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
-
-from .loader import _NAME, _SHA256, _decode_json_bytes, _error, _object
+from .loader import _DECIMAL, _MEDIA_TYPE, _NAME, _SHA256, _decode_json_bytes, _error, _object
 from .model import (
     JsonValue,
     PlannedValue,
@@ -62,10 +61,34 @@ def _validate_reference(value: object, field: str, *, kind: str | None = None) -
     if _NAME.fullmatch(value.name) is None:
         raise _journal_error(field, "reference name must be a slug")
     return value
+def _utf8_string(value: object, field: str, *, nonempty: bool = False) -> str:
+    if not isinstance(value, str) or (nonempty and not value.strip()):
+        raise _journal_error(field, "must be a string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _journal_error(field, "must not contain an unpaired surrogate") from None
+    return value
+
+
+def _validate_utf8_tree(value: object, field: str) -> None:
+    if isinstance(value, str):
+        _utf8_string(value, field)
+    elif isinstance(value, Reference):
+        _utf8_string(value.kind, field)
+        _utf8_string(value.name, field)
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            _utf8_string(key, field)
+            _validate_utf8_tree(item, f"{field}.{key}")
+    elif isinstance(value, (tuple, list)):
+        for index, item in enumerate(value):
+            _validate_utf8_tree(item, f"{field}[{index}]")
 
 
 def _validate_planned(value: object, field: str) -> PlannedValue:
     try:
+        _validate_utf8_tree(value, field)
         return freeze_planned(value)
     except (TypeError, ValueError):
         raise _journal_error(field, "contains an unsupported value") from None
@@ -74,7 +97,10 @@ def _validate_planned(value: object, field: str) -> PlannedValue:
 def _validate_json(value: object, field: str) -> JsonValue:
     if isinstance(value, Reference):
         raise _journal_error(field, "JSON output cannot contain typed references")
-    if value is None or type(value) in (bool, int, str):
+    if isinstance(value, str):
+        _utf8_string(value, field)
+        return value
+    if value is None or type(value) in (bool, int):
         return value  # type: ignore[return-value]
     if isinstance(value, (tuple, list)):
         return tuple(_validate_json(item, f"{field}[]") for item in value)
@@ -86,6 +112,178 @@ def _validate_json(value: object, field: str) -> JsonValue:
             result[key] = _validate_json(item, f"{field}.{key}")
         return MappingProxyType(result)
     raise _journal_error(field, "contains an unsupported JSON value")
+
+def _keys(
+    value: object,
+    field: str,
+    required: set[str],
+    optional: set[str] = frozenset(),
+) -> Mapping[str, PlannedValue]:
+    if not isinstance(value, Mapping):
+        raise _journal_error(field, "must be an object")
+    unknown = set(value) - required - optional
+    missing = required - set(value)
+    if unknown:
+        raise _journal_error(f"{field}.{min(unknown)}", "unknown field")
+    if missing:
+        raise _journal_error(f"{field}.{min(missing)}", "required field is missing")
+    return value
+
+
+def _ref_value(value: object, field: str, kind: str, *, nullable: bool = False) -> None:
+    if nullable and value is None:
+        return
+    _validate_reference(value, field, kind=kind)
+
+
+def _refs_value(value: object, field: str, kind: str) -> None:
+    if not isinstance(value, tuple):
+        raise _journal_error(field, "must be an immutable reference sequence")
+    seen: set[Reference] = set()
+    for index, item in enumerate(value):
+        ref = _validate_reference(item, f"{field}[{index}]", kind=kind)
+        if ref in seen:
+            raise _journal_error(f"{field}[{index}]", "duplicate reference")
+        seen.add(ref)
+
+
+def _hours_value(value: object, field: str, *, nullable: bool = False) -> None:
+    if nullable and value is None:
+        return
+    if not isinstance(value, str) or _DECIMAL.fullmatch(value) is None:
+        raise _journal_error(field, "must be a canonical decimal string")
+
+
+def _custom_values(value: object, field: str) -> None:
+    if not isinstance(value, tuple):
+        raise _journal_error(field, "must be an immutable assignment sequence")
+    seen: set[Reference] = set()
+    for index, item in enumerate(value):
+        item_field = f"{field}[{index}]"
+        assignment = _keys(item, item_field, {"field", "value"})
+        ref = _validate_reference(assignment["field"], f"{item_field}.field", kind="custom-field")
+        if ref in seen:
+            raise _journal_error(f"{item_field}.field", "duplicate assignment")
+        seen.add(ref)
+        assigned = assignment["value"]
+        if isinstance(assigned, tuple):
+            if any(not isinstance(member, str) for member in assigned):
+                raise _journal_error(f"{item_field}.value", "must contain strings")
+        elif not isinstance(assigned, str):
+            raise _journal_error(f"{item_field}.value", "must be a string or string sequence")
+
+
+def _validate_update_values(values: Mapping[str, PlannedValue], field: str) -> None:
+    allowed = {
+        "summary", "status", "resolution", "assignee", "cc", "groups", "depends_on",
+        "blocks", "duplicate_of", "version", "milestone", "keywords",
+        "estimated_hours", "remaining_hours",
+    }
+    if not values or set(values) - allowed:
+        raise _journal_error(field, "must contain only supported non-empty update fields")
+    for key, value in values.items():
+        child = f"{field}.{key}"
+        if key in {"summary", "status"}:
+            _utf8_string(value, child, nonempty=True)
+        elif key == "resolution":
+            if value is not None:
+                _utf8_string(value, child, nonempty=True)
+        elif key == "assignee":
+            _ref_value(value, child, "actor", nullable=True)
+        elif key == "duplicate_of":
+            _ref_value(value, child, "bug", nullable=True)
+        elif key in {"version", "milestone"}:
+            _ref_value(value, child, key, nullable=True)
+        elif key in {"estimated_hours", "remaining_hours"}:
+            _hours_value(value, child)
+        else:
+            kind = {
+                "cc": "actor", "groups": "group", "depends_on": "bug",
+                "blocks": "bug", "keywords": "keyword",
+            }[key]
+            _refs_value(value, child, kind)
+
+
+def _validate_postcondition_values(action: str, value: object) -> None:
+    field = "$.expected_postcondition.values"
+    if action == "bug.create":
+        required = {
+            "product", "component", "summary", "description", "version", "milestone",
+            "assignee", "cc", "groups", "depends_on", "blocks", "duplicate_of",
+            "keywords", "estimated_hours", "remaining_hours", "custom_fields",
+            "server_alias",
+        }
+        values = _keys(value, field, required)
+        _ref_value(values["product"], f"{field}.product", "product")
+        _ref_value(values["component"], f"{field}.component", "component")
+        _utf8_string(values["summary"], f"{field}.summary", nonempty=True)
+        _utf8_string(values["description"], f"{field}.description")
+        for key in ("version", "milestone", "assignee", "duplicate_of"):
+            kind = {"assignee": "actor", "duplicate_of": "bug"}.get(key, key)
+            _ref_value(values[key], f"{field}.{key}", kind, nullable=True)
+        for key, kind in (
+            ("cc", "actor"), ("groups", "group"), ("depends_on", "bug"),
+            ("blocks", "bug"), ("keywords", "keyword"),
+        ):
+            _refs_value(values[key], f"{field}.{key}", kind)
+        _hours_value(values["estimated_hours"], f"{field}.estimated_hours", nullable=True)
+        _hours_value(values["remaining_hours"], f"{field}.remaining_hours", nullable=True)
+        _custom_values(values["custom_fields"], f"{field}.custom_fields")
+        alias = values["server_alias"]
+        if not isinstance(alias, str) or re.fullmatch(r"bzr-live-[0-9a-f]{31}", alias) is None:
+            raise _journal_error(f"{field}.server_alias", "must be a deterministic server alias")
+    elif action == "bug.update":
+        values = _keys(value, field, set(), {
+            "summary", "status", "resolution", "assignee", "cc", "groups", "depends_on",
+            "blocks", "duplicate_of", "version", "milestone", "keywords",
+            "estimated_hours", "remaining_hours",
+        })
+        _validate_update_values(values, field)
+    elif action == "bug.comment":
+        values = _keys(value, field, {"body", "private"})
+        _utf8_string(values["body"], f"{field}.body", nonempty=True)
+        if type(values["private"]) is not bool:
+            raise _journal_error(f"{field}.private", "must be a boolean")
+    elif action == "bug.attach":
+        values = _keys(value, field, {"bug", "asset", "asset_sha256", "description", "content_type", "private"})
+        _ref_value(values["bug"], f"{field}.bug", "bug")
+        _ref_value(values["asset"], f"{field}.asset", "asset")
+        if not isinstance(values["asset_sha256"], str) or _SHA256.fullmatch(values["asset_sha256"]) is None:
+            raise _journal_error(f"{field}.asset_sha256", "must be a lowercase SHA-256")
+        _utf8_string(values["description"], f"{field}.description")
+        media_type = values["content_type"]
+        if not isinstance(media_type, str) or _MEDIA_TYPE.fullmatch(media_type) is None:
+            raise _journal_error(f"{field}.content_type", "must be a media type")
+        if type(values["private"]) is not bool:
+            raise _journal_error(f"{field}.private", "must be a boolean")
+    elif action == "bug.worktime":
+        values = _keys(value, field, {"bug", "hours", "comment"})
+        _ref_value(values["bug"], f"{field}.bug", "bug")
+        _hours_value(values["hours"], f"{field}.hours")
+        _utf8_string(values["comment"], f"{field}.comment", nonempty=True)
+    elif action == "bug.custom-field-set":
+        values = _keys(value, field, {"bug", "values"})
+        _ref_value(values["bug"], f"{field}.bug", "bug")
+        _custom_values(values["values"], f"{field}.values")
+        if not values["values"]:
+            raise _journal_error(f"{field}.values", "must not be empty")
+    elif action == "bug.flag":
+        values = _keys(value, field, {"bug", "flag_type", "status", "requestee"})
+        _ref_value(values["bug"], f"{field}.bug", "bug")
+        _ref_value(values["flag_type"], f"{field}.flag_type", "flag-type")
+        if not isinstance(values["status"], str) or values["status"] not in {"?", "+", "-", "X"}:
+            raise _journal_error(f"{field}.status", "unsupported flag status")
+        _ref_value(values["requestee"], f"{field}.requestee", "actor", nullable=True)
+        if values["requestee"] is not None and values["status"] != "?":
+            raise _journal_error(f"{field}.requestee", "requestee is allowed only for ?")
+    else:
+        values = _keys(value, field, {"attachment", "obsolete"}, {"description"})
+        _ref_value(values["attachment"], f"{field}.attachment", "attachment")
+        if type(values["obsolete"]) is not bool:
+            raise _journal_error(f"{field}.obsolete", "must be a boolean")
+        if "description" in values:
+            _utf8_string(values["description"], f"{field}.description")
+
 
 
 def _validate_common(record: InFlightRecord | CompletedRecord) -> None:
@@ -106,7 +304,7 @@ def _validate_common(record: InFlightRecord | CompletedRecord) -> None:
     }:
         raise _journal_error("$.expected_postcondition", "must contain the exact recovery fields")
     action = postcondition["action"]
-    if action not in _ACTION_CLASSES:
+    if not isinstance(action, str) or action not in _ACTION_CLASSES:
         raise _journal_error("$.expected_postcondition.action", "unsupported action")
     if record.action_class != _ACTION_CLASSES[action]:
         raise _journal_error("$.action_class", "does not match the expected action")
@@ -116,6 +314,7 @@ def _validate_common(record: InFlightRecord | CompletedRecord) -> None:
         raise _journal_error("$.expected_postcondition.target", f"must reference {expected_target}")
     if not isinstance(postcondition["values"], Mapping):
         raise _journal_error("$.expected_postcondition.values", "must be an object")
+    _validate_postcondition_values(action, postcondition["values"])
     if postcondition["marker"] != record.reconciliation_marker:
         raise _journal_error("$.expected_postcondition.marker", "must match reconciliation marker")
 
@@ -134,6 +333,9 @@ class InvocationMetadata:
             raise _journal_error("$.invocation.operation", "must be a non-empty string")
         if not isinstance(self.arguments, tuple) or any(not isinstance(item, str) for item in self.arguments):
             raise _journal_error("$.invocation.arguments", "must contain only strings")
+        _utf8_string(self.operation, "$.invocation.operation", nonempty=True)
+        for index, argument in enumerate(self.arguments):
+            _utf8_string(argument, f"$.invocation.arguments[{index}]")
         if not isinstance(self.environment_names, tuple):
             raise _journal_error("$.invocation.environment_names", "must be a tuple")
         seen: set[str] = set()
@@ -142,6 +344,7 @@ class InvocationMetadata:
                 raise _journal_error(f"$.invocation.environment_names[{index}]", "invalid environment variable name")
             if name in seen:
                 raise _journal_error(f"$.invocation.environment_names[{index}]", "duplicate environment variable name")
+            _utf8_string(name, f"$.invocation.environment_names[{index}]")
             seen.add(name)
 
 
@@ -258,7 +461,9 @@ def _redact_opaque(value: JsonValue, known_secrets: tuple[str, ...]) -> JsonValu
             if redacted_key in redacted:
                 raise _journal_error("$.handler_output", "redaction creates a duplicate mapping key")
             redacted[redacted_key] = (
-                None if _sensitive_key(key) else _redact_opaque(item, known_secrets)
+                None
+                if _sensitive_key(key) or _sensitive_key(redacted_key)
+                else _redact_opaque(item, known_secrets)
             )
         return MappingProxyType(redacted)
     return value
@@ -566,6 +771,7 @@ class JournalStore:
         self._require_open()
         if not isinstance(record, InFlightRecord) or isinstance(record, CompletedRecord):
             raise _journal_error("$", "must be an in-flight record")
+        record.__post_init__()
         secrets_to_remove = _secret_list(known_secrets)
         if _contains_secret(_common_structural_values(record), secrets_to_remove):
             raise _journal_error("$", "known secret occurs in structural journal metadata")
@@ -608,6 +814,7 @@ class JournalStore:
         self._require_open()
         if not isinstance(record, CompletedRecord):
             raise _journal_error("$", "must be a completed record")
+        record.__post_init__()
         secrets_to_remove = _secret_list(known_secrets)
         structural = (
             *_common_structural_values(record),

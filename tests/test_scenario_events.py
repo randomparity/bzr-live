@@ -183,6 +183,10 @@ class ScenarioEventTests(unittest.TestCase):
         scenario = load_scenario(self.root)
         self.assertEqual(scenario.events[0].payload["summary"], "before\u2028after")
 
+    def test_rejects_unpaired_surrogates_with_field_context(self) -> None:
+        self.events[0]["payload"]["summary"] = "\ud800"  # type: ignore[index]
+        self.assert_invalid("$.payload.summary")
+
 
 if __name__ == "__main__":
     unittest.main()

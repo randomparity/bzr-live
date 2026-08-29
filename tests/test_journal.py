@@ -30,7 +30,7 @@ class JournalTests(unittest.TestCase):
             {
                 "action": "bug.comment",
                 "target": Reference("bug", "race"),
-                "values": {"body": "safe"},
+                "values": {"body": "safe", "private": False},
                 "marker": "bzr-live:smoke:comment",
             }
         )
@@ -172,6 +172,7 @@ class JournalTests(unittest.TestCase):
             "message": "redacted<actredacted",
             "nested": ["safe-act-value"],
             "prefix-LEAK": "key text",
+            "toLEAKken": "credential-value",
         }
         completed = self.completed()
         object.__setattr__(completed, "handler_output", freeze_planned(output))
@@ -181,12 +182,13 @@ class JournalTests(unittest.TestCase):
             stored = store.read("comment")
         self.assertIsInstance(stored, CompletedRecord)
         redacted = stored.handler_output  # type: ignore[union-attr]
-        for key in output.keys() - {"message", "nested", "prefix-LEAK"}:
+        for key in output.keys() - {"message", "nested", "prefix-LEAK", "toLEAKken"}:
             self.assertIsNone(redacted[key])
         self.assertEqual(redacted["message"], "")
         self.assertEqual(redacted["nested"], ("safe--value",))
         self.assertNotIn("prefix-LEAK", redacted)
         self.assertEqual(redacted["prefix-"], "key text")
+        self.assertIsNone(redacted["token"])
         self.assertEqual(stored.event, "comment")  # type: ignore[union-attr]
 
     def test_rejects_known_secrets_in_structural_fields_without_echoing(self) -> None:
@@ -243,6 +245,24 @@ class JournalTests(unittest.TestCase):
                 actor=Reference("actor", "ada"),
                 action_class="append",
                 expected_postcondition=freeze_planned({"action": "bug.comment"}),
+                reconciliation_marker="bzr-live:smoke:comment",
+            )
+        invalid_values = freeze_planned(
+            {
+                "action": "bug.comment",
+                "target": Reference("bug", "race"),
+                "values": {"body": {"ref": "bug:other"}, "private": False},
+                "marker": "bzr-live:smoke:comment",
+            }
+        )
+        with self.assertRaises(ScenarioValidationError):
+            InFlightRecord(
+                scenario_digest=self.digest,
+                event="comment",
+                attempt=1,
+                actor=Reference("actor", "ada"),
+                action_class="append",
+                expected_postcondition=invalid_values,
                 reconciliation_marker="bzr-live:smoke:comment",
             )
 
