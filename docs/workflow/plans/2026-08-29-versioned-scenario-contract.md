@@ -682,26 +682,33 @@ predicates prove workflow identity, exact head, terminal conclusion, all-run acc
    `feat/versioned-scenario-contract-3`, base `main`, `headRefOid == HEAD_SHA`,
    `mergeStateStatus == CLEAN`, and `mergeable == MERGEABLE`.
 6. Publish one new head-bound `WORK:REVIEW` annotation through the quest publication helper,
-   including the retained compatibility disclosure. Verify the comment URL and the private
-   publication handoff before proceeding.
+   including the retained compatibility disclosure. Capture its verified comment URL as
+   `REVIEW_COMMENT_URL`, then verify that URL and the private publication handoff before proceeding.
 7. Run `$return-to-town` on the no-merge path. Its verified issue #3 trajectory must name the
    guardrails, PR #10, review-publication URL, exact remote branch SHA, and whole line
    `MERGE-READY: #10 @ <HEAD_SHA>`. Leave the branch, PR, issue, and worktree in place.
 
-Select the handshake-bearing complete trajectory and independently bind its author to PR #10's
-author:
+Select the complete trajectory only after it matches PR #10's author and every required handoff
+field:
 
 ```bash
+PR_AUTHOR=$(gh pr view 10 --repo randomparity/bzr-live --json author --jq .author.login)
+test -n "$REVIEW_COMMENT_URL"
 HANDSHAKE=$(gh issue view 3 --repo randomparity/bzr-live --json comments | \
-  jq --arg pr "10" --arg sha "$HEAD_SHA" \
+  jq --arg author "$PR_AUTHOR" --arg pr "10" --arg sha "$HEAD_SHA" \
+    --arg review "$REVIEW_COMMENT_URL" \
     '[.comments[]
-      | select(.body
-        | test("(?m)^<!-- WORK:TRAJECTORY -->$")
-          and test("(?m)^<!-- TRAJECTORY:COMPLETE -->$")
-          and test("(?m)^MERGE-READY: #" + $pr + " @ " + $sha + "$"))]
+      | select(.author.login == $author)
+      | select(.body as $body
+        | ($body | test("(?m)^<!-- WORK:TRAJECTORY -->$"))
+          and ($body | test("(?m)^<!-- TRAJECTORY:COMPLETE -->$"))
+          and ($body | test("(?m)^MERGE-READY: #" + $pr + " @ " + $sha + "$"))
+          and ($body | test("(?m)^- Guardrails: .+$"))
+          and ($body | split("\n") | index("- Pull request: https://github.com/randomparity/bzr-live/pull/10") != null)
+          and ($body | split("\n") | index("- Head: `" + $sha + "`") != null)
+          and ($body | split("\n") | index("- Review publication: " + $review) != null))]
      | last | {author: .author.login, body}')
 HANDSHAKE_AUTHOR=$(jq -r '.author // empty' <<<"$HANDSHAKE")
-PR_AUTHOR=$(gh pr view 10 --repo randomparity/bzr-live --json author --jq .author.login)
 test -n "$HANDSHAKE_AUTHOR"
 test "$HANDSHAKE_AUTHOR" = "$PR_AUTHOR"
 jq -e --arg sha "$HEAD_SHA" '.body | test("(?m)^MERGE-READY: #10 @ " + $sha + "$")' \
