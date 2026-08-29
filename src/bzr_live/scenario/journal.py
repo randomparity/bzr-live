@@ -473,7 +473,9 @@ def _contains_secret(value: object, known_secrets: tuple[str, ...]) -> bool:
     if isinstance(value, str):
         return any(secret in value for secret in known_secrets)
     if isinstance(value, Reference):
-        return _contains_secret(value.name, known_secrets)
+        return _contains_secret(value.kind, known_secrets) or _contains_secret(
+            value.name, known_secrets
+        )
     if isinstance(value, Mapping):
         return any(
             _contains_secret(key, known_secrets) or _contains_secret(item, known_secrets)

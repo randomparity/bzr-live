@@ -25,7 +25,7 @@ def main() -> None:
         {
             "action": "bug.comment",
             "target": Reference("bug", "smoke"),
-            "values": {"body": "installed smoke"},
+            "values": {"body": "installed smoke", "private": False},
             "marker": marker,
         }
     )

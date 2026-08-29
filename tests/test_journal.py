@@ -169,16 +169,20 @@ class JournalTests(unittest.TestCase):
             "refreshToken": "refresh-value",
             "client-secret": "secret-value",
             "set-cookie": "cookie-value",
-            "message": "redacted<actredacted",
-            "nested": ["safe-act-value"],
+            "message": "redacted<OPAQUEredacted",
+            "nested": ["safe-OPAQUE-value"],
             "prefix-LEAK": "key text",
             "toLEAKken": "credential-value",
         }
         completed = self.completed()
         object.__setattr__(completed, "handler_output", freeze_planned(output))
         with JournalStore(self.state) as store:
-            store.write_in_flight(self.in_flight(), known_secrets=("redacted", "<", "act", "LEAK"))
-            store.replace_completed(completed, known_secrets=("redacted", "<", "act", "LEAK"))
+            store.write_in_flight(
+                self.in_flight(), known_secrets=("redacted", "<", "OPAQUE", "LEAK")
+            )
+            store.replace_completed(
+                completed, known_secrets=("redacted", "<", "OPAQUE", "LEAK")
+            )
             stored = store.read("comment")
         self.assertIsInstance(stored, CompletedRecord)
         redacted = stored.handler_output  # type: ignore[union-attr]
@@ -210,6 +214,9 @@ class JournalTests(unittest.TestCase):
         with JournalStore(self.state) as store:
             with self.assertRaises(ScenarioValidationError):
                 store.write_in_flight(record, known_secrets=("SECRET",))
+        with JournalStore(self.state) as store:
+            with self.assertRaises(ScenarioValidationError):
+                store.write_in_flight(self.in_flight(), known_secrets=("actor",))
 
     def test_rejects_opaque_key_collisions_created_by_redaction(self) -> None:
         completed = self.completed()
