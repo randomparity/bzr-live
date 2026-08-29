@@ -450,14 +450,15 @@ Redaction copies only `invocation.arguments` and `handler_output`. Within those 
 key normalization first replaces every non-alphanumeric run with `_`, then inserts `_` only
 at a lowercase-letter-or-digit to uppercase-letter boundary, strips edge underscores, and
 lowercases. Thus `API_KEY` becomes `api_key`, `AUTHORIZATION` becomes `authorization`, and
-`refreshToken` becomes `refresh_token`. A key is sensitive when the normalized value is
-`authorization`, `api_key`, or `apikey`, or any underscore-delimited segment is `token`,
-`password`, `secret`, `cookie`, or `credential`; its value becomes JSON null. This covers the
-capitalized forms plus `access_token`, `client-secret`, and `set-cookie` with an empty
+`refreshToken` becomes `refresh_token`. Split the normalized value on underscores. A key is
+sensitive when any segment is `token`, `password`, `secret`, `cookie`, `credential`,
+`authorization`, or `apikey`, or when adjacent segments are `api`, `key`; its value becomes
+JSON null. This covers `API_KEY`, `AUTHORIZATION`, `clientAPIKey`,
+`proxyAuthorization`, `access_token`, `client-secret`, and `set-cookie` with an empty
 `known_secrets` collection. In all other opaque strings, every non-empty known-secret
 substring is removed, longest secrets first, until none remains in that value. The collection
 is neither retained nor serialized. The invariant applies to parsed opaque payload values,
-not coincidental bytes in JSON syntax or protocol identities. Tests cover the compound keys
+not coincidental bytes in JSON syntax or protocol identities. Tests cover all compound keys
 above and secrets such as `redacted`, `<`, and `act`, require no opaque output string to
 contain them, and require identities to remain unchanged.
 
@@ -560,9 +561,9 @@ Focused tests must prove:
   installing/replacing a record; exceptions retain field context but contain neither the
   supplied secret nor the sensitive value; protocol identities remain byte-stable; parsed
   opaque output values null compound credential keys including `API_KEY`, `AUTHORIZATION`,
-  `access_token`, `refreshToken`, `client-secret`, and `set-cookie`, and contain none of the
-  known secrets—including collision cases `redacted`, `<`, and `act`—while non-sensitive
-  values remain;
+  `clientAPIKey`, `proxyAuthorization`, `access_token`, `refreshToken`, `client-secret`, and
+  `set-cookie`, and contain none of the known secrets—including collision cases `redacted`,
+  `<`, and `act`—while non-sensitive values remain;
 - source inspection plus import behavior confirms the package never imports or invokes a
   mutation/network subprocess surface.
 
