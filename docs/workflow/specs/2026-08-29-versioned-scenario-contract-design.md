@@ -29,7 +29,7 @@ epic's separately owned narrow custom-field REST adapter as an explicit exceptio
 3. Reject malformed JSON, duplicate object keys, non-finite or floating-point JSON numbers,
    unknown fields at every contract object, duplicate names within an identity namespace,
    unsupported resource/action kinds, invalid values, unsafe or changed assets, missing
-   references, wrong-kind references, invalid resource cycles, and event references to
+   references, wrong-kind references, invalid dependencies, and event references to
    outputs not yet created.
 4. Return immutable typed objects and a stable resource topological plan only after all
    files, references, event outputs, and assets validate.
@@ -64,10 +64,10 @@ class Reference:
     name: str
 
 RecoveryClass = Literal["unique-create", "idempotent-set", "append"]
-JsonValue = None | bool | int | str | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
+JsonValue = bool | int | str | tuple["JsonValue", ...] | Mapping[str, "JsonValue"] | None
 PlannedValue = (
-    None | bool | int | str | Reference
-    | tuple["PlannedValue", ...] | Mapping[str, "PlannedValue"]
+    bool | int | str | Reference
+    | tuple["PlannedValue", ...] | Mapping[str, "PlannedValue"] | None
 )
 
 @dataclass(frozen=True)
@@ -208,9 +208,9 @@ Emails must contain one non-edge `@` and no ASCII whitespace. `field_type` is on
 string values; text fields require no values. Reference lists reject duplicate references.
 
 Dependencies are every typed reference in the kind-specific reference fields. All must
-resolve to declared resources of the required kind. A stable Kahn topological sort preserves
-input order among currently ready resources. A cycle is rejected with the identities left in
-the cycle; no partial plan is returned.
+resolve to declared resources of the required kind. The closed version 1 kind graph is
+acyclic by construction. A stable Kahn topological sort preserves input order among currently
+ready resources, and no partial plan is returned after any dependency error.
 
 ### Typed references
 
@@ -484,8 +484,8 @@ enforce that contract before each atomic transition.
 
 ### Controls
 
-- Strict duplicate-aware decoding, closed keys/kinds/actions, exact value checks, complete
-  reference resolution, and a cycle check prevent malformed control data reaching a handler.
+- Strict duplicate-aware decoding, closed keys/kinds/actions, exact value checks, and complete
+  dependency/reference resolution prevent malformed control data reaching a handler.
 - Canonical slug identities and immutable returned mappings prevent alias confusion and
   post-validation mutation.
 - Canonical relative asset paths, no symlinks, containment checks, regular-file checks, and
@@ -519,7 +519,7 @@ Focused tests must prove:
 - duplicate JSON keys, unknown fields, invalid versions/types, malformed resource/action
   shapes, duplicate resource/event/asset/output names, unresolved/forward/self references,
   wrong-kind and cross-product references, out-of-catalog select values, missing actors/assets,
-  invalid custom-field values, and resource cycles fail with source and field context;
+  invalid custom-field values, and invalid dependencies fail with source and field context;
 - unsafe, missing, ancestor/final symlinked, non-regular, and checksum-mismatched assets fail;
 - equivalent JSON formatting/key order and reordered asset declarations have the same digest,
   while every manifest/resource/event field, resource/event order, asset field, and asset byte
