@@ -388,6 +388,14 @@ class CompletedRecord:
             raise _journal_error("$.expected_postcondition", "must be an object")
         if not isinstance(self.invocation, InvocationMetadata):
             raise _journal_error("$.invocation", "must be invocation metadata")
+        action = self.expected_postcondition["action"]
+        expected_boundary = (
+            "bugzilla-rest-custom-field" if action == "bug.custom-field-set" else "bzr"
+        )
+        if self.invocation.mutation_boundary != expected_boundary:
+            raise _journal_error(
+                "$.invocation.mutation_boundary", "does not match the expected action"
+            )
         if type(self.exit_status) is not int:
             raise _journal_error("$.exit_status", "must be an integer")
         if not isinstance(self.resolved_ids, Mapping):

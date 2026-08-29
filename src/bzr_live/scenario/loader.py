@@ -393,7 +393,7 @@ def _validate_assets(
             raise _error(source, f"{field}.path", "must be a canonical path below assets/")
         _utf8(path, source, f"{field}.path")
         if (
-            "\\" in path
+            "\0" in path or "\\" in path
             or path.startswith("/")
             or re.match(r"[A-Za-z]:", path)
             or len(path.split("/")) < 2

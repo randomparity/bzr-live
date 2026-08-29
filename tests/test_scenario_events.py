@@ -141,6 +141,8 @@ class ScenarioEventTests(unittest.TestCase):
     def test_rejects_unsafe_and_symlinked_assets(self) -> None:
         self.scenario["assets"][0]["path"] = "assets/../trace.log"  # type: ignore[index]
         self.assert_invalid("$.assets[0].path")
+        self.scenario["assets"][0]["path"] = "assets/a\u0000b"  # type: ignore[index]
+        self.assert_invalid("$.assets[0].path")
         self.scenario["assets"][0]["path"] = "assets/trace-link"  # type: ignore[index]
         (self.root / "assets" / "trace-link").symlink_to("trace.log")
         self.assert_invalid("$.assets[0].path")

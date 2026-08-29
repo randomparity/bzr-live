@@ -244,6 +244,50 @@ class JournalTests(unittest.TestCase):
             )
         with self.assertRaises(ScenarioValidationError):
             InvocationMetadata("shell", "op", (), ())  # type: ignore[arg-type]
+        completed = self.completed()
+        object.__setattr__(
+            completed,
+            "invocation",
+            InvocationMetadata("bugzilla-rest-custom-field", "op", (), ()),
+        )
+        with self.assertRaises(ScenarioValidationError):
+            completed.__post_init__()
+        custom_postcondition = freeze_planned(
+            {
+                "action": "bug.custom-field-set",
+                "target": Reference("bug", "race"),
+                "values": {
+                    "bug": Reference("bug", "race"),
+                    "values": (
+                        {
+                            "field": Reference("custom-field", "severity"),
+                            "value": "major",
+                        },
+                    ),
+                },
+                "marker": "bzr-live:smoke:custom-field",
+            }
+        )
+        custom_completed = CompletedRecord(
+            scenario_digest=self.digest,
+            event="custom-field",
+            attempt=1,
+            actor=Reference("actor", "ada"),
+            action_class="idempotent-set",
+            expected_postcondition=custom_postcondition,
+            reconciliation_marker="bzr-live:smoke:custom-field",
+            invocation=InvocationMetadata(
+                "bugzilla-rest-custom-field", "custom-field-set", (), ()
+            ),
+            handler_output={},
+            exit_status=0,
+            resolved_ids={},
+            next_safe_action="advance",
+        )
+        self.assertEqual(
+            custom_completed.invocation.mutation_boundary,
+            "bugzilla-rest-custom-field",
+        )
         with self.assertRaises(ScenarioValidationError):
             InFlightRecord(
                 scenario_digest=self.digest,
