@@ -1,0 +1,1 @@
+"""Local Bugzilla scenario contracts."""
