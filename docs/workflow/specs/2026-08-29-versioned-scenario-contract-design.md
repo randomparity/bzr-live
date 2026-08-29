@@ -1,11 +1,13 @@
 # Versioned Scenario Contract Design
 
 **Issue:** [#3](https://github.com/randomparity/bzr-live/issues/3)  
-**Decision:** [ADR 0002](../../adr/0002-versioned-scenario-contract.md)  
+**Decisions:** [ADR 0002](../../adr/0002-versioned-scenario-contract.md);
+[ADR 0003](../../adr/0003-scenario-contract-ci.md)
 **Branch:** `feat/versioned-scenario-contract-3`  
 **Base branch:** `main`  
-**Guardrails:** none existed at design time; this change establishes the focused command
-`uv run --python 3.11 python -m unittest discover -s tests -v`.
+**Guardrails:** `uv run --python 3.11 python -m unittest discover -s tests -v`,
+`uv build`, installed-wheel smoke, `actionlint .github/workflows/scenario-contract.yml`,
+and `git diff --check`.
 
 ## Goal and scope
 
@@ -48,6 +50,10 @@ epic's separately owned narrow custom-field REST adapter as an explicit exceptio
    arguments and handler output before completion is persisted.
 9. Use Python 3.11 or later, Setuptools 84.0.0 as the pinned build backend, and no runtime or
    test dependencies outside the standard library.
+10. A dedicated GitHub Actions workflow must run the existing test suite, package build, and
+    installed-wheel smoke for relevant scenario-contract paths on pull requests and pushes to
+    `main`. It must use only read-only repository contents permission, configure or pass no
+    long-lived secrets, and pin every third-party action to a source-verified full commit SHA.
 
 ## Package boundary
 
@@ -484,6 +490,43 @@ The package has no callback, hook, subprocess, network client, or partial-plan i
 Therefore a caller cannot begin mutation during validation. Later code must finish
 `load_scenario`, persist the in-flight record, and only then invoke `bzr`.
 
+## Continuous integration contract
+
+`.github/workflows/scenario-contract.yml` is the only new runtime component. It triggers on
+`pull_request` and on pushes to `main` when any of these paths change:
+
+- `.github/workflows/scenario-contract.yml`;
+- `pyproject.toml` or `uv.lock`;
+- `src/**` or `tests/**`, except the issue #2-owned `tests/lifecycle_test.sh`;
+- `docs/adr/0002-versioned-scenario-contract.md`;
+- `docs/adr/0003-scenario-contract-ci.md`;
+- `docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md`;
+- `docs/workflow/plans/2026-08-29-versioned-scenario-contract.md`.
+
+One `ubuntu-24.04` job with a 15-minute timeout performs, in order:
+
+1. checkout with `actions/checkout` v7.0.1 commit
+   `3d3c42e5aac5ba805825da76410c181273ba90b1`, persisted credentials disabled, and
+   `ref` set to `${{ github.event.pull_request.head.sha || github.sha }}`;
+2. assert that `git rev-parse HEAD` equals the same selected event SHA;
+3. uv setup with `astral-sh/setup-uv` v10.0.1 commit
+   `20cfd1bf945f4377ade1205e4dbc17946fc9a30d`, installing uv 0.12.7 for Python
+   3.11 with caching disabled and validating the x86_64 Linux archive against published
+   SHA-256 `788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21`;
+4. `uv run --python 3.11 python -m unittest discover -s tests -v`;
+5. `uv build`;
+6. `uv run --isolated --no-project --with
+   ./dist/bzr_live-0.1.0-py3-none-any.whl python tests/smoke_installed.py
+   tests/fixtures/minimal-scenario`.
+
+The workflow grants only `contents: read`, uses `pull_request` rather than
+`pull_request_target`, configures no repository or environment secrets, and contains no write or
+publication step. GitHub still exposes its automatic read-only `GITHUB_TOKEN` to every action
+and step. A successful job is the commit-bound proof for all three existing behavioral
+boundaries. Local `actionlint` proves workflow syntax and path-glob structure. The pre-push
+source-verification record proves every `with:` key exists in the inspected manifest at its
+pinned action commit.
+
 ## Threat model
 
 ### Boundary inventory
@@ -496,6 +539,10 @@ Therefore a caller cannot begin mutation during validation. Later code must fini
 - **Not widened: Bugzilla mutation boundary.** This package performs no mutation. Later
   handlers use `bzr`, apart from the already-authorized narrow custom-field adapter, and this
   change grants neither path new callers or credentials.
+- **Added: pull-request content and token to GitHub-hosted CI.** A pull-request author controls
+  package source, tests, fixtures, and proposed workflow text executed by the scenario-contract
+  job. Every action and step can access GitHub's automatic `GITHUB_TOKEN`, restricted here to
+  `contents: read`; the job also executes two adopted third-party actions at immutable commits.
 
 ### Actors and trust
 
@@ -505,6 +552,12 @@ run the later executor, but other local users are not trusted to read its secret
 runner is trusted to supply the complete known-secret collection and never place credential
 environment values in metadata; structural-field rejection and opaque-payload redaction
 enforce that contract before each atomic transition.
+
+For CI, the untrusted party is a pull-request author. GitHub's hosted runner and token service
+are trusted to enforce event isolation and the declared read-only permission. Every job action
+and step is trusted with the automatic token; no configured long-lived secret is supplied. The
+pinned action commits are trusted only after their stable release tags and source manifests are
+verified.
 
 ### Controls
 
@@ -522,6 +575,12 @@ enforce that contract before each atomic transition.
   known-secret redaction is limited to opaque arguments/output, and credential environment
   values have no journal field. Errors identify fields but never echo sensitive values.
 - No subprocess/network capability preserves the existing `bzr` mutation boundary.
+- The CI job uses `pull_request`, `contents: read`, no configured secrets, no persisted checkout
+  credentials, no cache writes, immutable action SHAs, a pinned uv version, and the published
+  uv archive checksum. The automatic token remains available but read-only. Explicit event-SHA
+  checkout plus an equality assertion prevents the pull-request merge ref from substituting for
+  the delivered head. Path filters include the workflow itself and every issue #3 source, test,
+  package, and design surface while explicitly excluding the lifecycle-only shell test.
 
 ### Explicitly out of scope
 
@@ -533,6 +592,9 @@ enforce that contract before each atomic transition.
   data. This issue prevents credential metadata leakage; it does not sanitize fixture content.
 - Server-side reconciliation, API authorization, credential acquisition, and the epic's
   narrow custom-field REST adapter belong to later issues.
+- Compromise of GitHub-hosted runner infrastructure, GitHub's action-download service, or an
+  already-pinned upstream commit is outside this repository's control. Immutable pins,
+  least privilege, and explicit upgrade review bound but cannot eliminate that platform risk.
 
 ## Verification
 
@@ -571,11 +633,24 @@ Focused tests must prove:
 - source inspection plus import behavior confirms the package never imports or invokes a
   mutation/network subprocess surface.
 
-The focused guardrail is:
+The required local and CI behavioral commands are:
 
 ```bash
 uv run --python 3.11 python -m unittest discover -s tests -v
+uv build
+uv run --isolated --no-project --with ./dist/bzr_live-0.1.0-py3-none-any.whl \
+  python tests/smoke_installed.py tests/fixtures/minimal-scenario
 ```
 
-It must exit 0 with every test passing. Packaging is checked with `uv build`, which must exit
-0 and produce source and wheel artifacts without adding them to the commit.
+Each command must exit 0. Unit discovery must run all 42 existing tests; `uv build` must
+produce the source distribution and exact `bzr_live-0.1.0-py3-none-any.whl`; the smoke must
+print one 64-character lowercase digest followed by `completed`. Before push,
+`actionlint .github/workflows/scenario-contract.yml` and `git diff --check` must also exit 0.
+After push, `gh run list --commit <full-head-sha> --event pull_request --json
+workflowName,status,conclusion,headSha,url` must return at least one run with exact
+`workflowName: Scenario contract`, the expected full `headSha`, status `completed`, and
+conclusion `success`. The workflow is not yet on the default branch, so discovery must not use
+`--workflow scenario-contract.yml`, which resolves workflow files through the default-branch
+workflow registry. Separately, unqualified `gh run list --commit <full-head-sha>` must be
+non-empty and every returned run must be completed with conclusion `success`, `skipped`, or
+`neutral`.

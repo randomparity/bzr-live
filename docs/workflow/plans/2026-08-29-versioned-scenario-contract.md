@@ -1,12 +1,22 @@
 # Versioned Scenario Contract Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: use `$forge` to implement this plan task by task with TDD and whole-branch review.
+> **For agentic workers:** REQUIRED SUB-SKILL: use `$forge` to resume at Task 5 with TDD and whole-branch review; Tasks 1–4 are completed baseline and MUST NOT be re-executed.
 
-**Goal:** Implement strict version 1 scenario loading, dependency/recovery planning, canonical digests, and owner-only atomic event journals for issue #3.
+**Goal:** Implement and continuously verify the strict version 1 scenario contract, including
+dependency/recovery planning, canonical digests, owner-only atomic journals, and a
+commit-bound GitHub Actions result for issue #3.
 
-**Architecture:** `bzr_live.scenario.model` owns immutable public values and canonical conversion. `loader` owns duplicate-aware decoding, descriptor-confined assets, closed resource/action validators, reference planning, and the digest; it has no mutation capability. `journal` owns owner-only descriptor-relative state, attempt transitions, and redaction. Later executors can consume only `ValidatedScenario` and delegate mutations to `bzr` except for the separately authorized narrow custom-field adapter.
+**Architecture:** `bzr_live.scenario.model` owns immutable public values and canonical
+conversion. `loader` owns duplicate-aware decoding, descriptor-confined assets, closed
+resource/action validators, reference planning, and the digest; it has no mutation capability.
+`journal` owns owner-only descriptor-relative state, attempt transitions, and redaction. The
+dedicated scenario-contract workflow invokes the existing test, build, and installed-wheel
+boundaries without changing product code. Later executors can consume only
+`ValidatedScenario` and delegate mutations to `bzr` except for the separately authorized
+narrow custom-field adapter.
 
-**Tech Stack:** Python 3.11 standard library, Setuptools 84.0.0, `unittest`, `uv`.
+**Tech Stack:** Python 3.11 standard library, Setuptools 84.0.0, `unittest`, uv 0.12.7,
+GitHub Actions, `actionlint`.
 
 **Spec:** `docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md`
 
@@ -25,9 +35,35 @@
 - Focused guardrail: `uv run --python 3.11 python -m unittest discover -s tests -v`.
 - Packaging guardrail: `uv build`.
 
+- Scenario-contract CI runs on `ubuntu-24.04` for `pull_request` and relevant pushes to `main`.
+- Grant only `contents: read`; configure no long-lived secrets and use no
+  `pull_request_target`, persisted checkout credentials, or setup-uv cache writes. GitHub's
+  automatic token remains available to every action and step with read-only permission.
+- Check out `${{ github.event.pull_request.head.sha || github.sha }}` and assert the resulting
+  `HEAD` equals that event SHA before running the product boundaries.
+- Pin `actions/checkout` v7.0.1 to
+  `3d3c42e5aac5ba805825da76410c181273ba90b1` and `astral-sh/setup-uv` v10.0.1 to
+  `20cfd1bf945f4377ade1205e4dbc17946fc9a30d`.
+- Install uv 0.12.7 with published x86_64 Linux SHA-256
+  `788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21`.
+- Workflow guardrail: `actionlint .github/workflows/scenario-contract.yml`.
+
+## Continuation boundary
+
+Tasks 1–4 record the product implementation already committed and reviewed on PR #10. They are
+retained only as historical execution context and are not actionable in this CI follow-up.
+Execution begins at Task 5. Only `.github/workflows/scenario-contract.yml`, the three named CI
+design artifacts, and the required PR/review/trajectory metadata may change; product package,
+schema, journal, fixture, test, and packaging behavior must remain unchanged.
+Continuation authority is issue #3's `WORK:SCOPE` token `q3-9198946b` under campaign
+`4732d660-33AC2567-D4A5-4F80-96DA-46AA1C50634E`. The operator explicitly authorized this
+bounded continuation, forced recovery of the observed-ended prior claim, and reuse of branch
+`feat/versioned-scenario-contract-3`, its worktree, and PR #10; no merge authority was granted.
+
+
 ---
 
-### Task 1: Immutable model and strict resource catalog
+### Task 1: Immutable model and strict resource catalog (completed baseline; do not execute)
 
 **Files:**
 - Create: `pyproject.toml`
@@ -145,7 +181,7 @@ git add pyproject.toml uv.lock src/bzr_live/__init__.py src/bzr_live/scenario/__
 git commit -m "feat: validate scenario resource catalogs"
 ```
 
-### Task 2: Assets, actions, dependency plans, and canonical digest
+### Task 2: Assets, actions, dependency plans, and canonical digest (completed baseline; do not execute)
 
 **Files:**
 - Modify: `src/bzr_live/scenario/loader.py`
@@ -237,7 +273,7 @@ git add src/bzr_live/scenario/model.py src/bzr_live/scenario/loader.py tests/tes
 git commit -m "feat: plan and hash scenario events"
 ```
 
-### Task 3: Atomic owner-only journal and redaction
+### Task 3: Atomic owner-only journal and redaction (completed baseline; do not execute)
 
 **Files:**
 - Create: `src/bzr_live/scenario/journal.py`
@@ -333,7 +369,7 @@ git add src/bzr_live/scenario/__init__.py src/bzr_live/scenario/journal.py tests
 git commit -m "feat: journal scenario event attempts"
 ```
 
-### Task 4: Whole-contract proof and packaging
+### Task 4: Whole-contract proof and packaging (completed baseline; do not execute)
 
 **Files:**
 - Modify only files from Tasks 1–3 if the proof exposes an issue.
@@ -418,10 +454,270 @@ git status --short --untracked-files=all
 ```
 
 Expected: the status command prints nothing; the tracked `uv.lock` remains.
+
+### Task 5: Commit-bound scenario-contract CI
+
+**Files:**
+- Create: `.github/workflows/scenario-contract.yml`
+- Commit reviewed design draft: `docs/adr/0003-scenario-contract-ci.md`
+- Commit reviewed design update:
+  `docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md`
+- Commit this reviewed plan update:
+  `docs/workflow/plans/2026-08-29-versioned-scenario-contract.md`
+
+**Prerequisite:** `$spellcraft` has already created or updated and adversarially reviewed the
+three design artifacts above. Task 5 consumes those exact working-tree drafts; it does not
+re-author or silently replace them. Their review remains valid only while their bytes are
+unchanged.
+
+**Interfaces:**
+- Consumes the exact three behavioral commands established by Task 4 and the reviewed design
+  artifacts named above.
+- Produces the `Scenario contract / Python 3.11` Actions result for each matching commit.
+- Exposes no product API, configured long-lived secret, artifact publication, or mutation
+  capability.
+
+- [ ] **Step 1: Prove the commit-bound workflow is absent**
+
+```bash
+actionlint .github/workflows/scenario-contract.yml
+```
+
+Expected before creation: non-zero exit because the named workflow file does not exist. The
+three bounded `gh run list --commit 3fbbe7efe3ab13d90dd31551016de2dfbdc16c21`
+reads already returned `[]`, proving that the lifecycle-only workflow does not cover this
+branch head.
+
+- [ ] **Step 2: Add the minimal pinned workflow**
+
+Create `.github/workflows/scenario-contract.yml` exactly as:
+
+```yaml
+name: Scenario contract
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/scenario-contract.yml
+      - pyproject.toml
+      - uv.lock
+      - src/**
+      - tests/**
+      - "!tests/lifecycle_test.sh"
+      - docs/adr/0002-versioned-scenario-contract.md
+      - docs/adr/0003-scenario-contract-ci.md
+      - docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md
+      - docs/workflow/plans/2026-08-29-versioned-scenario-contract.md
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/scenario-contract.yml
+      - pyproject.toml
+      - uv.lock
+      - src/**
+      - tests/**
+      - "!tests/lifecycle_test.sh"
+      - docs/adr/0002-versioned-scenario-contract.md
+      - docs/adr/0003-scenario-contract-ci.md
+      - docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md
+      - docs/workflow/plans/2026-08-29-versioned-scenario-contract.md
+
+permissions:
+  contents: read
+
+jobs:
+  scenario-contract:
+    name: Python 3.11
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify checked out commit
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.7"
+          python-version: "3.11"
+          enable-cache: false
+          checksum: "788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21"
+
+      - name: Run scenario contract tests
+        run: uv run --python 3.11 python -m unittest discover -s tests -v
+
+      - name: Build package
+        run: uv build
+
+      - name: Smoke installed wheel
+        run: >-
+          uv run --isolated --no-project
+          --with ./dist/bzr_live-0.1.0-py3-none-any.whl
+          python tests/smoke_installed.py tests/fixtures/minimal-scenario
+```
+
+The release and commit identities are resolved from the GitHub API, the uv release asset
+digest is recorded, and every `with:` key is compared with the `action.yml` at its immutable
+commit before this file is written. `actionlint` validates workflow syntax and path-glob
+structure but not input names for full-SHA action references. Do not substitute a tag.
+
+- [ ] **Step 3: Validate the workflow and unchanged product contract locally**
+
+```bash
+actionlint .github/workflows/scenario-contract.yml
+uv run --python 3.11 python -m unittest discover -s tests -v
+uv build
+uv run --isolated --no-project --with ./dist/bzr_live-0.1.0-py3-none-any.whl \
+  python tests/smoke_installed.py tests/fixtures/minimal-scenario
+python - <<'PY'
+from pathlib import Path
+import shutil
+
+for path in (Path("dist"), Path("build"), Path("src/bzr_live.egg-info")):
+    if path.exists():
+        shutil.rmtree(path)
+for path in Path(".").rglob("__pycache__"):
+    shutil.rmtree(path)
+PY
+git diff --check
+git status --short --untracked-files=all
+```
+
+Expected: every validation command exits 0; unittest reports 42 passing tests; the smoke prints
+the known digest and `completed`; generated build/cache paths are removed; `git diff --check`
+prints nothing; status names only the workflow and three reviewed design artifacts.
+
+- [ ] **Step 4: Commit the reviewed CI slice with a clean worktree**
+
+```bash
+git add .github/workflows/scenario-contract.yml \
+  docs/adr/0003-scenario-contract-ci.md \
+  docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md \
+  docs/workflow/plans/2026-08-29-versioned-scenario-contract.md
+git diff --cached --check
+git commit -m "ci: verify the scenario contract"
+git status --short --untracked-files=all
+```
+
+Expected: the commit succeeds and the final status command prints nothing. Forge records Task 5
+complete and returns to the quest caller; it does not push or publish.
+
+## Quest delivery checkpoint
+
+This checkpoint is quest-owned workflow, not a forge task. The quest caller must complete every
+step before handoff:
+
+1. Set issue #3 to `status:in-review`; run branch `$trial-loop`, security-relevant
+   `$detect-evil`, `$dispel`, and all guardrails. Apply only in-charter fixes and preserve the
+   existing `attempt > 999999` compatibility disclosure.
+2. Verify claim gate G4, then run `$deliver 3` to push
+   `feat/versioned-scenario-contract-3` to existing PR #10. Do not create a replacement PR and
+   do not merge.
+3. Resolve the full pushed `HEAD_SHA`. The workflow is absent from the default branch, so
+   discover it from commit-filtered pull-request runs and exact `workflowName`, never with
+   `--workflow scenario-contract.yml`. Wait at most 165 seconds for GitHub to create it:
+
+```bash
+HEAD_SHA=$(git rev-parse HEAD)
+RUN_ID=
+for delay in 0 15 30 60 60; do
+  if ((delay > 0)); then sleep "$delay"; fi
+  RUN_PAGE=$(gh run list --commit "$HEAD_SHA" --event pull_request --limit 100 \
+    --json databaseId,workflowName)
+  jq -e 'length < 100' <<<"$RUN_PAGE"
+  RUN_ID=$(jq -r \
+    'map(select(.workflowName == "Scenario contract")) | first | .databaseId // empty' \
+    <<<"$RUN_PAGE")
+  if [[ -n "$RUN_ID" ]]; then break; fi
+done
+test -n "$RUN_ID"
+RUN_STATE=$(gh run view "$RUN_ID" --json status,conclusion,url)
+for attempt in {1..50}; do
+  if [[ $(jq -r .status <<<"$RUN_STATE") == "completed" ]]; then break; fi
+  sleep 30
+  RUN_STATE=$(gh run view "$RUN_ID" --json status,conclusion,url)
+done
+jq -e '.status == "completed" and .conclusion == "success"' <<<"$RUN_STATE"
+```
+
+4. Take final compact snapshots and require both the workflow-specific success and the
+   campaign-wide acceptable run set:
+
+```bash
+ALL_RUNS=$(gh run list --commit "$HEAD_SHA" --limit 100 \
+  --json databaseId,workflowName,status,conclusion,headSha,url)
+SCENARIO_RUNS=$(jq -c '[.[] | select(.workflowName == "Scenario contract")]' <<<"$ALL_RUNS")
+jq -e --arg head "$HEAD_SHA" \
+  'length > 0 and all(.[]; .headSha == $head and .status == "completed" and .conclusion == "success")' \
+  <<<"$SCENARIO_RUNS"
+jq -e --arg head "$HEAD_SHA" \
+  'length > 0 and length < 100 and all(.[]; .headSha == $head and .status == "completed" and (.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral"))' \
+  <<<"$ALL_RUNS"
+RUN_LOG=$(mktemp)
+trap 'rm -f "$RUN_LOG"' EXIT
+gh run view "$RUN_ID" --log >"$RUN_LOG"
+rg -Fq "Ran 42 tests in" "$RUN_LOG"
+rg -Fq "OK (skipped=3)" "$RUN_LOG"
+rg -Fq "edde93f0c22b28e66b5fdc68bdfa4bdcfd664d26baab752398dd20715181f69d completed" \
+  "$RUN_LOG"
+rm -f "$RUN_LOG"
+trap - EXIT
+```
+
+The discovery phase is bounded at 165 seconds and the completion phase at 25 minutes. Failure
+to observe a successful completion parks the quest with the run URL and last state. The final
+predicates prove workflow identity, exact head, terminal conclusion, all-run acceptability, all
+42 discovered tests, the three expected Darwin-only skips, and the installed-wheel smoke output.
+
+5. Update PR #10's validation metadata with the exact local commands and Actions URL. Preserve
+   its existing `## Review exit payloads` section and the `attempt > 999999` compatibility line
+   byte-for-byte. Require the PR readback to remain `OPEN`, head branch
+   `feat/versioned-scenario-contract-3`, base `main`, `headRefOid == HEAD_SHA`,
+   `mergeStateStatus == CLEAN`, and `mergeable == MERGEABLE`.
+6. Publish one new head-bound `WORK:REVIEW` annotation through the quest publication helper,
+   including the retained compatibility disclosure. Verify the comment URL and the private
+   publication handoff before proceeding.
+7. Run `$return-to-town` on the no-merge path. Its verified issue #3 trajectory must name the
+   guardrails, PR #10, review-publication URL, exact remote branch SHA, and whole line
+   `MERGE-READY: #10 @ <HEAD_SHA>`. Leave the branch, PR, issue, and worktree in place.
+
+Select the handshake-bearing complete trajectory and independently bind its author to PR #10's
+author:
+
+```bash
+HANDSHAKE=$(gh issue view 3 --repo randomparity/bzr-live --json comments | \
+  jq --arg pr "10" --arg sha "$HEAD_SHA" \
+    '[.comments[]
+      | select(.body
+        | test("(?m)^<!-- WORK:TRAJECTORY -->$")
+          and test("(?m)^<!-- TRAJECTORY:COMPLETE -->$")
+          and test("(?m)^MERGE-READY: #" + $pr + " @ " + $sha + "$"))]
+     | last | {author: .author.login, body}')
+HANDSHAKE_AUTHOR=$(jq -r '.author // empty' <<<"$HANDSHAKE")
+PR_AUTHOR=$(gh pr view 10 --repo randomparity/bzr-live --json author --jq .author.login)
+test -n "$HANDSHAKE_AUTHOR"
+test "$HANDSHAKE_AUTHOR" = "$PR_AUTHOR"
+jq -e --arg sha "$HEAD_SHA" '.body | test("(?m)^MERGE-READY: #10 @ " + $sha + "$")' \
+  <<<"$HANDSHAKE"
+```
+
 ## Plan self-review
 
-- Tasks map every requirement in the linked specification: Task 1 owns strict resources/types, Task 2 assets/events/dependencies/digest, Task 3 journal/redaction, and Task 4 behavior/package smoke.
-- All borrowed interfaces are Python 3.11 standard-library calls (`os.open`, `dir_fd`, `os.link`, `os.replace`, `fcntl.flock`, `json`, `hashlib`, immutable dataclasses) and are available on the declared macOS/Linux project hosts.
+- Tasks map every specification requirement: Task 1 owns strict resources/types, Task 2
+  assets/events/dependencies/digest, Task 3 journal/redaction, Task 4 behavior/package smoke,
+  Task 5 the scenario workflow, and the quest delivery checkpoint actual Actions proof,
+  publication, PR-state verification, and no-merge handshake.
+- All borrowed product interfaces are Python 3.11 standard-library calls (`os.open`, `dir_fd`,
+  `os.link`, `os.replace`, `fcntl.flock`, `json`, `hashlib`, immutable dataclasses) and are
+  available on the declared macOS/Linux project hosts. The action inputs are present in the
+  inspected manifests at the pinned commits.
 - Every test step has an exact command and expected red/green result.
 - No task changes Compose, lifecycle, root entrypoints/config, `.env.example`, or `README.md`.
-- No deferrals, plugin framework, mutation handler, or compatibility shim is introduced.
+- No product deferral, plugin framework, mutation handler, or compatibility shim is introduced.

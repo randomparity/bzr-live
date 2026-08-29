@@ -1,0 +1,68 @@
+name: Scenario contract
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/scenario-contract.yml
+      - pyproject.toml
+      - uv.lock
+      - src/**
+      - tests/**
+      - "!tests/lifecycle_test.sh"
+      - docs/adr/0002-versioned-scenario-contract.md
+      - docs/adr/0003-scenario-contract-ci.md
+      - docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md
+      - docs/workflow/plans/2026-08-29-versioned-scenario-contract.md
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/scenario-contract.yml
+      - pyproject.toml
+      - uv.lock
+      - src/**
+      - tests/**
+      - "!tests/lifecycle_test.sh"
+      - docs/adr/0002-versioned-scenario-contract.md
+      - docs/adr/0003-scenario-contract-ci.md
+      - docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md
+      - docs/workflow/plans/2026-08-29-versioned-scenario-contract.md
+
+permissions:
+  contents: read
+
+jobs:
+  scenario-contract:
+    name: Python 3.11
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify checked out commit
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.7"
+          python-version: "3.11"
+          enable-cache: false
+          checksum: "788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21"
+
+      - name: Run scenario contract tests
+        run: uv run --python 3.11 python -m unittest discover -s tests -v
+
+      - name: Build package
+        run: uv build
+
+      - name: Smoke installed wheel
+        run: >-
+          uv run --isolated --no-project
+          --with ./dist/bzr_live-0.1.0-py3-none-any.whl
+          python tests/smoke_installed.py tests/fixtures/minimal-scenario
