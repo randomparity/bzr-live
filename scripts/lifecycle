@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMMAND=${1:-}
+case "$COMMAND" in
+  init|up|down|doctor|reset|clean) ;;
+  *)
+    printf 'usage: %s <init|up|down|doctor|reset|clean>\n' "$0" >&2
+    exit 64
+    ;;
+esac
+
+if [[ -n ${BZ_LIVE_ROOT:-} ]]; then
+  ROOT=$(cd "$BZ_LIVE_ROOT" && pwd -P) || {
+    printf '%s failed: cannot resolve BZ_LIVE_ROOT. Next action: verify the checkout path.\n' "$COMMAND" >&2
+    exit 1
+  }
+else
+  ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+fi
+ENV_FILE="$ROOT/.env"
+ACTIVE_TEMP=
+LOCK_HELD=0
+LOCK_DIR=
+
+cleanup() {
+  local status=$?
+  if [[ -n $ACTIVE_TEMP ]]; then
+    rm -f "$ACTIVE_TEMP"
+  fi
+  if [[ $LOCK_HELD == 1 ]]; then
+    rm -f "$LOCK_DIR/owner"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT HUP INT TERM
+
+die() {
+  local operation=$1 action=$2 detail=$3
+  printf '%s failed: %s. Next action: %s.\n' "$operation" "$detail" "$action" >&2
+  exit 1
+}
+
+require_command() {
+  local operation=$1 name=$2 action=$3
+  command -v "$name" >/dev/null 2>&1 || die "$operation" "$action" "$name is not installed"
+}
+
+check_prerequisites() {
+  local operation=$1 help
+  require_command "$operation" docker 'install Docker Desktop or Docker Engine with Compose v2'
+  require_command "$operation" openssl 'install OpenSSL and retry'
+  require_command "$operation" curl 'install curl and retry'
+  docker compose version >/dev/null 2>&1 ||
+    die "$operation" 'install the Docker Compose v2 plugin' 'docker compose is unavailable'
+  help=$(docker compose up --help 2>/dev/null) ||
+    die "$operation" 'repair Docker Compose and retry' 'cannot inspect docker compose up capabilities'
+  [[ $help == *--wait* ]] ||
+    die "$operation" 'upgrade Docker Compose to a release with up --wait' 'docker compose lacks --wait'
+  [[ $help == *--wait-timeout* ]] ||
+    die "$operation" 'upgrade Docker Compose to a release with up --wait-timeout' 'docker compose lacks --wait-timeout'
+}
+
+check_prerequisites "$COMMAND"
+ROOT_HASH=$(printf '%s' "$ROOT" | openssl dgst -sha256 -r) ||
+  die "$COMMAND" 'repair OpenSSL and retry' 'cannot hash the checkout path'
+ROOT_HASH=${ROOT_HASH%% *}
+[[ $ROOT_HASH =~ ^[0-9a-fA-F]{64}$ ]] ||
+  die "$COMMAND" 'repair OpenSSL and retry' 'checkout hash was malformed'
+PROJECT="bzr-live-${ROOT_HASH:0:12}"
+LOCK_DIR="${TMPDIR:-/tmp}/${PROJECT}.lifecycle.lock"
+COMPOSE=(docker compose --project-name "$PROJECT" --project-directory "$ROOT" --file "$ROOT/compose.yaml")
+
+acquire_lock() {
+  local owner='' owner_state='unknown'
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    if [[ -r $LOCK_DIR/owner ]] && read -r owner <"$LOCK_DIR/owner" && [[ $owner =~ ^[0-9]+$ ]]; then
+      if kill -0 "$owner" 2>/dev/null; then
+        owner_state="live PID $owner"
+      else
+        owner_state="stale PID $owner"
+      fi
+    fi
+    die "$COMMAND" "verify no lifecycle process is running, then remove $LOCK_DIR manually" \
+      "lifecycle lock is held ($owner_state) at $LOCK_DIR"
+  fi
+  LOCK_HELD=1
+  printf '%s\n' "$$" >"$LOCK_DIR/owner" 2>/dev/null || true
+}
+
+volume_exists() {
+  docker volume inspect "$1" >/dev/null 2>&1
+}
+
+init_unlocked() {
+  local admin_password db_password root_password
+  if [[ -f $ENV_FILE ]]; then
+    chmod 600 "$ENV_FILE" || die init 'fix the file ownership and retry' 'cannot enforce .env mode 0600'
+    return
+  fi
+  if volume_exists "${PROJECT}_mariadb-data" || volume_exists "${PROJECT}_bugzilla-data"; then
+    die init 'restore .env or run confirmed cleanup' 'project data exists but .env is missing'
+  fi
+
+  ACTIVE_TEMP=$(mktemp "$ROOT/.env.tmp.XXXXXX") ||
+    die init 'check checkout permissions and retry' 'cannot create the secret temporary file'
+  chmod 600 "$ACTIVE_TEMP" || die init 'check checkout permissions and retry' 'cannot protect the secret temporary file'
+  admin_password=$(openssl rand -hex 24) || die init 'repair OpenSSL and retry' 'admin secret generation failed'
+  db_password=$(openssl rand -hex 24) || die init 'repair OpenSSL and retry' 'database secret generation failed'
+  root_password=$(openssl rand -hex 24) || die init 'repair OpenSSL and retry' 'root secret generation failed'
+  case "$admin_password:$db_password:$root_password" in
+    *[!0-9a-f:]*) die init 'repair OpenSSL and retry' 'generated secrets were malformed' ;;
+  esac
+  [[ ${#admin_password} == 48 && ${#db_password} == 48 && ${#root_password} == 48 ]] ||
+    die init 'repair OpenSSL and retry' 'generated secrets had the wrong length'
+  [[ $admin_password != "$db_password" && $admin_password != "$root_password" && $db_password != "$root_password" ]] ||
+    die init 'repair OpenSSL and retry' 'generated secrets were not independent'
+
+  {
+    printf 'BZ_PORT=8080\n'
+    printf 'BZ_ADMIN_EMAIL=admin@bugzilla.test\n'
+    printf 'BZ_ADMIN_REALNAME=Test Administrator\n'
+    printf 'BZ_ADMIN_PASSWORD=%s\n' "$admin_password"
+    printf 'BZ_DB_PASSWORD=%s\n' "$db_password"
+    printf 'MARIADB_ROOT_PASSWORD=%s\n' "$root_password"
+    printf 'BZ_ALLOW_UNSAFE_UTF8_CONVERSION=0\n'
+  } >"$ACTIVE_TEMP" || die init 'check checkout disk space and retry' 'cannot write .env'
+  mv "$ACTIVE_TEMP" "$ENV_FILE" || die init 'check checkout permissions and retry' 'cannot install .env'
+  ACTIVE_TEMP=
+  printf 'Initialized private credentials in %s\n' "$ENV_FILE"
+}
+
+with_placeholder_secrets() {
+  BZ_ADMIN_PASSWORD=teardown-placeholder \
+  BZ_DB_PASSWORD=teardown-placeholder \
+  MARIADB_ROOT_PASSWORD=teardown-placeholder \
+    "${COMPOSE[@]}" "$@"
+}
+
+compose_down() {
+  if [[ -f $ENV_FILE ]]; then
+    "${COMPOSE[@]}" down "$@"
+  else
+    with_placeholder_secrets down "$@"
+  fi
+}
+
+case "$COMMAND" in
+  init)
+    acquire_lock
+    init_unlocked
+    ;;
+  up)
+    acquire_lock
+    init_unlocked
+    "${COMPOSE[@]}" up --build --detach --wait --wait-timeout "${BZ_WAIT_TIMEOUT:-300}" ||
+      die up 'run make doctor, then make down after collecting diagnostics' 'Compose did not become ready'
+    printf 'Bugzilla is ready on the configured loopback URL.\n'
+    ;;
+  down)
+    acquire_lock
+    compose_down --remove-orphans || die down 'run make doctor and retry' 'Compose teardown failed'
+    ;;
+  doctor)
+    "${COMPOSE[@]}" config --quiet ||
+      die doctor 'restore .env or run make init when no data volumes exist' 'Compose configuration is invalid'
+    "${COMPOSE[@]}" ps || die doctor 'verify the Docker daemon and retry' 'cannot inspect service state'
+    endpoint=$("${COMPOSE[@]}" port bugzilla 80 2>/dev/null) || {
+      "${COMPOSE[@]}" logs --tail 100 db bugzilla >&2 || true
+      die doctor 'run make up and inspect the bounded logs above' 'Bugzilla has no published port'
+    }
+    endpoint=${endpoint/0.0.0.0/127.0.0.1}
+    if ! curl --fail --silent --show-error "http://${endpoint}/" >/dev/null; then
+      "${COMPOSE[@]}" logs --tail 100 db bugzilla >&2 || true
+      die doctor 'inspect the bounded logs above, then retry or run make down' 'Bugzilla HTTP readiness failed'
+    fi
+    printf 'Doctor: Compose configuration, services, and %s are ready.\n' "$endpoint"
+    ;;
+  reset)
+    [[ ${CONFIRM_RESET:-} == 1 ]] ||
+      die reset 'rerun as CONFIRM_RESET=1 make reset after backing up retained data' 'destructive confirmation is missing'
+    acquire_lock
+    compose_down --volumes --remove-orphans ||
+      die reset 'run make doctor, then retry the confirmed reset' 'project reset failed'
+    ;;
+  clean)
+    [[ ${CONFIRM_CLEAN:-} == 1 ]] ||
+      die clean 'rerun as CONFIRM_CLEAN=1 make clean after backing up retained data' 'destructive confirmation is missing'
+    acquire_lock
+    compose_down --volumes --remove-orphans --rmi local ||
+      die clean 'restore .env if available, inspect Docker, and retry confirmed cleanup' 'project cleanup failed'
+    rm -f "$ENV_FILE" || die clean 'remove .env manually after verifying Compose cleanup' 'cannot remove .env'
+    ;;
+esac

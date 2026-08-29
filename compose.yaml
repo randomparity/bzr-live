@@ -1,0 +1,50 @@
+services:
+  db:
+    image: mariadb:10.6@sha256:92e50059ea0a5965a33ef751970eab37d421b91ebbd01ac909039cffe159e574
+    environment:
+      MARIADB_DATABASE: bugs
+      MARIADB_USER: bugs
+      MARIADB_PASSWORD: ${BZ_DB_PASSWORD:?run make init}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?run make init}
+    volumes:
+      - mariadb-data:/var/lib/mysql
+      - ./containers/mariadb/bugzilla.cnf:/etc/mysql/conf.d/bugzilla.cnf:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  bugzilla:
+    build:
+      context: .
+      dockerfile: containers/bugzilla/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      BZ_ADMIN_EMAIL: ${BZ_ADMIN_EMAIL:-admin@bugzilla.test}
+      BZ_ADMIN_PASSWORD: ${BZ_ADMIN_PASSWORD:?run make init}
+      BZ_ADMIN_REALNAME: ${BZ_ADMIN_REALNAME:-Test Administrator}
+      BZ_ALLOW_UNSAFE_UTF8_CONVERSION: ${BZ_ALLOW_UNSAFE_UTF8_CONVERSION:-0}
+      BZ_DB_HOST: db
+      BZ_DB_NAME: bugs
+      BZ_DB_PASSWORD: ${BZ_DB_PASSWORD:?run make init}
+      BZ_DB_PORT: "3306"
+      BZ_DB_USER: bugs
+      BZ_URLBASE: http://127.0.0.1:${BZ_PORT:-8080}/
+    ports:
+      - "127.0.0.1:${BZ_PORT:-8080}:80"
+    volumes:
+      - bugzilla-data:/var/www/html/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+volumes:
+  mariadb-data:
+  bugzilla-data:
