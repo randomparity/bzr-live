@@ -63,7 +63,7 @@ class JournalTests(unittest.TestCase):
             ),
             handler_output=freeze_planned({"ok": True}),
             exit_status=0,
-            resolved_ids=MappingProxyType({"bug:race": 42}),
+            resolved_ids=MappingProxyType({"bug:race": 42, "actor:ada": 7}),
             next_safe_action=next_action,
         )
 
@@ -116,6 +116,33 @@ class JournalTests(unittest.TestCase):
         self.assertIsInstance(first, CompletedRecord)
         self.assertEqual(latest.attempt, 2)  # type: ignore[union-attr]
         self.assertEqual(first.next_safe_action, "retry")  # type: ignore[union-attr]
+
+    def test_rejects_invalid_retry_history_when_reopened(self) -> None:
+        with JournalStore(self.state) as store:
+            store.write_in_flight(self.in_flight())
+            store.replace_completed(self.completed(next_action="retry"))
+            store.write_in_flight(self.in_flight(attempt=2))
+            store.replace_completed(self.completed(attempt=2, next_action="retry"))
+        first_path = self.state / "comment.000001.json"
+        document = json.loads(first_path.read_text(encoding="utf-8"))
+        document["next_safe_action"] = "advance"
+        first_path.write_text(json.dumps(document), encoding="utf-8")
+        first_path.chmod(0o600)
+        with JournalStore(self.state) as store:
+            with self.assertRaises(ScenarioValidationError):
+                store.read("comment")
+        document["next_safe_action"] = "retry"
+        first_path.write_text(json.dumps(document), encoding="utf-8")
+        first_path.chmod(0o600)
+        second_path = self.state / "comment.000002.json"
+        second_document = json.loads(second_path.read_text(encoding="utf-8"))
+        second_document["scenario_digest"] = "b" * 64
+        second_path.write_text(json.dumps(second_document), encoding="utf-8")
+        second_path.chmod(0o600)
+        with JournalStore(self.state) as store:
+            with self.assertRaises(ScenarioValidationError):
+                store.read("comment")
+
 
     def test_rejects_gaps_mismatches_and_completed_overwrite(self) -> None:
         with JournalStore(self.state) as store:

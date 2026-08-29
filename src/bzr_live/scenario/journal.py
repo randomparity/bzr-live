@@ -405,7 +405,7 @@ class CompletedRecord:
             if not isinstance(key, str) or key.count(":") != 1:
                 raise _journal_error("$.resolved_ids", "keys must be typed references")
             kind, name = key.split(":", 1)
-            if kind not in {"bug", "attachment"} or _NAME.fullmatch(name) is None:
+            if kind not in _REFERENCE_KINDS or _NAME.fullmatch(name) is None:
                 raise _journal_error(f"$.resolved_ids.{key}", "invalid resolved identity")
             if type(value) is not int or value <= 0:
                 raise _journal_error(f"$.resolved_ids.{key}", "must be a positive integer")
@@ -413,6 +413,25 @@ class CompletedRecord:
         object.__setattr__(self, "resolved_ids", MappingProxyType(resolved))
         if self.next_safe_action not in _NEXT_ACTIONS:
             raise _journal_error("$.next_safe_action", "unsupported next action")
+
+
+def _validate_retry_transition(
+    prior: InFlightRecord | CompletedRecord,
+    current: InFlightRecord | CompletedRecord,
+) -> None:
+    if not isinstance(prior, CompletedRecord) or prior.next_safe_action != "retry":
+        raise _journal_error("$.attempt", "prior attempt does not permit retry")
+    for field in (
+        "scenario_digest",
+        "event",
+        "actor",
+        "action_class",
+        "expected_postcondition",
+        "reconciliation_marker",
+    ):
+        if getattr(current, field) != getattr(prior, field):
+            raise _journal_error(f"$.{field}", "retry identity does not match prior attempt")
+
 
 
 def _reference_json(reference: Reference) -> dict[str, str]:
@@ -746,6 +765,8 @@ class JournalStore:
         for index, record in enumerate(records, 1):
             if record.event != event or record.attempt != index:
                 raise _journal_error("$", "attempt filename does not match record identity")
+        for prior, current in zip(records, records[1:]):
+            _validate_retry_transition(prior, current)
         return records
 
     def read(self, event: str, attempt: int | None = None) -> InFlightRecord | CompletedRecord | None:
@@ -792,15 +813,7 @@ class JournalStore:
             if records:
                 raise _journal_error("$.attempt", "attempt already exists")
         else:
-            prior = records[-1]
-            if not isinstance(prior, CompletedRecord) or prior.next_safe_action != "retry":
-                raise _journal_error("$.attempt", "prior attempt does not permit retry")
-            for field in (
-                "scenario_digest", "event", "actor", "action_class",
-                "expected_postcondition", "reconciliation_marker",
-            ):
-                if getattr(record, field) != getattr(prior, field):
-                    raise _journal_error(f"$.{field}", "retry identity does not match prior attempt")
+            _validate_retry_transition(records[-1], record)
         target = self._filename(record.event, record.attempt)
         temporary = self._write_temp(_record_json(record))
         try:
