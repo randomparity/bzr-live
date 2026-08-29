@@ -107,25 +107,30 @@ Implement `model.py` with frozen, slotted dataclasses, `MappingProxyType`-backed
 In `loader.py` implement small functions with one responsibility:
 
 ```python
+class _Pairs(list[tuple[str, object]]): ...
 def _load_json(root_fd: int, basename: str, source: str) -> dict[str, object]: ...
-def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]: ...
+def _decode_pairs(value: object, source: str, field: str) -> object: ...
 def _object(value: object, source: str, field: str, allowed: set[str], required: set[str]) -> dict[str, object]: ...
 def _reference(value: object, expected: str, source: str, field: str) -> Reference: ...
 def _validate_resources(document: object, source: str) -> tuple[tuple[PlannedResource, ...], tuple[PlannedResource, ...], dict[str, PlannedResource]]: ...
 def load_scenario(path: str | Path) -> ValidatedScenario: ...
 ```
 
-Use `json.loads` with an object-pairs hook that raises on duplicate keys, `parse_float` and
-`parse_constant` callbacks that raise, explicit `type(value) is int/bool` checks, and closed
-field sets per resource kind. Open the scenario directory before any document read; retain
-that descriptor and open the three required basenames relative to it with `O_NOFOLLOW`,
-requiring a regular `fstat` before decoding from the descriptor. Tests cover a symlink and a
-non-regular file at each basename. Validate emails, select catalogs, typed dependencies, flag
-target/scopes, duplicate lists, and cross-scope product/component rules. Build a stable Kahn
-plan; version 1 is acyclic by kind, but every missing/wrong-kind dependency fails before a
-plan returns. For Task 1, accept only empty asset declarations and an empty event stream, and
-compute the documented canonical digest for that accepted subset. Task 2 extends the same
-normalization path to non-empty assets and events without changing the public contract.
+Use `json.loads` with an object-pairs hook that retains each object as `_Pairs`, rather than
+raising during the bottom-up decoder callback. Recursively convert those pair lists while
+carrying the enclosing object key or array index in `field`; reject a duplicate at that
+complete path. Use `parse_float` and `parse_constant` callbacks that raise, explicit
+`type(value) is int/bool` checks, and closed field sets per resource kind. Open the scenario
+directory before any document read; retain that descriptor and open the three required
+basenames relative to it with `O_NOFOLLOW | O_NONBLOCK`, requiring a regular `fstat` before
+decoding from the descriptor. Tests cover a symlink, FIFO, and other non-regular file at each
+basename, plus nested duplicate keys in resources and events with exact paths. Validate emails,
+select catalogs, typed dependencies, flag target/scopes, duplicate lists, and cross-scope
+product/component rules. Build a stable Kahn plan; version 1 is acyclic by kind, but every
+missing/wrong-kind dependency fails before a plan returns. For Task 1, accept only empty asset
+declarations and an empty event stream, and compute the documented canonical digest for that
+accepted subset. Task 2 extends the same normalization path to non-empty assets and events
+without changing the public contract.
 
 - [ ] **Step 5: Run resource tests and capture generated project state**
 
@@ -190,9 +195,10 @@ Expected: nonzero exit because Task 1 does not yet accept assets/events.
 - [ ] **Step 3: Implement descriptor-confined assets and event validators**
 
 Reuse the retained scenario-directory descriptor for document and asset work. Walk asset
-components with `dir_fd`, opening ancestors as directories and the final file
-read-only/no-follow; require regular `fstat`, read from the descriptor, checksum once, and
-retain bytes. Never reopen an authored path.
+components with `dir_fd`, opening ancestors as directories and the final file with
+`O_RDONLY | O_NOFOLLOW | O_NONBLOCK`; require regular `fstat`, read from the descriptor,
+checksum once, and retain bytes. Never reopen an authored path. Cover a final FIFO explicitly
+so validation proves it rejects rather than blocks.
 
 Implement one validator per action behind a fixed registry whose entry holds recovery class and validator function. Normalize defaults exactly as the spec states. Keep created bug product/component state for update and flag scope checks. Generate planned dependencies by walking schema-declared fields, not input mapping order. Construct exact postconditions and server aliases. Reject every malformed condition before returning any `ValidatedScenario`.
 
@@ -214,7 +220,7 @@ Expected: nonzero exit until canonical normalization/digest code is complete.
 
 - [ ] **Step 7: Implement canonical normalization and digest**
 
-Default-expand manifest/resources/events, sort manifest and envelope asset declarations by path, preserve resource/event order, recursively serialize typed references, use `json.dumps(..., sort_keys=True, ensure_ascii=False, separators=(",", ":"))`, encode UTF-8 with no newline, and hash with SHA-256. Return the completed immutable `ValidatedScenario`; remove every Task 1 temporary placeholder.
+Default-expand manifest/resources/events, sort manifest and envelope asset declarations by path, preserve resource/event order, recursively serialize typed references, use `json.dumps(..., sort_keys=True, ensure_ascii=False, separators=(",", ":"))`, encode UTF-8 with no newline, and hash with SHA-256. Return the completed immutable `ValidatedScenario` through the normalization path established in Task 1.
 
 - [ ] **Step 8: Run Task 2 tests**
 
@@ -394,12 +400,28 @@ git commit -m "test: verify installed scenario contract"
 If Steps 1–4 expose a source/test defect, commit that correction separately with a logical
 `fix:` commit. With all corrections and proof files committed, rerun Steps 1–4 in order
 against `HEAD`, including the proof that exposed any defect. After the successful installed
-smoke and capability test, remove `dist/` and verify it was never tracked.
+smoke and capability test, remove only generated build/cache paths and require a clean
+worktree:
 
+```bash
+python - <<'PY'
+from pathlib import Path
+import shutil
+
+for path in (Path("dist"), Path("build"), Path("src/bzr_live.egg-info")):
+    if path.exists():
+        shutil.rmtree(path)
+for path in Path(".").rglob("__pycache__"):
+    shutil.rmtree(path)
+PY
+git status --short --untracked-files=all
+```
+
+Expected: the status command prints nothing; the tracked `uv.lock` remains.
 ## Plan self-review
 
 - Tasks map every requirement in the linked specification: Task 1 owns strict resources/types, Task 2 assets/events/dependencies/digest, Task 3 journal/redaction, and Task 4 behavior/package smoke.
 - All borrowed interfaces are Python 3.11 standard-library calls (`os.open`, `dir_fd`, `os.link`, `os.replace`, `fcntl.flock`, `json`, `hashlib`, immutable dataclasses) and are available on the declared macOS/Linux project hosts.
 - Every test step has an exact command and expected red/green result.
 - No task changes Compose, lifecycle, root entrypoints/config, `.env.example`, or `README.md`.
-- No deferrals, placeholders, plugin framework, mutation handler, or compatibility shim is introduced.
+- No deferrals, plugin framework, mutation handler, or compatibility shim is introduced.
