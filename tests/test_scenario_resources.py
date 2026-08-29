@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bzr_live.scenario import Reference, ScenarioValidationError, load_scenario
+from bzr_live.scenario import Reference, ScenarioValidationError, freeze_planned, load_scenario
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "minimal-scenario"
@@ -130,6 +130,18 @@ class ScenarioResourceTests(unittest.TestCase):
         resources[7]["values"] = ["high", "high"]
         self.write_json("resources.json", {"format_version": 1, "resources": resources})
         self.assert_invalid("resources.json", "$.resources[7].values")
+
+    def test_rejects_non_string_enums_and_planned_mapping_keys(self) -> None:
+        resources = self.valid_resources()
+        resources[7]["field_type"] = ["single-select"]
+        self.write_json("resources.json", {"format_version": 1, "resources": resources})
+        self.assert_invalid("resources.json", "$.resources[7].field_type")
+        resources = self.valid_resources()
+        resources[2]["target"] = {"value": "bug"}
+        self.write_json("resources.json", {"format_version": 1, "resources": resources})
+        self.assert_invalid("resources.json", "$.resources[2].target")
+        with self.assertRaises(TypeError):
+            freeze_planned({1: "number", "1": "string"})
 
     @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "requires no-follow opens")
     def test_required_documents_reject_symlinks(self) -> None:

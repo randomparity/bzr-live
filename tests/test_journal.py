@@ -171,19 +171,22 @@ class JournalTests(unittest.TestCase):
             "set-cookie": "cookie-value",
             "message": "redacted<actredacted",
             "nested": ["safe-act-value"],
+            "prefix-LEAK": "key text",
         }
         completed = self.completed()
         object.__setattr__(completed, "handler_output", freeze_planned(output))
         with JournalStore(self.state) as store:
-            store.write_in_flight(self.in_flight(), known_secrets=("redacted", "<", "act"))
-            store.replace_completed(completed, known_secrets=("redacted", "<", "act"))
+            store.write_in_flight(self.in_flight(), known_secrets=("redacted", "<", "act", "LEAK"))
+            store.replace_completed(completed, known_secrets=("redacted", "<", "act", "LEAK"))
             stored = store.read("comment")
         self.assertIsInstance(stored, CompletedRecord)
         redacted = stored.handler_output  # type: ignore[union-attr]
-        for key in output.keys() - {"message", "nested"}:
+        for key in output.keys() - {"message", "nested", "prefix-LEAK"}:
             self.assertIsNone(redacted[key])
         self.assertEqual(redacted["message"], "")
         self.assertEqual(redacted["nested"], ("safe--value",))
+        self.assertNotIn("prefix-LEAK", redacted)
+        self.assertEqual(redacted["prefix-"], "key text")
         self.assertEqual(stored.event, "comment")  # type: ignore[union-attr]
 
     def test_rejects_known_secrets_in_structural_fields_without_echoing(self) -> None:
@@ -192,6 +195,32 @@ class JournalTests(unittest.TestCase):
             with self.assertRaises(ScenarioValidationError) as caught:
                 store.write_in_flight(self.in_flight(), known_secrets=(secret,))
         self.assertNotIn(secret, str(caught.exception))
+        structural = freeze_planned(
+            {
+                "action": "bug.comment",
+                "target": Reference("bug", "race"),
+                "values": {"prefix-SECRET": "value"},
+                "marker": "bzr-live:smoke:comment",
+            }
+        )
+        record = self.in_flight()
+        object.__setattr__(record, "expected_postcondition", structural)
+        with JournalStore(self.state) as store:
+            with self.assertRaises(ScenarioValidationError):
+                store.write_in_flight(record, known_secrets=("SECRET",))
+
+    def test_rejects_opaque_key_collisions_created_by_redaction(self) -> None:
+        completed = self.completed()
+        object.__setattr__(
+            completed,
+            "handler_output",
+            freeze_planned({"prefix-LEAK": 1, "prefix-": 2}),
+        )
+        with JournalStore(self.state) as store:
+            store.write_in_flight(self.in_flight())
+            with self.assertRaises(ScenarioValidationError):
+                store.replace_completed(completed, known_secrets=("LEAK",))
+            self.assertIsInstance(store.read("comment"), InFlightRecord)
 
     def test_rejects_invalid_constructor_values(self) -> None:
         with self.assertRaises(ScenarioValidationError):

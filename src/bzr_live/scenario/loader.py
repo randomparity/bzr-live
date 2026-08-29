@@ -232,7 +232,7 @@ def _parse_resource(item: object, index: int, source: str) -> PlannedResource:
         dependencies.append(product)
     elif kind == "custom-field":
         field_type = obj["field_type"]
-        if field_type not in {"text", "single-select", "multi-select"}:
+        if not isinstance(field_type, str) or field_type not in {"text", "single-select", "multi-select"}:
             raise _error(source, f"{field}.field_type", "unsupported custom-field type")
         values = _unique_strings(obj.get("values", []), source, f"{field}.values", nonempty=True)
         if field_type == "text" and values:
@@ -243,7 +243,7 @@ def _parse_resource(item: object, index: int, source: str) -> PlannedResource:
     elif kind == "flag-type":
         data["description"] = _text(obj["description"], source, f"{field}.description")
         target = obj["target"]
-        if target not in {"bug", "attachment"}:
+        if not isinstance(target, str) or target not in {"bug", "attachment"}:
             raise _error(source, f"{field}.target", "must be bug or attachment")
         products = _unique_refs(obj.get("products", []), "product", source, f"{field}.products")
         components = _unique_refs(obj.get("components", []), "component", source, f"{field}.components")
@@ -413,7 +413,7 @@ def _parse_events(content: bytes) -> list[tuple[str, dict[str, object]]]:
     except UnicodeDecodeError:
         raise _error("events.jsonl", "$", "input is not valid UTF-8") from None
     result: list[tuple[str, dict[str, object]]] = []
-    for line_number, line in enumerate(text.splitlines(), 1):
+    for line_number, line in enumerate(text.split("\n"), 1):
         if not line.strip():
             continue
         source = f"events.jsonl:{line_number}"
@@ -748,7 +748,7 @@ def _validate_events(
             bug = _resolve(payload["bug"], "bug", source, "$.payload.bug", available)
             flag_type = _resolve(payload["flag_type"], "flag-type", source, "$.payload.flag_type", available)
             status_value = payload["status"]
-            if status_value not in {"?", "+", "-", "X"}:
+            if not isinstance(status_value, str) or status_value not in {"?", "+", "-", "X"}:
                 raise _error(source, "$.payload.status", "unsupported flag status")
             requestee_raw = payload.get("requestee")
             requestee = None if requestee_raw is None else _resolve(requestee_raw, "actor", source, "$.payload.requestee", available)

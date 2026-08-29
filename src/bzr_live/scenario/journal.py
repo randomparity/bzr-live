@@ -252,12 +252,15 @@ def _redact_opaque(value: JsonValue, known_secrets: tuple[str, ...]) -> JsonValu
     if isinstance(value, tuple):
         return tuple(_redact_opaque(item, known_secrets) for item in value)
     if isinstance(value, Mapping):
-        return MappingProxyType(
-            {
-                key: None if _sensitive_key(key) else _redact_opaque(item, known_secrets)
-                for key, item in value.items()
-            }
-        )
+        redacted: dict[str, JsonValue] = {}
+        for key, item in value.items():
+            redacted_key = _remove_secrets(key, known_secrets)
+            if redacted_key in redacted:
+                raise _journal_error("$.handler_output", "redaction creates a duplicate mapping key")
+            redacted[redacted_key] = (
+                None if _sensitive_key(key) else _redact_opaque(item, known_secrets)
+            )
+        return MappingProxyType(redacted)
     return value
 
 
@@ -267,19 +270,26 @@ def _contains_secret(value: object, known_secrets: tuple[str, ...]) -> bool:
     if isinstance(value, Reference):
         return _contains_secret(value.name, known_secrets)
     if isinstance(value, Mapping):
-        return any(_contains_secret(item, known_secrets) for item in value.values())
+        return any(
+            _contains_secret(key, known_secrets) or _contains_secret(item, known_secrets)
+            for key, item in value.items()
+        )
     if isinstance(value, (tuple, list)):
         return any(_contains_secret(item, known_secrets) for item in value)
     return False
 
 def _common_structural_values(record: InFlightRecord | CompletedRecord) -> tuple[object, ...]:
+    postcondition = record.expected_postcondition
     return (
         record.scenario_digest,
         record.event,
         record.attempt,
         record.actor,
         record.action_class,
-        record.expected_postcondition,
+        postcondition["action"],
+        postcondition["target"],
+        postcondition["values"],
+        postcondition["marker"],
         record.reconciliation_marker,
     )
 

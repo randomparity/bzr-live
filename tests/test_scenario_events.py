@@ -170,6 +170,19 @@ class ScenarioEventTests(unittest.TestCase):
         self.events[7]["payload"]["obsolete"] = 1  # type: ignore[index]
         self.assert_invalid("$.payload.obsolete")
 
+    def test_rejects_non_string_flag_status(self) -> None:
+        self.events[6]["payload"]["status"] = ["?"]  # type: ignore[index]
+        self.assert_invalid("$.payload.status")
+
+    def test_preserves_unicode_line_separators_inside_json_strings(self) -> None:
+        self.events[0]["payload"]["summary"] = "before\u2028after"  # type: ignore[index]
+        (self.root / "events.jsonl").write_text(
+            "\n".join(json.dumps(event, ensure_ascii=False) for event in self.events) + "\n",
+            encoding="utf-8",
+        )
+        scenario = load_scenario(self.root)
+        self.assertEqual(scenario.events[0].payload["summary"], "before\u2028after")
+
 
 if __name__ == "__main__":
     unittest.main()

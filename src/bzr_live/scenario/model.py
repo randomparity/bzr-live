@@ -72,7 +72,12 @@ def freeze_planned(value: object) -> PlannedValue:
     if isinstance(value, (list, tuple)):
         return tuple(freeze_planned(item) for item in value)
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): freeze_planned(item) for key, item in value.items()})
+        frozen: dict[str, PlannedValue] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("planned mapping keys must be strings")
+            frozen[key] = freeze_planned(item)
+        return MappingProxyType(frozen)
     raise TypeError(f"unsupported planned value type: {type(value).__name__}")
 
 
