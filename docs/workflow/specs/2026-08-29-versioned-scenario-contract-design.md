@@ -42,9 +42,10 @@ epic's separately owned narrow custom-field REST adapter as an explicit exceptio
    Atomically install each numbered in-flight attempt before mutation, atomically replace it
    with a completed attempt after `bzr` returns, and retain completed attempts across a
    guarded retry.
-8. Never persist credential environment values. Use an allowlisted invocation shape,
-   recursively replace sensitive-key values, and scrub every caller-supplied known secret
-   wherever it occurs in invocation metadata or structured output.
+8. Never persist credential environment values or rewrite journal identity/recovery fields.
+   Reject known secrets in structural metadata and expected postconditions before mutation.
+   Scrub sensitive-key values and known-secret substrings only from opaque invocation
+   arguments and handler output before completion is persisted.
 9. Use Python 3.11 or later, Setuptools 84.0.0 as the pinned build backend, and no runtime or
    test dependencies outside the standard library.
 
@@ -335,7 +336,9 @@ class JournalStore:
     def close(self) -> None: ...
     def __enter__(self) -> JournalStore: ...
     def __exit__(self, *exc_info: object) -> None: ...
-    def write_in_flight(self, record: InFlightRecord) -> Path: ...
+    def write_in_flight(
+        self, record: InFlightRecord, *, known_secrets: Collection[str] = ()
+    ) -> Path: ...
     def replace_completed(
         self, record: CompletedRecord, *, known_secrets: Collection[str] = ()
     ) -> Path: ...
@@ -374,13 +377,21 @@ read-before-replace check concurrently.
 Invocation metadata is structurally allowlisted to mutation boundary, operation, argument
 strings, and credential environment _variable names_; environment values have no input field.
 The boundary is `bzr` except for `bug.custom-field-set`, whose later handler may use only the
-epic-authorized `bugzilla-rest-custom-field` adapter. Before serialization, invocation and
-`handler_output` are copied through recursive redaction. Keys compare case-insensitively
-after replacing `-` with `_`; `api_key`, `apikey`, `token`, `password`, `secret`,
-`authorization`, and `cookie` values become `"<redacted>"` at any depth. Every non-empty
-`known_secrets` string is also replaced wherever it occurs within any string value, including
-generic messages and arguments. The secret collection is neither retained nor serialized.
-Tests use recognizable values and require none to occur in bytes.
+epic-authorized `bugzilla-rest-custom-field` adapter. Protocol identity and recovery fields
+are never redacted: scenario digest, event, attempt, actor, action class, expected
+postcondition, marker, mutation boundary, operation, environment names, exit status, resolved
+IDs, and next safe action remain byte-stable. `write_in_flight` rejects any non-empty known
+secret found recursively in its structural fields or expected postcondition, before the
+caller may mutate. `replace_completed` rejects a secret in completion-only structural fields
+and leaves the in-flight record intact.
+
+Redaction copies only `invocation.arguments` and `handler_output`. Within those opaque values,
+keys compare case-insensitively after replacing `-` with `_`; `api_key`, `apikey`, `token`,
+`password`, `secret`, `authorization`, and `cookie` values become `"<redacted>"`. Every
+non-empty `known_secrets` string is also replaced wherever it occurs within opaque strings,
+including generic messages and arguments. The collection is neither retained nor serialized.
+Tests use recognizable values and require none to occur in bytes while protocol identities
+remain unchanged.
 
 The journal makes local write transitions atomic across runner process termination. File and
 directory `fsync` request persistence but do not promise survival of an operating-system
@@ -418,8 +429,9 @@ Therefore a caller cannot begin mutation during validation. Later code must fini
 The untrusted party is a local scenario author or a modified checkout consumed by an
 operator or CI job. The local operator account is trusted to select the state directory and
 run the later executor, but other local users are not trusted to read its secrets. The later
-runner is trusted to pass structured metadata and to keep credential values out of its
-invocation mapping; redaction is defense in depth for key-labelled values.
+runner is trusted to supply the complete known-secret collection and never place credential
+environment values in metadata; structural-field rejection and opaque-payload redaction
+enforce that contract before each atomic transition.
 
 ### Controls
 
@@ -433,9 +445,9 @@ invocation mapping; redaction is defense in depth for key-labelled values.
   does not claim hostile multi-tenant denial-of-service resistance.
 - Exact directory/file modes, no symlink following, same-directory atomic replacement, and
   fsync control disclosure and torn state on supported local filesystems.
-- Recursive sensitive-key redaction and the prohibition on credential environment values
-  prevent known credential shapes from reaching disk. Errors identify fields but never echo
-  sensitive values.
+- Structural-field secret rejection keeps protocol identity byte-stable; sensitive-key and
+  known-secret redaction is limited to opaque arguments/output, and credential environment
+  values have no journal field. Errors identify fields but never echo sensitive values.
 - No subprocess/network capability preserves the existing `bzr` mutation boundary.
 
 ### Explicitly out of scope
@@ -463,12 +475,14 @@ Focused tests must prove:
   event field, event order, asset declaration, and asset byte mutation changes it;
 - all supported actions expose the declared recovery class, marker, postcondition, and output;
 - state permissions are exact, in-flight install refuses overwrite, completion requires a
-  matching in-flight record, completed records cannot be replaced, and reads reject unsafe
-  files;
+  matching attempt, retry requires the latest completed attempt to authorize it, completed
+  history remains immutable, concurrent stores fail, and reads reject unsafe files;
 - controlled failure before replacement leaves the valid in-flight record, controlled failure
   after replacement leaves the completed record, and temporary files are cleaned;
-- nested sensitive values are absent from completed-record bytes and non-sensitive values
-  remain;
+- known secrets in structural fields or expected postconditions are rejected without
+  installing/replacing a record; protocol identities remain byte-stable; and nested sensitive
+  values or known-secret substrings are absent only from opaque completed payloads while
+  non-sensitive values remain;
 - source inspection plus import behavior confirms the package never imports or invokes a
   mutation/network subprocess surface.
 

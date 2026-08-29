@@ -59,9 +59,13 @@ symlinks, malformed records, and mismatch fails closed.
 The completed record names its mutation boundary and contains an allowlisted invocation
 shape, structured handler output, exit status, resolved IDs, and the next safe action. The
 boundary is `bzr` except for the explicit custom-field adapter value. Credential environment
-values are never accepted as invocation metadata. Before persistence, sensitive-key values
-are replaced recursively and every caller-supplied known secret is replaced wherever it
-occurs in any string. The secret list is used only during redaction and is never serialized.
+values are never accepted as invocation metadata. Protocol identity and recovery fields are
+never redacted or rewritten: before installing the in-flight intent, the store rejects a
+known secret occurring in any of them or in the expected postcondition. Completion likewise
+rejects secret-bearing structural metadata and preserves the in-flight record. Redaction is
+limited to opaque invocation arguments and handler output: sensitive-key values are replaced
+recursively there, and every caller-supplied non-empty known secret is replaced wherever it
+occurs in those opaque strings. The secret list is never retained or serialized.
 
 The package performs no Bugzilla mutation, network request, or subprocess invocation. Later
 runner code may execute only from a `ValidatedScenario` and must delegate supported
