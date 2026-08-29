@@ -60,6 +60,13 @@ class Reference:
     name: str
 
 @dataclass(frozen=True)
+class Asset:
+    name: str
+    path: str
+    sha256: str
+    content: bytes
+
+@dataclass(frozen=True)
 class PlannedResource:
     kind: str
     name: str
@@ -94,7 +101,9 @@ load_scenario(path: str | Path) -> ValidatedScenario
 
 `JsonValue` is the closed recursive set `None | bool | int | str | tuple[JsonValue, ...] |
 Mapping[str, JsonValue]`. Returned mappings are read-only and returned sequences are tuples.
-The implementation may use private mutable dictionaries while decoding but none escape.
+Validated assets retain the exact immutable `bytes` that produced their checksum; later
+handlers must consume `Asset.content` and must not reopen the author-controlled path. The
+implementation may use private mutable dictionaries while decoding but none escape.
 Validation errors render as `<source>:<field>: <message>`, retaining the file and JSON path or
 JSONL line that an author must fix.
 
@@ -134,8 +143,11 @@ to an empty list. Asset object keys are exactly `name`, `path`, and `sha256`.
 Asset names are unique. Asset paths are unique canonical relative POSIX paths: no empty
 segments, `.`, `..`, backslashes, absolute paths, drive prefixes, or segment outside the
 initial `assets/`. Each path must resolve beneath the scenario directory without traversing
-a symlink. The target must be one regular file. The declared checksum must be 64 lowercase
-hex digits and must equal the file's SHA-256 before event validation succeeds.
+a symlink. The target must be one regular file. The loader opens it without following
+symlinks, reads its bytes once, verifies that the declared 64-character lowercase SHA-256
+matches, and retains those immutable bytes in `Asset.content`. Event validation and every
+later attachment handler use that snapshot, closing the check-to-use gap created by reopening
+the path after validation.
 
 ### `resources.json`
 
@@ -308,6 +320,9 @@ class CompletedRecord:
 
 class JournalStore:
     def __init__(self, state_dir: str | Path) -> None: ...
+    def close(self) -> None: ...
+    def __enter__(self) -> JournalStore: ...
+    def __exit__(self, *exc_info: object) -> None: ...
     def write_in_flight(self, record: InFlightRecord) -> Path: ...
     def replace_completed(self, record: CompletedRecord) -> Path: ...
     def read(self, event: str) -> InFlightRecord | CompletedRecord | None: ...
@@ -320,16 +335,22 @@ are positive integers. `next_safe_action` is closed to the four values above.
 
 `JournalStore` creates only an absent state directory with mode 0700. It rejects existing
 state directories whose permission bits are not exactly 0700, and rejects non-directories or
-symlinks. Event files are `<event>.json`, which is safe because event names are slugs. Reads
-reject non-regular files, symlinks, any permission bits other than 0600, malformed/unknown
-record fields, and unsupported journal versions.
+symlinks. It opens an exact mode-0600 `.lock` regular file without following symlinks and
+takes a non-blocking exclusive `flock` for the store's lifetime; a concurrent store fails
+closed. `close()` releases the descriptor, and context-manager use is supported. Event files
+are `<event>.json`, which is safe because event names are slugs. Reads reject non-regular
+files, symlinks, any permission bits other than 0600, malformed/unknown record fields, and
+unsupported journal versions.
 
-A write serializes canonical JSON plus one newline to a mode-0600 same-directory temporary
-regular file, flushes and `fsync`s it, then calls `os.replace` and `fsync`s the directory.
-`write_in_flight` refuses to overwrite any existing event path. `replace_completed` first
-reads a valid in-flight record and requires matching scenario digest, event, actor, action
-class, and marker; it then atomically replaces that path. Temporary files are removed after
-any pre-replace failure. No completed record can be replaced.
+A transition serializes canonical JSON plus one newline to a mode-0600 same-directory
+temporary regular file, flushes and `fsync`s it. For absent to `in_flight`, `os.link` installs
+the fully written inode at the event path without replacing an existing name, then the
+temporary name is unlinked. For `in_flight` to `completed`, the store first reads a valid
+in-flight record and requires matching scenario digest, event, actor, action class, and
+marker, then calls `os.replace`. Both transitions `fsync` the containing directory after the
+directory changes. Temporary files are removed after any pre-install failure. A completed
+record, an existing in-flight install, and every mismatch are rejected. The exclusive store
+lock prevents two compliant writers from passing the read-before-replace check concurrently.
 
 Before serialization, invocation and `bzr_output` are copied through recursive redaction.
 Keys compare case-insensitively after replacing `-` with `_`; `api_key`, `apikey`, `token`,
