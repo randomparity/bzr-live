@@ -401,27 +401,32 @@ excluding booleans; resolved ID keys are typed references and values are positiv
 Both constructors and store reads/writes reject an action class outside `RecoveryClass`;
 `next_safe_action` is closed to the four values above.
 
-`JournalStore` creates only an absent state directory with mode 0700. It rejects existing
-state directories whose permission bits are not exactly 0700, and rejects non-directories or
-symlinks. It opens an exact mode-0600 `.lock` regular file without following symlinks and
-takes a non-blocking exclusive `flock` for the store's lifetime; a concurrent store fails
-closed. `close()` releases the descriptor, and context-manager use is supported. Attempt
-files are `<event>.<attempt-as-six-digits>.json`. Reads reject non-regular files, symlinks,
-permission bits other than 0600, malformed/unknown fields, unsupported journal versions, and
-gaps or conflicting attempts. With no attempt argument, `read` returns the latest attempt.
+`JournalStore` creates only an absent state directory with mode 0700. It opens that directory
+once with `O_DIRECTORY | O_NOFOLLOW`, verifies its exact mode and owner from `fstat`, and
+retains the descriptor for the store's lifetime. Non-directories, symlinks, wrong ownership,
+and any mode other than 0700 fail. Every later lock, temporary-file, link, replace, unlink,
+read, and directory-fsync operation is relative to that descriptor, so replacing a pathname
+ancestor cannot move work away from the locked directory. The store opens an exact mode-0600
+`.lock` regular file relative to the descriptor with `O_NOFOLLOW` and takes a non-blocking
+exclusive `flock`; a concurrent store fails closed. `close()` releases both descriptors, and
+context-manager use is supported. Attempt files are
+`<event>.<attempt-as-six-digits>.json`. Reads reject non-regular files, symlinks, permission
+bits other than 0600, malformed/unknown fields, unsupported journal versions, and gaps or
+conflicting attempts. With no attempt argument, `read` returns the latest attempt.
 
-A transition serializes canonical JSON plus one newline to a mode-0600 same-directory
+A transition serializes canonical JSON plus one newline to a mode-0600 descriptor-relative
 temporary regular file, flushes and `fsync`s it. `write_in_flight` permits attempt 1 only
 when no attempt exists. It permits attempt $n+1$ only when the latest record is completed
 attempt $n$ with `next_safe_action: "retry"` and the new digest, event, actor, action class,
 expected postcondition, and marker equal that completed record; all prior attempt files
-remain immutable. It uses `os.link` to install the fully written inode without replacing an
-existing name, then unlinks the temporary name. `replace_completed` reads the same attempt's
-valid in-flight record and requires matching attempt, scenario digest, event, actor, action
-class, expected postcondition, and marker, then calls `os.replace`. Both transitions `fsync`
-the containing directory after directory changes. Temporary files are removed after any
-pre-install failure. Every other overwrite or mismatch is rejected. The exclusive store lock
-prevents two compliant writers from passing a read-before-replace check concurrently.
+remain immutable. It uses descriptor-relative `os.link` to install the fully written inode
+without replacing an existing name, then unlinks the temporary name. `replace_completed`
+reads the same attempt's valid in-flight record and requires matching attempt, scenario
+digest, event, actor, action class, expected postcondition, and marker, then calls
+descriptor-relative `os.replace`. Both transitions `fsync` the retained directory descriptor
+after directory changes. Temporary files are removed after any pre-install failure. Every
+other overwrite or mismatch is rejected. The exclusive store lock prevents two compliant
+writers from passing a read-before-replace check concurrently.
 
 Invocation metadata is structurally allowlisted to mutation boundary, operation, argument
 strings, and credential environment _variable names_; environment values have no input field.
@@ -436,11 +441,12 @@ and leaves the in-flight record intact.
 
 Redaction copies only `invocation.arguments` and `handler_output`. Within those opaque values,
 keys compare case-insensitively after replacing `-` with `_`; `api_key`, `apikey`, `token`,
-`password`, `secret`, `authorization`, and `cookie` values become `"<redacted>"`. Every
-non-empty `known_secrets` string is also replaced wherever it occurs within opaque strings,
-including generic messages and arguments. The collection is neither retained nor serialized.
-Tests use recognizable values and require none to occur in bytes while protocol identities
-remain unchanged.
+`password`, `secret`, `authorization`, and `cookie` values become JSON null. In all other
+opaque strings, every non-empty `known_secrets` substring is removed, longest secrets first,
+until no supplied secret remains in that value. The collection is neither retained nor
+serialized. The invariant applies to parsed opaque payload values, not coincidental bytes in
+JSON syntax or protocol identities. Tests cover secrets such as `redacted`, `<`, and `act`,
+require no opaque output string to contain them, and require identities to remain unchanged.
 
 The journal makes local write transitions atomic across runner process termination. File and
 directory `fsync` request persistence but do not promise survival of an operating-system
@@ -527,7 +533,8 @@ Focused tests must prove:
 - every supported action exposes the exact declared recovery class, ordered complete
   dependency tuple, marker, created identity, and action-specific postcondition mapping;
 - media types `/`, `/plain`, `text/`, values with extra slashes, whitespace, or controls fail;
-- state permissions are exact, in-flight install refuses overwrite, constructors/store
+- state ownership/permissions are exact, replacing the state path after construction cannot
+  redirect descriptor-relative work, in-flight install refuses overwrite, constructors/store
   reads/writes reject unsupported recovery classes, completion requires a matching attempt
   and expected postcondition, retry requires the latest completed attempt to authorize
   identical recovery metadata, completed history remains immutable, concurrent stores fail,
@@ -536,9 +543,9 @@ Focused tests must prove:
   after replacement leaves the completed record, and temporary files are cleaned;
 - known secrets in structural fields or expected postconditions are rejected without
   installing/replacing a record; exceptions retain field context but contain neither the
-  supplied secret nor the sensitive value; protocol identities remain byte-stable; and nested
-  sensitive values or known-secret substrings are absent only from opaque completed payloads
-  while non-sensitive values remain;
+  supplied secret nor the sensitive value; protocol identities remain byte-stable; and parsed
+  opaque output values contain none of the known secrets—including collision cases
+  `redacted`, `<`, and `act`—while non-sensitive values remain;
 - source inspection plus import behavior confirms the package never imports or invokes a
   mutation/network subprocess surface.
 
