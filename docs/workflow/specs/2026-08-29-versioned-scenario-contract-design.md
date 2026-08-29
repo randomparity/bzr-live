@@ -416,7 +416,9 @@ read, and directory-fsync operation is relative to that descriptor, so replacing
 ancestor cannot move work away from the locked directory. The store opens an exact mode-0600
 `.lock` regular file relative to the descriptor with `O_NOFOLLOW` and takes a non-blocking
 exclusive `flock`; a concurrent store fails closed. `close()` releases both descriptors, and
-context-manager use is supported. Attempt files are
+context-manager use is supported. On macOS, creation clears inherited access ACLs before
+verification; retained directories, locks, temporary files, and attempt files reject any
+nontrivial access ACL in addition to wrong ownership or mode bits. Attempt files are
 `<event>.<attempt-as-six-digits>.json`. Reads reject non-regular files, symlinks, permission
 bits other than 0600, malformed/unknown fields, unsupported journal versions, and gaps or
 conflicting attempts. With no attempt argument, `read` returns the latest attempt.
@@ -447,19 +449,21 @@ caller may mutate. `replace_completed` rejects a secret in completion-only struc
 and leaves the in-flight record intact.
 
 Redaction copies only `invocation.arguments` and `handler_output`. Within those opaque values,
-key normalization first replaces every non-alphanumeric run with `_`, then inserts `_` only
-at a lowercase-letter-or-digit to uppercase-letter boundary, strips edge underscores, and
-lowercases. Thus `API_KEY` becomes `api_key`, `AUTHORIZATION` becomes `authorization`, and
-`refreshToken` becomes `refresh_token`. Split the normalized value on underscores. A key is
-sensitive when any segment is `token`, `password`, `secret`, `cookie`, `credential`,
-`authorization`, or `apikey`, or when adjacent segments are `api`, `key`; its value becomes
-JSON null. This covers `API_KEY`, `AUTHORIZATION`, `clientAPIKey`,
-`proxyAuthorization`, `access_token`, `client-secret`, and `set-cookie` with an empty
-`known_secrets` collection. In all other opaque strings, every non-empty known-secret
-substring is removed, longest secrets first, until none remains in that value. The collection
-is neither retained nor serialized. The invariant applies to parsed opaque payload values,
+key normalization first replaces every non-alphanumeric run with `_`, then inserts `_` at
+both a lowercase-letter-or-digit to uppercase-letter boundary and an uppercase acronym to a
+following title-cased word boundary, strips edge underscores, and lowercases. Thus `API_KEY`
+becomes `api_key`, `AUTHORIZATION` becomes `authorization`, `refreshToken` becomes
+`refresh_token`, and `APIToken` becomes `api_token`. Split the normalized value on
+underscores. A key is sensitive when any segment is `token`, `password`, `secret`, `cookie`,
+`credential`, `authorization`, or `apikey`, or when adjacent segments are `api`, `key`; its
+value becomes JSON null. This covers `API_KEY`, `AUTHORIZATION`, `clientAPIKey`,
+`proxyAuthorization`, `APIToken`, `APISecret`, `HTTPAuthorization`, `access_token`,
+`client-secret`, and `set-cookie` with an empty `known_secrets` collection. In all other
+opaque strings, every non-empty known-secret substring is removed, longest secrets first,
+until none remains in that value. The collection is neither retained nor serialized.
+The invariant applies to parsed opaque payload values,
 not coincidental bytes in JSON syntax or protocol identities. Tests cover all compound keys
-above and secrets such as `redacted`, `<`, and `act`, require no opaque output string to
+above and secrets such as `redacted`, `<`, and `OPAQUE`, require no opaque output string to
 contain them, and require identities to remain unchanged.
 
 The journal makes local write transitions atomic across runner process termination. File and

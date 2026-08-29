@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import errno
 import fcntl
 import json
@@ -7,6 +8,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +47,21 @@ _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z", re.ASCII)
 _SENSITIVE_SEGMENTS = {
     "token", "password", "secret", "cookie", "credential", "authorization", "apikey",
 }
+
+_DARWIN_LIBC = ctypes.CDLL(None, use_errno=True) if sys.platform == "darwin" else None
+if _DARWIN_LIBC is not None:
+    _DARWIN_LIBC.acl_init.argtypes = [ctypes.c_int]
+    _DARWIN_LIBC.acl_init.restype = ctypes.c_void_p
+    _DARWIN_LIBC.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+    _DARWIN_LIBC.acl_get_fd_np.restype = ctypes.c_void_p
+    _DARWIN_LIBC.acl_set_fd_np.argtypes = [
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    _DARWIN_LIBC.acl_set_fd_np.restype = ctypes.c_int
+    _DARWIN_LIBC.acl_free.argtypes = [ctypes.c_void_p]
+    _DARWIN_LIBC.acl_free.restype = ctypes.c_int
 
 
 def _journal_error(field: str, message: str) -> ScenarioValidationError:
@@ -453,6 +470,7 @@ def _common_json(record: InFlightRecord | CompletedRecord) -> dict[str, object]:
 def _normalized_key(key: str) -> str:
     value = re.sub(r"[^A-Za-z0-9]+", "_", key)
     value = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value)
+    value = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", value)
     return value.strip("_").lower()
 
 
@@ -653,6 +671,31 @@ def _record_from_json(value: object) -> InFlightRecord | CompletedRecord:
     )
 
 
+def _clear_inherited_acl(fd: int, field: str) -> None:
+    if _DARWIN_LIBC is None:
+        return
+    acl = _DARWIN_LIBC.acl_init(0)
+    if not acl:
+        raise _journal_error(field, "cannot allocate an empty access ACL")
+    try:
+        if _DARWIN_LIBC.acl_set_fd_np(fd, acl, 0x100) != 0:
+            raise _journal_error(field, "cannot clear inherited access ACL")
+    finally:
+        _DARWIN_LIBC.acl_free(acl)
+
+
+def _reject_access_acl(fd: int, field: str) -> None:
+    if _DARWIN_LIBC is None:
+        return
+    ctypes.set_errno(0)
+    acl = _DARWIN_LIBC.acl_get_fd_np(fd, 0x100)
+    if acl:
+        _DARWIN_LIBC.acl_free(acl)
+        raise _journal_error(field, "must not have an access ACL")
+    if ctypes.get_errno() != errno.ENOENT:
+        raise _journal_error(field, "cannot inspect access ACL")
+
+
 class JournalStore:
     def __init__(self, state_dir: str | Path) -> None:
         self._path = Path(state_dir)
@@ -670,6 +713,7 @@ class JournalStore:
             self._dir_fd = os.open(self._path, flags)
             if created:
                 os.fchmod(self._dir_fd, 0o700)
+                _clear_inherited_acl(self._dir_fd, "state directory")
             self._verify_fd(self._dir_fd, "state directory", stat.S_ISDIR, 0o700)
             self._lock_fd = self._open_lock()
             try:
@@ -690,15 +734,20 @@ class JournalStore:
             raise _journal_error(field, f"must have mode {mode:04o}")
         if details.st_uid != os.getuid():
             raise _journal_error(field, "must be owned by the current user")
+        _reject_access_acl(fd, field)
 
     def _open_lock(self) -> int:
         flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK
+        created = False
         try:
             fd = os.open(".lock", flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self._dir_fd)
+            created = True
             os.fchmod(fd, 0o600)
         except FileExistsError:
             fd = os.open(".lock", flags, dir_fd=self._dir_fd)
         try:
+            if created:
+                _clear_inherited_acl(fd, "$.lock")
             self._verify_fd(fd, "$.lock", stat.S_ISREG, 0o600)
             return fd
         except Exception:
@@ -783,6 +832,7 @@ class JournalStore:
         fd = os.open(name, flags, 0o600, dir_fd=self._dir_fd)
         try:
             os.fchmod(fd, 0o600)
+            _clear_inherited_acl(fd, name)
             self._verify_fd(fd, name, stat.S_ISREG, 0o600)
             content = json.dumps(document, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
             offset = 0

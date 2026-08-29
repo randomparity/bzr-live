@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import stat
 import tempfile
 import unittest
@@ -89,6 +91,38 @@ class JournalTests(unittest.TestCase):
         with self.assertRaises(ScenarioValidationError):
             JournalStore(self.state)
         self.assertEqual(stat.S_IMODE((self.state / ".lock").stat().st_mode), 0o644)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL semantics")
+    def test_existing_access_acl_fails_without_repair(self) -> None:
+        self.state.mkdir(mode=0o700)
+        subprocess.run(
+            ["chmod", "+a", "everyone allow read", str(self.state)],
+            check=True,
+        )
+        with self.assertRaises(ScenarioValidationError):
+            JournalStore(self.state)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACL semantics")
+    def test_new_state_clears_inherited_access_acl(self) -> None:
+        subprocess.run(
+            [
+                "chmod",
+                "+a",
+                "everyone allow read,search,file_inherit,directory_inherit",
+                str(self.state.parent),
+            ],
+            check=True,
+        )
+        with JournalStore(self.state) as store:
+            attempt = store.write_in_flight(self.in_flight())
+        for path in (self.state, self.state / ".lock", attempt):
+            listing = subprocess.run(
+                ["ls", "-lde", str(path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertFalse(listing.split()[0].endswith("+"))
 
     def test_second_store_fails_while_lock_is_held(self) -> None:
         with JournalStore(self.state):
@@ -192,6 +226,9 @@ class JournalTests(unittest.TestCase):
             "AUTHORIZATION": "auth-value",
             "clientAPIKey": "client-value",
             "proxyAuthorization": "proxy-value",
+            "APIToken": "token-value",
+            "APISecret": "secret-value",
+            "HTTPAuthorization": "auth-value",
             "access_token": "token-value",
             "refreshToken": "refresh-value",
             "client-secret": "secret-value",
