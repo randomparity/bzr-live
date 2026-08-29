@@ -447,11 +447,13 @@ caller may mutate. `replace_completed` rejects a secret in completion-only struc
 and leaves the in-flight record intact.
 
 Redaction copies only `invocation.arguments` and `handler_output`. Within those opaque values,
-key normalization inserts `_` before ASCII capitals, replaces every non-alphanumeric run
-with `_`, strips edge underscores, and lowercases. A key is sensitive when the normalized
-value is `authorization`, `api_key`, or `apikey`, or any underscore-delimited segment is
-`token`, `password`, `secret`, `cookie`, or `credential`; its value becomes JSON null. This
-covers `access_token`, `refreshToken`, `client-secret`, and `set-cookie` with an empty
+key normalization first replaces every non-alphanumeric run with `_`, then inserts `_` only
+at a lowercase-letter-or-digit to uppercase-letter boundary, strips edge underscores, and
+lowercases. Thus `API_KEY` becomes `api_key`, `AUTHORIZATION` becomes `authorization`, and
+`refreshToken` becomes `refresh_token`. A key is sensitive when the normalized value is
+`authorization`, `api_key`, or `apikey`, or any underscore-delimited segment is `token`,
+`password`, `secret`, `cookie`, or `credential`; its value becomes JSON null. This covers the
+capitalized forms plus `access_token`, `client-secret`, and `set-cookie` with an empty
 `known_secrets` collection. In all other opaque strings, every non-empty known-secret
 substring is removed, longest secrets first, until none remains in that value. The collection
 is neither retained nor serialized. The invariant applies to parsed opaque payload values,
@@ -557,9 +559,10 @@ Focused tests must prove:
 - known secrets in structural fields or expected postconditions are rejected without
   installing/replacing a record; exceptions retain field context but contain neither the
   supplied secret nor the sensitive value; protocol identities remain byte-stable; parsed
-  opaque output values null compound credential keys including `access_token`, `refreshToken`,
-  `client-secret`, and `set-cookie`, and contain none of the known secrets—including collision
-  cases `redacted`, `<`, and `act`—while non-sensitive values remain;
+  opaque output values null compound credential keys including `API_KEY`, `AUTHORIZATION`,
+  `access_token`, `refreshToken`, `client-secret`, and `set-cookie`, and contain none of the
+  known secrets—including collision cases `redacted`, `<`, and `act`—while non-sensitive
+  values remain;
 - source inspection plus import behavior confirms the package never imports or invokes a
   mutation/network subprocess surface.
 
