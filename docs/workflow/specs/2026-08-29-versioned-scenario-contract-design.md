@@ -38,10 +38,12 @@ the returned validated plan and keep `bzr` as the supported Bugzilla mutation bo
 6. Define recovery metadata for every supported action before execution: action class,
    expected postcondition, and deterministic reconciliation marker.
 7. Store local state only in exact mode-0700 directories and exact mode-0600 regular files.
-   Atomically install in-flight intent before mutation and atomically replace that intent
-   with a completed record after the caller receives a `bzr` result.
-8. Never persist credential environment values. Recursively replace values whose object key
-   is sensitive in invocation metadata or structured output.
+   Atomically install each numbered in-flight attempt before mutation, atomically replace it
+   with a completed attempt after `bzr` returns, and retain completed attempts across a
+   guarded retry.
+8. Never persist credential environment values. Use an allowlisted invocation shape,
+   recursively replace sensitive-key values, and scrub every caller-supplied known secret
+   wherever it occurs in invocation metadata or structured output.
 9. Use Python 3.11 or later, Setuptools 84.0.0 as the pinned build backend, and no runtime or
    test dependencies outside the standard library.
 
@@ -142,12 +144,12 @@ to an empty list. Asset object keys are exactly `name`, `path`, and `sha256`.
 
 Asset names are unique. Asset paths are unique canonical relative POSIX paths: no empty
 segments, `.`, `..`, backslashes, absolute paths, drive prefixes, or segment outside the
-initial `assets/`. Each path must resolve beneath the scenario directory without traversing
-a symlink. The target must be one regular file. The loader opens it without following
-symlinks, reads its bytes once, verifies that the declared 64-character lowercase SHA-256
-matches, and retains those immutable bytes in `Asset.content`. Event validation and every
-later attachment handler use that snapshot, closing the check-to-use gap created by reopening
-the path after validation.
+initial `assets/`. The loader opens the scenario directory and walks every asset path
+component with descriptor-relative `os.open`, `O_NOFOLLOW`, and `O_DIRECTORY` on ancestors;
+the final descriptor also uses `O_NOFOLLOW` and must identify a regular file. It reads those
+bytes once, verifies that the declared 64-character lowercase SHA-256 matches, and retains
+the immutable snapshot in `Asset.content`. Event validation and every later attachment
+handler use that snapshot, closing both ancestor-symlink traversal and check-to-use races.
 
 ### `resources.json`
 
@@ -297,9 +299,16 @@ The package exports frozen records and one store:
 
 ```python
 @dataclass(frozen=True)
+class InvocationMetadata:
+    executable: str
+    arguments: tuple[str, ...]
+    environment_names: tuple[str, ...]
+
+@dataclass(frozen=True)
 class InFlightRecord:
     scenario_digest: str
     event: str
+    attempt: int
     actor: Reference
     action_class: str
     expected_postcondition: Mapping[str, JsonValue]
@@ -309,10 +318,11 @@ class InFlightRecord:
 class CompletedRecord:
     scenario_digest: str
     event: str
+    attempt: int
     actor: Reference
     action_class: str
     reconciliation_marker: str
-    invocation: Mapping[str, JsonValue]
+    invocation: InvocationMetadata
     bzr_output: JsonValue
     exit_status: int
     resolved_ids: Mapping[str, int]
@@ -324,40 +334,49 @@ class JournalStore:
     def __enter__(self) -> JournalStore: ...
     def __exit__(self, *exc_info: object) -> None: ...
     def write_in_flight(self, record: InFlightRecord) -> Path: ...
-    def replace_completed(self, record: CompletedRecord) -> Path: ...
-    def read(self, event: str) -> InFlightRecord | CompletedRecord | None: ...
+    def replace_completed(
+        self, record: CompletedRecord, *, known_secrets: Collection[str] = ()
+    ) -> Path: ...
+    def read(
+        self, event: str, attempt: int | None = None
+    ) -> InFlightRecord | CompletedRecord | None: ...
 ```
 
 Record JSON adds `journal_version: 1` and `phase: "in_flight" | "completed"`. Actors serialize
-as typed references. Digests are lowercase SHA-256; event names use the slug grammar; exit
-statuses are integers excluding booleans; resolved ID keys are typed references and values
-are positive integers. `next_safe_action` is closed to the four values above.
+as typed references. Digests are lowercase SHA-256; event names use the slug grammar;
+attempts are positive integers; exit statuses are integers excluding booleans; resolved ID
+keys are typed references and values are positive integers. `next_safe_action` is closed to
+the four values above.
 
 `JournalStore` creates only an absent state directory with mode 0700. It rejects existing
 state directories whose permission bits are not exactly 0700, and rejects non-directories or
 symlinks. It opens an exact mode-0600 `.lock` regular file without following symlinks and
 takes a non-blocking exclusive `flock` for the store's lifetime; a concurrent store fails
-closed. `close()` releases the descriptor, and context-manager use is supported. Event files
-are `<event>.json`, which is safe because event names are slugs. Reads reject non-regular
-files, symlinks, any permission bits other than 0600, malformed/unknown record fields, and
-unsupported journal versions.
+closed. `close()` releases the descriptor, and context-manager use is supported. Attempt
+files are `<event>.<attempt-as-six-digits>.json`. Reads reject non-regular files, symlinks,
+permission bits other than 0600, malformed/unknown fields, unsupported journal versions, and
+gaps or conflicting attempts. With no attempt argument, `read` returns the latest attempt.
 
 A transition serializes canonical JSON plus one newline to a mode-0600 same-directory
-temporary regular file, flushes and `fsync`s it. For absent to `in_flight`, `os.link` installs
-the fully written inode at the event path without replacing an existing name, then the
-temporary name is unlinked. For `in_flight` to `completed`, the store first reads a valid
-in-flight record and requires matching scenario digest, event, actor, action class, and
-marker, then calls `os.replace`. Both transitions `fsync` the containing directory after the
-directory changes. Temporary files are removed after any pre-install failure. A completed
-record, an existing in-flight install, and every mismatch are rejected. The exclusive store
-lock prevents two compliant writers from passing the read-before-replace check concurrently.
+temporary regular file, flushes and `fsync`s it. `write_in_flight` permits attempt 1 only
+when no attempt exists. It permits attempt $n+1$ only when the latest record is completed
+attempt $n$ with `next_safe_action: \"retry\"`; all prior attempt files remain immutable. It
+uses `os.link` to install the fully written inode without replacing an existing name, then
+unlinks the temporary name. `replace_completed` reads the same attempt's valid in-flight
+record and requires matching attempt, scenario digest, event, actor, action class, and marker,
+then calls `os.replace`. Both transitions `fsync` the containing directory after directory
+changes. Temporary files are removed after any pre-install failure. Every other overwrite or
+mismatch is rejected. The exclusive store lock prevents two compliant writers from passing a
+read-before-replace check concurrently.
 
-Before serialization, invocation and `bzr_output` are copied through recursive redaction.
-Keys compare case-insensitively after replacing `-` with `_`; `api_key`, `apikey`, `token`,
-`password`, `secret`, `authorization`, and `cookie` values become `"<redacted>"` at any depth.
-The invocation mapping may record the executable, arguments, and credential environment
-_variable names_, but must not receive environment values. Tests use recognizable secret
-values and require that none occur in serialized bytes.
+Invocation metadata is structurally allowlisted to executable, argument strings, and
+credential environment _variable names_; environment values have no input field. Before
+serialization, invocation and `bzr_output` are copied through recursive redaction. Keys
+compare case-insensitively after replacing `-` with `_`; `api_key`, `apikey`, `token`,
+`password`, `secret`, `authorization`, and `cookie` values become `\"<redacted>\"` at any
+depth. Every non-empty `known_secrets` string is also replaced wherever it occurs within any
+string value, including generic messages and arguments. The secret collection is neither
+retained nor serialized. Tests use recognizable values and require none to occur in bytes.
 
 The journal makes local write transitions atomic across runner process termination. File and
 directory `fsync` request persistence but do not promise survival of an operating-system

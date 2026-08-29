@@ -37,22 +37,29 @@ validated manifest, resources, ordered events, and a sorted table of every decla
 path and SHA-256. Canonical bytes use sorted keys, no ASCII escaping, separators `,` and `:`
 without whitespace, no trailing newline, and UTF-8 without normalization. The accepted JSON
 domain excludes floats and non-finite numbers. Asset paths must be canonical relative POSIX
-paths below `assets/`; asset files must be regular, non-symlinked files whose declared
-checksums match their bytes. `ValidatedScenario` retains each validated asset as immutable
-`bytes`, and later handlers must consume those bytes rather than reopening the path.
+paths below `assets/`. The loader walks from an opened scenario directory using
+descriptor-relative `O_NOFOLLOW` opens, rejects a symlink in every path component, requires
+the final descriptor to be regular, reads it once, and verifies its declared checksum.
+`ValidatedScenario` retains those exact bytes, and later handlers must consume them rather
+than reopening the path.
 
 Journal state lives in an exact mode-0700 local directory. One non-blocking exclusive lock
 on an exact mode-0600 lock file gives each state directory a single writer. Each event has
-one exact mode-0600 JSON record and exactly two legal transitions: absent to matching
-`in_flight`, then that `in_flight` record to matching `completed`. The first transition uses
-an fsynced same-directory temporary file and an atomic no-replace link. After `bzr` returns,
-the second transition verifies the existing digest, event, actor, recovery class, and marker,
+numbered exact mode-0600 attempt records. Attempt 1 transitions from absent to matching
+`in_flight`, then atomically to matching `completed`. A completed attempt whose
+`next_safe_action` is `retry` permits only the next consecutive attempt to begin; older
+completed attempts remain as the audit trail. The first transition uses an fsynced
+same-directory temporary file and an atomic no-replace link. After `bzr` returns, the second
+transition verifies the existing attempt, digest, event, actor, recovery class, and marker,
 then atomically replaces it with an fsynced completed record. Both transitions fsync the
 containing directory. Every other overwrite, a concurrent writer, unsafe permissions,
-symlinks, malformed records, and digest/event mismatches fail closed. The completed record
-contains redacted invocation metadata, redacted structured output, exit status, resolved IDs,
-and the next safe action. Sensitive key values are replaced recursively; credential
-environment values are never accepted as journal metadata.
+symlinks, malformed records, and mismatch fails closed.
+
+The completed record contains an allowlisted invocation shape, structured `bzr` output, exit
+status, resolved IDs, and the next safe action. Credential environment values are never
+accepted as invocation metadata. Before persistence, sensitive-key values are replaced
+recursively and every caller-supplied known secret is replaced wherever it occurs in any
+string. The secret list is used only during redaction and is never serialized.
 
 The package performs no Bugzilla mutation, network request, or subprocess invocation. Later
 runner code may execute only from a `ValidatedScenario` and must delegate supported
