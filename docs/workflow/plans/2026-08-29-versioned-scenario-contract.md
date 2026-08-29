@@ -308,9 +308,17 @@ Run the Task 3 command. Expected: exit 0.
 
 - [ ] **Step 6: Verify the controlled-fault tests bite**
 
-Temporarily change the journal replacement helper to skip the install call; run the
-pre-link/pre-replace and post-replace-fsync controlled-fault tests and require a failure.
-Restore the implementation and rerun them successfully. Do not commit the mutation.
+Name the tests
+`test_failed_install_preserves_prior_state` and
+`test_post_replace_fsync_failure_preserves_completion`. Temporarily change the journal
+replacement helper to skip the install call, then run:
+
+```bash
+uv run --python 3.11 python -m unittest tests.test_journal.JournalTests.test_failed_install_preserves_prior_state tests.test_journal.JournalTests.test_post_replace_fsync_failure_preserves_completion -v
+```
+
+Expected: nonzero exit. Restore the implementation and rerun the same command; expected:
+exit 0. Do not commit the mutation.
 
 - [ ] **Step 7: Commit the journal**
 
@@ -325,6 +333,7 @@ git commit -m "feat: journal scenario event attempts"
 - Modify only files from Tasks 1–3 if the proof exposes an issue.
 - Test: all files under `tests/`.
 - Create: `tests/smoke_installed.py`
+- Create: `tests/test_capability_boundary.py`
 
 **Interfaces:**
 - Consumes and verifies the complete public `bzr_live.scenario` API.
@@ -344,7 +353,7 @@ Expected: exit 0; all resource, event, digest, asset, journal, fault, permission
 uv build
 ```
 
-Expected: exit 0 and artifacts under ignored/untracked `dist/`. Remove the local build artifacts after confirming contents are not tracked.
+Expected: exit 0 and artifacts under ignored/untracked `dist/`. Retain them through Steps 3–4.
 
 - [ ] **Step 3: Smoke the installed public API**
 
@@ -360,15 +369,32 @@ uv run --isolated --no-project --with ./dist/bzr_live-0.1.0-py3-none-any.whl pyt
 Expected: exit 0, a 64-hex digest, and `completed`; no subprocess or network action is
 performed by the package.
 
-- [ ] **Step 4: Inspect source capability boundary**
+- [ ] **Step 4: Verify the source capability boundary**
 
-Search `src/bzr_live/scenario` for imports/calls of `subprocess`, `socket`, HTTP clients, or database clients. Expected: no match. This is a structural supplement to the runtime smoke, not a substitute for it.
+Create `tests/test_capability_boundary.py`. Parse every package source file with `ast`; fail on
+imports rooted at `subprocess`, `socket`, `http`, `urllib`, `sqlite3`, `requests`, `httpx`,
+`aiohttp`, `urllib3`, `sqlalchemy`, `psycopg`, `pymysql`, `pymongo`, or `redis`, and on calls
+to `os.system` or `os.popen`. Run:
 
-- [ ] **Step 5: Commit any proof-driven correction and re-prove committed HEAD**
+```bash
+uv run --python 3.11 python -m unittest tests.test_capability_boundary -v
+```
 
-If Steps 1–4 require a source/test correction, stage only those exact files and commit one
-logical `fix:` commit. Then rerun Steps 1–4 in order against committed `HEAD`, including the
-specific proof that originally exposed the defect. Otherwise create no empty commit.
+Expected: exit 0. This structural check is a supplement to the runtime smoke, not a substitute.
+
+- [ ] **Step 5: Commit proof files, correct defects, and re-prove committed HEAD**
+
+Commit `tests/smoke_installed.py` and `tests/test_capability_boundary.py` unconditionally:
+
+```bash
+git add tests/smoke_installed.py tests/test_capability_boundary.py
+git commit -m "test: verify installed scenario contract"
+```
+
+If Steps 1–4 expose a source/test defect, commit that correction separately with a logical
+`fix:` commit. With all corrections and proof files committed, rerun Steps 1–4 in order
+against `HEAD`, including the proof that exposed any defect. After the successful installed
+smoke and capability test, remove `dist/` and verify it was never tracked.
 
 ## Plan self-review
 
