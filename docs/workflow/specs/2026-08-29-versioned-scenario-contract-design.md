@@ -18,7 +18,8 @@ owner-only permissions and sensitive values redacted.
 This change does not start containers, provision Bugzilla, invoke `bzr`, replay events,
 manage checkpoints, or edit `README.md`. Those surfaces belong to issue #2 and later epic
 issues. The library deliberately has no subprocess or network boundary; later code must use
-the returned validated plan and keep `bzr` as the supported Bugzilla mutation boundary.
+the returned validated plan and delegate Bugzilla mutations to `bzr`, with only the parent
+epic's separately owned narrow custom-field REST adapter as an explicit exception.
 
 ## Requirements
 
@@ -300,7 +301,8 @@ The package exports frozen records and one store:
 ```python
 @dataclass(frozen=True)
 class InvocationMetadata:
-    executable: str
+    mutation_boundary: Literal["bzr", "bugzilla-rest-custom-field"]
+    operation: str
     arguments: tuple[str, ...]
     environment_names: tuple[str, ...]
 
@@ -323,7 +325,7 @@ class CompletedRecord:
     action_class: str
     reconciliation_marker: str
     invocation: InvocationMetadata
-    bzr_output: JsonValue
+    handler_output: JsonValue
     exit_status: int
     resolved_ids: Mapping[str, int]
     next_safe_action: Literal["advance", "reconcile", "retry", "stop"]
@@ -369,14 +371,16 @@ changes. Temporary files are removed after any pre-install failure. Every other 
 mismatch is rejected. The exclusive store lock prevents two compliant writers from passing a
 read-before-replace check concurrently.
 
-Invocation metadata is structurally allowlisted to executable, argument strings, and
-credential environment _variable names_; environment values have no input field. Before
-serialization, invocation and `bzr_output` are copied through recursive redaction. Keys
-compare case-insensitively after replacing `-` with `_`; `api_key`, `apikey`, `token`,
-`password`, `secret`, `authorization`, and `cookie` values become `\"<redacted>\"` at any
-depth. Every non-empty `known_secrets` string is also replaced wherever it occurs within any
-string value, including generic messages and arguments. The secret collection is neither
-retained nor serialized. Tests use recognizable values and require none to occur in bytes.
+Invocation metadata is structurally allowlisted to mutation boundary, operation, argument
+strings, and credential environment _variable names_; environment values have no input field.
+The boundary is `bzr` except for `bug.custom-field-set`, whose later handler may use only the
+epic-authorized `bugzilla-rest-custom-field` adapter. Before serialization, invocation and
+`handler_output` are copied through recursive redaction. Keys compare case-insensitively
+after replacing `-` with `_`; `api_key`, `apikey`, `token`, `password`, `secret`,
+`authorization`, and `cookie` values become `"<redacted>"` at any depth. Every non-empty
+`known_secrets` string is also replaced wherever it occurs within any string value, including
+generic messages and arguments. The secret collection is neither retained nor serialized.
+Tests use recognizable values and require none to occur in bytes.
 
 The journal makes local write transitions atomic across runner process termination. File and
 directory `fsync` request persistence but do not promise survival of an operating-system
@@ -402,11 +406,12 @@ Therefore a caller cannot begin mutation during validation. Later code must fini
 
 - **Added: scenario directory to trusted plan.** A local scenario author controls JSON/JSONL,
   names, references, text, asset metadata, asset paths, symlinks, and asset bytes.
-- **Added: caller result to local journal.** A local runner controls invocation metadata,
-  structured `bzr` output, resolved IDs, and next-action classification; these may contain
-  credentials or server-returned sensitive data.
-- **Not widened: Bugzilla mutation boundary.** This package performs no mutation and does not
-  change who can call `bzr` or Bugzilla.
+- **Added: caller result to local journal.** A local runner controls allowlisted invocation
+  metadata, structured handler output, resolved IDs, and next-action classification; these
+  may contain credentials or server-returned sensitive data.
+- **Not widened: Bugzilla mutation boundary.** This package performs no mutation. Later
+  handlers use `bzr`, apart from the already-authorized narrow custom-field adapter, and this
+  change grants neither path new callers or credentials.
 
 ### Actors and trust
 

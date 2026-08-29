@@ -30,7 +30,8 @@ References use `{"ref":"<kind>:<name>"}`. Resources are provisioned in a stable 
 order. Events retain file order and may reference only resources or symbolic objects created
 by earlier events. The fixed version 1 action registry classifies every action as
 `unique-create`, `idempotent-set`, or `append`; adding an action requires one validator entry
-and, in later replay work, one `bzr` handler.
+and one later replay handler. Handlers delegate mutations to `bzr` except for the separate,
+epic-authorized narrow custom-field adapter.
 
 The scenario digest is SHA-256 over canonical UTF-8 JSON containing the format version,
 validated manifest, resources, ordered events, and a sorted table of every declared asset's
@@ -55,11 +56,12 @@ then atomically replaces it with an fsynced completed record. Both transitions f
 containing directory. Every other overwrite, a concurrent writer, unsafe permissions,
 symlinks, malformed records, and mismatch fails closed.
 
-The completed record contains an allowlisted invocation shape, structured `bzr` output, exit
-status, resolved IDs, and the next safe action. Credential environment values are never
-accepted as invocation metadata. Before persistence, sensitive-key values are replaced
-recursively and every caller-supplied known secret is replaced wherever it occurs in any
-string. The secret list is used only during redaction and is never serialized.
+The completed record names its mutation boundary and contains an allowlisted invocation
+shape, structured handler output, exit status, resolved IDs, and the next safe action. The
+boundary is `bzr` except for the explicit custom-field adapter value. Credential environment
+values are never accepted as invocation metadata. Before persistence, sensitive-key values
+are replaced recursively and every caller-supplied known secret is replaced wherever it
+occurs in any string. The secret list is used only during redaction and is never serialized.
 
 The package performs no Bugzilla mutation, network request, or subprocess invocation. Later
 runner code may execute only from a `ValidatedScenario` and must delegate supported
@@ -94,10 +96,9 @@ mutations to `bzr` (apart from the separate, epic-authorized narrow custom-field
   representation—while one closed validator registry is smaller for the first version.
 - **Use a model/validation framework.** judgment: a runtime dependency and second model
   vocabulary are disproportionate to this closed first-version contract.
-- **Allow generic resource and action dictionaries for later handlers.** verified: issue #3
-  requires malformed resources and actions to fail before mutation, while generic handler
-  dictionaries postpone that decision to mutation time; source: GitHub issue
-  `randomparity/bzr-live#3`.
+- **Allow generic resource and action dictionaries for later handlers.** judgment: typed
+  immutable results make the validated-to-executable boundary explicit and avoid maintaining
+  a second generic representation whose provenance each handler must establish.
 - **Journal by appending status lines.** judgment: a multi-record log adds recovery parsing
   and compaction while the required recovery boundary needs only the current in-flight or
   completed state.
