@@ -359,9 +359,11 @@ The invocation mapping may record the executable, arguments, and credential envi
 _variable names_, but must not receive environment values. Tests use recognizable secret
 values and require that none occur in serialized bytes.
 
-The journal makes local write transitions crash-safe. Determining whether an in-flight
-server mutation committed remains the later replay handler's responsibility; the record
-contains the exact evidence that handler needs and never guesses a result.
+The journal makes local write transitions atomic across runner process termination. File and
+directory `fsync` request persistence but do not promise survival of an operating-system
+crash or power loss. Determining whether an in-flight server mutation committed remains the
+later replay handler's responsibility; the record contains the exact evidence that handler
+needs and never guesses a result.
 
 ## Errors and mutation ordering
 

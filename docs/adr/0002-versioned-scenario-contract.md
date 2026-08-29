@@ -66,38 +66,37 @@ mutations to `bzr` (apart from the separate, epic-authorized narrow custom-field
   position, declared asset metadata, and asset bytes do.
 - Version 1 is deliberately closed. New resource kinds, actions, or fields require an
   explicit format-version decision instead of being silently ignored.
-- Journal transitions survive process termination and request directory durability against
-  power loss on supported local filesystems; later replay work retains responsibility for
-  server-side reconciliation.
+- Journal transitions are atomic across runner process termination. File and directory
+  `fsync` request persistence but do not promise survival of an operating-system crash or
+  power loss; later replay work retains responsibility for server-side reconciliation.
 - Owner-only state is local secret material and is not a portable or sanitized export.
 - The standard library keeps the runtime dependency and supply-chain surface empty, at the
   cost of explicit kind-specific validation code.
 
 ## Considered & rejected
 
-- **Do nothing or defer the contract to replay implementation.** judgment: the frozen outcome
-  requires validation and recovery contracts before any mutation handler; deferral would make
-  later handlers accept the undefined inputs this decision exists to close.
-- **Validate with JSON Schema alone.** judgment: cross-file typed references, ordered event
-  outputs, dependency cycles, asset bytes, canonical hashing, and journal transitions still
-  require Python logic, so a second schema authority would drift without replacing the hard
-  validation work.
+- **Do nothing or defer the contract to replay implementation.** verified: issue #3 requires
+  the versioned validation, digest, and journal contract before mutation, so deferral would
+  leave its stated outcome unmet; source: GitHub issue `randomparity/bzr-live#3`.
+- **Validate with JSON Schema alone.** verified: JSON Schema 2020-12 Core defines evaluation
+  against one instance location and does not define cross-document instance-value identity,
+  asset-byte hashing, or local journal transitions; source:
+  [JSON Schema Core 2020-12](https://json-schema.org/draft/2020-12/json-schema-core).
 - **Combine JSON Schema with small semantic Python checks.** judgment: strict structural rules
-  would then have two owners—the schema for authoring and generated/handwritten Python
-  representations for immutable return types—while most risk remains in the semantic Python
-  checks; one closed validator registry is smaller for the first version.
-- **Use a model/validation framework.** judgment: the closed first-version vocabulary and
-  small host runner do not justify a runtime dependency whose coercion and unknown-field
-  defaults would themselves need auditing.
-- **Allow generic resource and action dictionaries for later handlers.** judgment: this
-  postpones contract decisions until mutation time, directly defeating the required
-  pre-mutation validation boundary.
+  would then have two owners—the schema for authoring and the Python immutable return
+  representation—while one closed validator registry is smaller for the first version.
+- **Use a model/validation framework.** judgment: a runtime dependency and second model
+  vocabulary are disproportionate to this closed first-version contract.
+- **Allow generic resource and action dictionaries for later handlers.** verified: issue #3
+  requires malformed resources and actions to fail before mutation, while generic handler
+  dictionaries postpone that decision to mutation time; source: GitHub issue
+  `randomparity/bzr-live#3`.
 - **Journal by appending status lines.** judgment: a multi-record log adds recovery parsing
   and compaction while the required recovery boundary needs only the current in-flight or
   completed state.
-- **Hash raw input bytes.** judgment: insignificant JSON whitespace or object-key ordering
-  would invalidate resume even though the validated scenario is unchanged; canonical
-  semantic JSON plus exact asset bytes preserves the intended boundary.
-- **Write journal state through `bzr`.** judgment: `bzr` owns Bugzilla mutations, not the
-  runner's local crash-recovery record, so this would blur both boundaries without adding a
-  supported Bugzilla capability.
+- **Hash raw input bytes.** verified: RFC 8259 permits insignificant whitespace around JSON
+  structural characters, so raw hashing makes formatting change identity; source:
+  [RFC 8259 section 2](https://www.rfc-editor.org/rfc/rfc8259#section-2).
+- **Write journal state through `bzr`.** verified: issue #3 and parent epic #1 assign
+  Bugzilla mutation to `bzr` and owner-only local journal state to this runner; source:
+  GitHub issues `randomparity/bzr-live#3` and `randomparity/bzr-live#1`.
