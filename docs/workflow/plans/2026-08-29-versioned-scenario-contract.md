@@ -36,6 +36,9 @@
 - Create: `src/bzr_live/scenario/__init__.py`
 - Create: `src/bzr_live/scenario/model.py`
 - Create: `src/bzr_live/scenario/loader.py`
+- Create: `tests/fixtures/minimal-scenario/scenario.json`
+- Create: `tests/fixtures/minimal-scenario/resources.json`
+- Create: `tests/fixtures/minimal-scenario/events.jsonl`
 - Create: `tests/test_scenario_resources.py`
 
 **Interfaces:**
@@ -50,8 +53,9 @@
 - Later tasks extend `load_scenario` event validation without changing its public signature.
 
 - [ ] **Step 1: Add failing resource-contract tests**
-
-Create `tests/test_scenario_resources.py` with a `TemporaryDirectory` fixture helper that writes a minimal manifest, resource catalog, and empty event stream. Add tests that require:
+Create `tests/test_scenario_resources.py` with a `TemporaryDirectory` fixture helper that copies
+the checked-in minimal valid scenario before applying each test's changes. Add tests that
+require:
 
 ```python
 class ScenarioResourceTests(unittest.TestCase):
@@ -132,7 +136,7 @@ generated `uv.lock`. `uv` places an internal `*` ignore file in its project envi
 - [ ] **Step 6: Commit the resource contract**
 
 ```bash
-git add pyproject.toml uv.lock src/bzr_live/__init__.py src/bzr_live/scenario/__init__.py src/bzr_live/scenario/model.py src/bzr_live/scenario/loader.py tests/test_scenario_resources.py
+git add pyproject.toml uv.lock src/bzr_live/__init__.py src/bzr_live/scenario/__init__.py src/bzr_live/scenario/model.py src/bzr_live/scenario/loader.py tests/fixtures/minimal-scenario/scenario.json tests/fixtures/minimal-scenario/resources.json tests/fixtures/minimal-scenario/events.jsonl tests/test_scenario_resources.py
 git commit -m "feat: validate scenario resource catalogs"
 ```
 
@@ -286,10 +290,13 @@ Use frozen slotted dataclasses and validate in `__post_init__` or store-bound co
 
 - [ ] **Step 4: Implement descriptor-relative state transitions**
 
-Create the directory with mode 0700 only when absent, open with
-`O_DIRECTORY | O_NOFOLLOW`, set exact mode 0700 with `fchmod`, verify owner/mode by `fstat`,
-and retain its descriptor. Open `.lock` and every temporary file relative to it, apply
-`fchmod(0600)` before use so umask cannot weaken owner bits, then verify with `fstat`.
+Create the directory with mode 0700 only when absent, record whether this call created it,
+then open with `O_DIRECTORY | O_NOFOLLOW`. Apply `fchmod(0700)` only to the newly created
+directory before use; an existing directory must pass unchanged owner/mode checks by `fstat`.
+Likewise, create `.lock` with `O_CREAT | O_EXCL`, apply `fchmod(0600)` only on that creation
+path, and otherwise open and validate the existing file without repairing it. Every temporary
+file is newly created with `O_CREAT | O_EXCL | O_NOFOLLOW`, so apply `fchmod(0600)` before its
+first use and verify with `fstat`; this keeps exact modes even under a restrictive umask.
 Generate random temporary basenames, write canonical JSON plus newline, flush/fsync, then
 descriptor-relative no-replace `os.link` or `os.replace`; fsync the directory descriptor.
 Cleanup pre-install temp names. Reads enumerate/parse attempt names relative to the descriptor
@@ -317,6 +324,7 @@ git commit -m "feat: journal scenario event attempts"
 **Files:**
 - Modify only files from Tasks 1–3 if the proof exposes an issue.
 - Test: all files under `tests/`.
+- Create: `tests/smoke_installed.py`
 
 **Interfaces:**
 - Consumes and verifies the complete public `bzr_live.scenario` API.
@@ -340,15 +348,27 @@ Expected: exit 0 and artifacts under ignored/untracked `dist/`. Remove the local
 
 - [ ] **Step 3: Smoke the installed public API**
 
-Build/install into a temporary uv environment, load the valid test scenario through `bzr_live.scenario.load_scenario`, write attempt 1 in-flight, replace it completed, read it back, and print only `<digest> completed`. Expected: exit 0, a 64-hex digest, and `completed`; no subprocess or network action is performed by the package.
+Create `tests/smoke_installed.py` as a deterministic command-line smoke: accept the checked-in
+scenario directory, load it through `bzr_live.scenario.load_scenario`, create a temporary
+journal, write attempt 1 in-flight, replace it completed, read it back, and print only
+`<digest> completed`. Run it against the built wheel rather than the source checkout:
+
+```bash
+uv run --isolated --no-project --with ./dist/bzr_live-0.1.0-py3-none-any.whl python tests/smoke_installed.py tests/fixtures/minimal-scenario
+```
+
+Expected: exit 0, a 64-hex digest, and `completed`; no subprocess or network action is
+performed by the package.
 
 - [ ] **Step 4: Inspect source capability boundary**
 
 Search `src/bzr_live/scenario` for imports/calls of `subprocess`, `socket`, HTTP clients, or database clients. Expected: no match. This is a structural supplement to the runtime smoke, not a substitute for it.
 
-- [ ] **Step 5: Commit any proof-driven correction**
+- [ ] **Step 5: Commit any proof-driven correction and re-prove committed HEAD**
 
-If Steps 1–4 required a source/test correction, stage only those exact files and commit one logical `fix:` commit after rerunning both guardrails. Otherwise create no empty commit.
+If Steps 1–4 require a source/test correction, stage only those exact files and commit one
+logical `fix:` commit. Then rerun Steps 1–4 in order against committed `HEAD`, including the
+specific proof that originally exposed the defect. Otherwise create no empty commit.
 
 ## Plan self-review
 
