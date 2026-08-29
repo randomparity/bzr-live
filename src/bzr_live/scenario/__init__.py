@@ -1,6 +1,7 @@
 """Strict scenario validation and local journal contracts."""
 
 from .loader import load_scenario
+from .journal import CompletedRecord, InFlightRecord, InvocationMetadata, JournalStore
 from .model import (
     Asset,
     JsonValue,
@@ -17,6 +18,10 @@ from .model import (
 
 __all__ = [
     "Asset",
+    "CompletedRecord",
+    "InFlightRecord",
+    "InvocationMetadata",
+    "JournalStore",
     "JsonValue",
     "PlannedEvent",
     "PlannedResource",
