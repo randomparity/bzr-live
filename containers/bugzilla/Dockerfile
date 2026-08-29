@@ -3,6 +3,12 @@ FROM ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a
 ARG DEBIAN_FRONTEND=noninteractive
 ARG BZ_SOURCE_SHA=644c66f45ce0b1b2746a31a061fbd96886278225
 ARG BZ_SOURCE_SHA256=bf4f79d9e6b230ad01d9b3c4d12a56af7eebd96cc76d5c9231a696a0750e1660
+ARG DBD_MARIADB_VERSION=1.24
+ARG DBD_MARIADB_SHA256=f977a25b4116a0a95a7c8a894fd37097abe19af9a6a9ed4d800604ec17873fe4
+ARG TEMPLATE_TOOLKIT_VERSION=3.106
+ARG TEMPLATE_TOOLKIT_SHA256=c7474050be80201f1fb55f0a569b9c0ab6c1c3f0cebbd7e601bda9b4046eec85
+ARG PATCHREADER_VERSION=0.9.6
+ARG PATCHREADER_SHA256=b8de37460347bb5474dc01916ccb31dd2fe0cd92242c4a32d730e8eb087c323c
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -24,6 +30,7 @@ RUN apt-get update \
       libdatetime-perl \
       libdatetime-timezone-perl \
       libdbi-perl \
+      libdevel-checklib-perl \
       libdbix-connector-perl \
       libemail-address-perl \
       libemail-address-xs-perl \
@@ -45,12 +52,13 @@ RUN apt-get update \
       liblocale-codes-perl \
       libmath-random-isaac-perl \
       libmath-random-isaac-xs-perl \
+      libmariadb-dev \
       libmodule-build-perl \
-      libmysqlclient-dev \
       libnet-ldap-perl \
       libsoap-lite-perl \
       libtemplate-perl \
       libtemplate-plugin-gd-perl \
+      libtest-deep-perl \
       libtest-taint-perl \
       libtheschwartz-perl \
       libxml-perl \
@@ -59,9 +67,49 @@ RUN apt-get update \
       patchutils \
       perlmagick \
       tzdata \
- && cpan -T install Template::Toolkit DBD::MariaDB PatchReader \
+ && curl --fail --location --silent --show-error \
+      --output "/tmp/Template-Toolkit-${TEMPLATE_TOOLKIT_VERSION}.tar.gz" \
+      "https://cpan.metacpan.org/authors/id/T/TO/TODDR/Template-Toolkit-${TEMPLATE_TOOLKIT_VERSION}.tar.gz" \
+ && curl --fail --location --silent --show-error \
+      --output "/tmp/DBD-MariaDB-${DBD_MARIADB_VERSION}.tar.gz" \
+      "https://cpan.metacpan.org/authors/id/P/PA/PALI/DBD-MariaDB-${DBD_MARIADB_VERSION}.tar.gz" \
+ && curl --fail --location --silent --show-error \
+      --output "/tmp/PatchReader-${PATCHREADER_VERSION}.tar.gz" \
+      "https://cpan.metacpan.org/authors/id/T/TM/TMANNERM/PatchReader-${PATCHREADER_VERSION}.tar.gz" \
+ && printf '%s  %s\n' "$TEMPLATE_TOOLKIT_SHA256" "/tmp/Template-Toolkit-${TEMPLATE_TOOLKIT_VERSION}.tar.gz" \
+      | sha256sum --check --strict \
+ && printf '%s  %s\n' "$DBD_MARIADB_SHA256" "/tmp/DBD-MariaDB-${DBD_MARIADB_VERSION}.tar.gz" \
+      | sha256sum --check --strict \
+ && printf '%s  %s\n' "$PATCHREADER_SHA256" "/tmp/PatchReader-${PATCHREADER_VERSION}.tar.gz" \
+      | sha256sum --check --strict \
+ && tar --extract --gzip --file "/tmp/Template-Toolkit-${TEMPLATE_TOOLKIT_VERSION}.tar.gz" --directory /tmp \
+ && tar --extract --gzip --file "/tmp/DBD-MariaDB-${DBD_MARIADB_VERSION}.tar.gz" --directory /tmp \
+ && tar --extract --gzip --file "/tmp/PatchReader-${PATCHREADER_VERSION}.tar.gz" --directory /tmp \
+ && cd "/tmp/Template-Toolkit-${TEMPLATE_TOOLKIT_VERSION}" \
+ && perl Makefile.PL \
+ && make \
+ && make test \
+ && make install \
+ && cd "/tmp/DBD-MariaDB-${DBD_MARIADB_VERSION}" \
+ && perl Makefile.PL \
+ && make \
+ && make test \
+ && make install \
+ && cd "/tmp/PatchReader-${PATCHREADER_VERSION}" \
+ && perl Makefile.PL \
+ && make \
+ && make test \
+ && make install \
+ && cd / \
+ && rm -rf \
+      "/tmp/Template-Toolkit-${TEMPLATE_TOOLKIT_VERSION}" \
+      "/tmp/Template-Toolkit-${TEMPLATE_TOOLKIT_VERSION}.tar.gz" \
+      "/tmp/DBD-MariaDB-${DBD_MARIADB_VERSION}" \
+      "/tmp/DBD-MariaDB-${DBD_MARIADB_VERSION}.tar.gz" \
+      "/tmp/PatchReader-${PATCHREADER_VERSION}" \
+      "/tmp/PatchReader-${PATCHREADER_VERSION}.tar.gz" \
  && apt-get purge -y --auto-remove build-essential \
- && rm -rf /root/.cpan /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /var/www/html
 RUN curl --fail --location --silent --show-error \

@@ -24,6 +24,13 @@ Build on the pinned multi-architecture Ubuntu 24.04 image index
 `sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517`.
 Run MariaDB 10.6 from the pinned multi-architecture image index
 `sha256:92e50059ea0a5965a33ef751970eab37d421b91ebbd01ac909039cffe159e574`.
+Use Ubuntu-signed packages where their versions satisfy Bugzilla. Fetch DBD
+MariaDB 1.24, Template Toolkit 3.106, and PatchReader 0.9.6 directly and verify
+respective SHA-256 values
+`f977a25b4116a0a95a7c8a894fd37097abe19af9a6a9ed4d800604ec17873fe4`,
+`c7474050be80201f1fb55f0a569b9c0ab6c1c3f0cebbd7e601bda9b4046eec85`, and
+`b8de37460347bb5474dc01916ccb31dd2fe0cd92242c4a32d730e8eb087c323c`
+before any distribution's build machinery executes.
 
 Keep orchestration in one Compose file. Generate a private local `.env` before
 startup, bind the web port to `127.0.0.1`, and use separate named volumes for
@@ -33,10 +40,10 @@ operator entry points.
 
 ## Consequences
 
-- Bugzilla source and the two base-image identities are reproducible, and both
-  image indexes contain Linux amd64 and arm64 manifests. Ubuntu package indexes
-  and CPAN dependencies remain time-varying inputs, so this decision does not
-  promise byte-for-byte image reproduction.
+- Bugzilla source, DBD MariaDB, Template Toolkit, PatchReader, and the two
+  base-image identities are pinned, and both image indexes contain Linux amd64
+  and arm64 manifests. Ubuntu package indexes remain a time-varying input, so
+  this decision does not promise byte-for-byte image reproduction.
 - Building Bugzilla installs its Perl and OS dependencies and is slower than
   pulling a prebuilt image.
 - Rotating a pin is an explicit repository change that must re-run both-platform
