@@ -1,0 +1,329 @@
+# Versioned Scenario Contract Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: use `$forge` to implement this plan task by task with TDD and whole-branch review.
+
+**Goal:** Implement strict version 1 scenario loading, dependency/recovery planning, canonical digests, and owner-only atomic event journals for issue #3.
+
+**Architecture:** `bzr_live.scenario.model` owns immutable public values and canonical conversion. `loader` owns duplicate-aware decoding, descriptor-confined assets, closed resource/action validators, reference planning, and the digest; it has no mutation capability. `journal` owns owner-only descriptor-relative state, attempt transitions, and redaction. Later executors can consume only `ValidatedScenario` and delegate mutations to `bzr` except for the separately authorized narrow custom-field adapter.
+
+**Tech Stack:** Python 3.11 standard library, Setuptools 84.0.0, `unittest`, `uv`.
+
+**Spec:** `docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md`
+
+## Global Constraints
+
+- Use Python 3.11 or later.
+- Pin the build backend to Setuptools 84.0.0.
+- Add no runtime or test dependency outside the standard library.
+- `scenario.json`, `resources.json`, and every non-empty `events.jsonl` line require integer `format_version: 1`.
+- Names match `[a-z][a-z0-9-]{0,62}`; server bug aliases are exactly `bzr-live-` plus 31 lowercase SHA-256 hex characters.
+- All decoded objects reject duplicate and unknown keys; floats and non-finite values are invalid.
+- Assets are read once through descriptor-relative no-follow opens and retained as immutable bytes.
+- Journal directories/files use exact 0700/0600 modes, one retained directory descriptor, and one exclusive lock.
+- Protocol/recovery values are never redacted; opaque arguments/output use the exact compound-key and known-secret rules in the spec.
+- `BASE_BRANCH` is `main`.
+- Focused guardrail: `uv run --python 3.11 python -m unittest discover -s tests -v`.
+- Packaging guardrail: `uv build`.
+
+---
+
+### Task 1: Immutable model and strict resource catalog
+
+**Files:**
+- Create: `pyproject.toml`
+- Create: `src/bzr_live/__init__.py`
+- Create: `src/bzr_live/scenario/__init__.py`
+- Create: `src/bzr_live/scenario/model.py`
+- Create: `src/bzr_live/scenario/loader.py`
+- Create: `tests/test_scenario_resources.py`
+
+**Interfaces:**
+- Consumes: only Python 3.11 standard-library types.
+- Produces:
+  - `ScenarioValidationError(source: str, field: str, message: str)`
+  - frozen `Reference`, `Asset`, `PlannedResource`, `PlannedEvent`, `ValidatedScenario`
+  - `RecoveryClass = Literal["unique-create", "idempotent-set", "append"]`
+  - `freeze_planned(value: object) -> PlannedValue`
+  - `planned_to_json(value: PlannedValue) -> JsonValue`
+  - `load_scenario(path: str | Path) -> ValidatedScenario`
+- Later tasks extend `load_scenario` event validation without changing its public signature.
+
+- [ ] **Step 1: Add failing resource-contract tests**
+
+Create `tests/test_scenario_resources.py` with a `TemporaryDirectory` fixture helper that writes a minimal manifest, resource catalog, and empty event stream. Add tests that require:
+
+```python
+class ScenarioResourceTests(unittest.TestCase):
+    def test_loads_typed_immutable_resources_in_stable_dependency_order(self): ...
+    def test_rejects_duplicate_json_keys_with_source_and_field(self): ...
+    def test_rejects_unknown_fields_and_boolean_versions(self): ...
+    def test_rejects_floats_and_non_finite_numbers(self): ...
+    def test_rejects_duplicate_resource_identity(self): ...
+    def test_rejects_missing_and_wrong_kind_resource_references(self): ...
+    def test_rejects_invalid_flag_scope_dependency(self): ...
+    def test_rejects_invalid_custom_field_catalog(self): ...
+```
+
+The valid catalog includes group, actor, product, component, version, milestone, custom-field, keyword, and flag-type records in intentionally non-topological input order. Assert returned nested references are `Reference`, mappings reject assignment, and `resource_plan` keeps input order among ready nodes. For every failure, assert the exception string contains the filename/JSON path but does not echo the invalid value when that value is marked sensitive.
+
+- [ ] **Step 2: Run the tests and observe the missing-package failure**
+
+Run:
+
+```bash
+uv run --python 3.11 python -m unittest tests.test_scenario_resources -v
+```
+
+Expected: nonzero exit with `ModuleNotFoundError: No module named 'bzr_live'`.
+
+- [ ] **Step 3: Add packaging and immutable public values**
+
+Create `pyproject.toml` with:
+
+```toml
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bzr-live"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+```
+
+Implement `model.py` with frozen, slotted dataclasses, `MappingProxyType`-backed mappings, tuples, the closed aliases from the spec, canonical conversion of `Reference` to `{"ref": "kind:name"}`, and a `ScenarioValidationError` whose rendering is `source:field: message`. Export only the public contract from `scenario/__init__.py`; keep the root `__init__.py` empty apart from a module docstring.
+
+- [ ] **Step 4: Implement strict document/resource loading**
+
+In `loader.py` implement small functions with one responsibility:
+
+```python
+def _load_json(path: Path, source: str) -> dict[str, object]: ...
+def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]: ...
+def _object(value: object, source: str, field: str, allowed: set[str], required: set[str]) -> dict[str, object]: ...
+def _reference(value: object, expected: str, source: str, field: str) -> Reference: ...
+def _validate_resources(document: object, source: str) -> tuple[tuple[PlannedResource, ...], tuple[PlannedResource, ...], dict[str, PlannedResource]]: ...
+def load_scenario(path: str | Path) -> ValidatedScenario: ...
+```
+
+Use `json.loads` with an object-pairs hook that raises on duplicate keys, `parse_float` and `parse_constant` callbacks that raise, explicit `type(value) is int/bool` checks, and closed field sets per resource kind. Validate emails, select catalogs, typed dependencies, flag target/scopes, duplicate lists, and cross-scope product/component rules. Build a stable Kahn plan; version 1 is acyclic by kind, but every missing/wrong-kind dependency fails before a plan returns. Initially require/parse all three input files and return empty events/assets/digest placeholders only as needed to make the Task 1 tests pass; no public stub or placeholder value may remain after Task 2.
+
+- [ ] **Step 5: Run resource tests**
+
+Run the Task 1 command. Expected: exit 0; every `ScenarioResourceTests` test passes.
+
+- [ ] **Step 6: Commit the resource contract**
+
+```bash
+git add pyproject.toml src/bzr_live/__init__.py src/bzr_live/scenario/__init__.py src/bzr_live/scenario/model.py src/bzr_live/scenario/loader.py tests/test_scenario_resources.py
+git commit -m "feat: validate scenario resource catalogs"
+```
+
+### Task 2: Assets, actions, dependency plans, and canonical digest
+
+**Files:**
+- Modify: `src/bzr_live/scenario/loader.py`
+- Modify: `src/bzr_live/scenario/model.py`
+- Create: `tests/test_scenario_events.py`
+- Create: `tests/test_scenario_digest.py`
+
+**Interfaces:**
+- Consumes: Task 1 model types/resource index and `planned_to_json`.
+- Produces the final `load_scenario(path) -> ValidatedScenario` contract.
+- Private exact interfaces:
+
+```python
+def _load_asset(root_fd: int, declaration: dict[str, object], source: str, field: str) -> Asset: ...
+def _validate_events(lines: str, scenario_name: str, resources: Mapping[str, PlannedResource], assets: Mapping[str, Asset]) -> tuple[PlannedEvent, ...]: ...
+def _server_alias(scenario_name: str, alias: str) -> str: ...
+def _scenario_digest(manifest: Mapping[str, PlannedValue], resources: tuple[PlannedResource, ...], events: tuple[PlannedEvent, ...], assets: Mapping[str, Asset]) -> str: ...
+```
+
+- [ ] **Step 1: Add failing asset/action tests**
+
+Create `tests/test_scenario_events.py` using complete temporary scenarios. Cover all eight actions and assert exact recovery classes, creates, marker, dependencies (actor first, then schema-order first occurrence), and the four-key postcondition. Assert:
+
+- 40-character `bzr-live-<31hex>` server alias from `sha256(b"v1\0" + scenario + b"\0" + alias)`;
+- product/component/version/milestone ownership;
+- declared keyword refs and bug-target flag-type scope;
+- custom-field select membership;
+- actor/asset/prior-output resolution and wrong-kind, self, and forward rejection;
+- duplicate event/output names and unsupported actions;
+- strict media types and booleans;
+- immutable `Reference` values inside payload/postcondition;
+- asset missing, final/ancestor symlink, non-regular, unsafe path, and checksum failures;
+- replacing an asset path after loading cannot change `Asset.content`.
+
+Use `unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), ...)` only for the symlink-specific platform assertion; the project target hosts provide it.
+
+- [ ] **Step 2: Run action tests and observe failures**
+
+```bash
+uv run --python 3.11 python -m unittest tests.test_scenario_events -v
+```
+
+Expected: nonzero exit because Task 1 does not yet accept assets/events.
+
+- [ ] **Step 3: Implement descriptor-confined assets and event validators**
+
+Open the scenario directory with `O_DIRECTORY | O_NOFOLLOW`. Walk asset components with `dir_fd`, opening ancestors as directories and the final file read-only/no-follow; require regular `fstat`, read from the descriptor, checksum once, and retain bytes. Never reopen the authored path.
+
+Implement one validator per action behind a fixed registry whose entry holds recovery class and validator function. Normalize defaults exactly as the spec states. Keep created bug product/component state for update and flag scope checks. Generate planned dependencies by walking schema-declared fields, not input mapping order. Construct exact postconditions and server aliases. Reject every malformed condition before returning any `ValidatedScenario`.
+
+- [ ] **Step 4: Run action tests**
+
+Run the Task 2 action command. Expected: exit 0 with all action/asset cases passing.
+
+- [ ] **Step 5: Add failing digest tests**
+
+Create `tests/test_scenario_digest.py` with table-driven mutations. Assert formatting/object-key and asset-declaration order do not change the digest. Separately mutate every accepted manifest field, each resource, resource order, each event field, event order, asset name/path/checksum, and asset bytes; each must change the lowercase 64-hex digest. Assert the exact digest equals SHA-256 over the documented sorted-key, UTF-8, compact semantic envelope.
+
+- [ ] **Step 6: Run digest tests and observe failure**
+
+```bash
+uv run --python 3.11 python -m unittest tests.test_scenario_digest -v
+```
+
+Expected: nonzero exit until canonical normalization/digest code is complete.
+
+- [ ] **Step 7: Implement canonical normalization and digest**
+
+Default-expand manifest/resources/events, sort manifest and envelope asset declarations by path, preserve resource/event order, recursively serialize typed references, use `json.dumps(..., sort_keys=True, ensure_ascii=False, separators=(",", ":"))`, encode UTF-8 with no newline, and hash with SHA-256. Return the completed immutable `ValidatedScenario`; remove every Task 1 temporary placeholder.
+
+- [ ] **Step 8: Run Task 2 tests**
+
+```bash
+uv run --python 3.11 python -m unittest tests.test_scenario_events tests.test_scenario_digest -v
+```
+
+Expected: exit 0.
+
+- [ ] **Step 9: Commit action planning and digest**
+
+```bash
+git add src/bzr_live/scenario/model.py src/bzr_live/scenario/loader.py tests/test_scenario_events.py tests/test_scenario_digest.py
+git commit -m "feat: plan and hash scenario events"
+```
+
+### Task 3: Atomic owner-only journal and redaction
+
+**Files:**
+- Create: `src/bzr_live/scenario/journal.py`
+- Modify: `src/bzr_live/scenario/__init__.py`
+- Create: `tests/test_journal.py`
+
+**Interfaces:**
+- Consumes: `Reference`, `RecoveryClass`, `PlannedValue`, `JsonValue`, `freeze_planned`, and `planned_to_json`.
+- Produces frozen `InvocationMetadata`, `InFlightRecord`, `CompletedRecord`, and:
+
+```python
+class JournalStore:
+    def __init__(self, state_dir: str | Path) -> None: ...
+    def close(self) -> None: ...
+    def __enter__(self) -> JournalStore: ...
+    def __exit__(self, *exc_info: object) -> None: ...
+    def write_in_flight(self, record: InFlightRecord, *, known_secrets: Collection[str] = ()) -> Path: ...
+    def replace_completed(self, record: CompletedRecord, *, known_secrets: Collection[str] = ()) -> Path: ...
+    def read(self, event: str, attempt: int | None = None) -> InFlightRecord | CompletedRecord | None: ...
+```
+
+- [ ] **Step 1: Add failing journal tests**
+
+Create `tests/test_journal.py`. Tests must assert:
+
+- new state directory 0700, `.lock` and attempt files 0600;
+- wrong owner/mode, symlink, non-directory, unsafe record mode/type/version/fields fail;
+- second `JournalStore` fails while the first lock is held;
+- replacing/renaming the state pathname after construction does not redirect operations;
+- attempt 1 no-replace install, exact completion replacement, preserved expected postcondition;
+- only latest completed `next_safe_action == "retry"` permits consecutive identical attempt metadata;
+- prior completed attempts remain readable and immutable;
+- unsupported recovery/next-action classes, booleans as integers, mismatches, gaps, and completed overwrite fail;
+- injected failures before link/replace leave the prior valid state and clean temporary names;
+- known secrets in structural fields/postconditions fail without echoing the value;
+- `API_KEY`, `AUTHORIZATION`, `clientAPIKey`, `proxyAuthorization`, `access_token`, `refreshToken`, `client-secret`, and `set-cookie` values become null with default secrets;
+- known-secret substrings `redacted`, `<`, and `act` are removed from every opaque argument/output string without changing structural identity;
+- non-sensitive output remains.
+
+Patch the smallest OS call boundary for controlled faults; do not mock journal logic.
+
+- [ ] **Step 2: Run journal tests and observe import failure**
+
+```bash
+uv run --python 3.11 python -m unittest tests.test_journal -v
+```
+
+Expected: nonzero exit because `bzr_live.scenario.journal` is absent.
+
+- [ ] **Step 3: Implement record validation and redaction**
+
+Use frozen slotted dataclasses and validate in `__post_init__` or store-bound constructors. Build `_contains_secret`, `_redact_opaque`, and `_sensitive_key` exactly from the spec: punctuation-to-underscore, lowercase/digit-to-uppercase boundaries, lowercase, sensitive segments, adjacent `api`/`key`, null sensitive-key values, longest-first fixed-point substring removal elsewhere. Never redact protocol fields. Errors name the field only.
+
+- [ ] **Step 4: Implement descriptor-relative state transitions**
+
+Create the directory with mode 0700 only when absent, open with `O_DIRECTORY | O_NOFOLLOW`, verify owner/mode by `fstat`, and retain its descriptor. Open/verify/flock `.lock` relative to it. Generate random temporary basenames, create with `O_CREAT | O_EXCL | O_NOFOLLOW` mode 0600 via `dir_fd`, write canonical JSON plus newline, flush/fsync, then descriptor-relative no-replace `os.link` or `os.replace`; fsync the directory descriptor. Cleanup pre-install temp names. Reads enumerate/parse attempt names relative to the descriptor and reconstruct typed references only in declared fields.
+
+- [ ] **Step 5: Run journal tests**
+
+Run the Task 3 command. Expected: exit 0.
+
+- [ ] **Step 6: Verify the controlled-fault tests bite**
+
+Temporarily change the journal replacement helper to skip the install call; run the two controlled-fault tests and require a failure. Restore the implementation and rerun them successfully. Do not commit the mutation.
+
+- [ ] **Step 7: Commit the journal**
+
+```bash
+git add src/bzr_live/scenario/__init__.py src/bzr_live/scenario/journal.py tests/test_journal.py
+git commit -m "feat: journal scenario event attempts"
+```
+
+### Task 4: Whole-contract proof and packaging
+
+**Files:**
+- Modify only files from Tasks 1–3 if the proof exposes an issue.
+- Test: all files under `tests/`.
+
+**Interfaces:**
+- Consumes and verifies the complete public `bzr_live.scenario` API.
+- Produces no additional surface.
+
+- [ ] **Step 1: Run the focused contract guardrail**
+
+```bash
+uv run --python 3.11 python -m unittest discover -s tests -v
+```
+
+Expected: exit 0; all resource, event, digest, asset, journal, fault, permission, and redaction tests pass.
+
+- [ ] **Step 2: Build source and wheel distributions**
+
+```bash
+uv build
+```
+
+Expected: exit 0 and artifacts under ignored/untracked `dist/`. Remove the local build artifacts after confirming contents are not tracked.
+
+- [ ] **Step 3: Smoke the installed public API**
+
+Build/install into a temporary uv environment, load the valid test scenario through `bzr_live.scenario.load_scenario`, write attempt 1 in-flight, replace it completed, read it back, and print only `<digest> completed`. Expected: exit 0, a 64-hex digest, and `completed`; no subprocess or network action is performed by the package.
+
+- [ ] **Step 4: Inspect source capability boundary**
+
+Search `src/bzr_live/scenario` for imports/calls of `subprocess`, `socket`, HTTP clients, or database clients. Expected: no match. This is a structural supplement to the runtime smoke, not a substitute for it.
+
+- [ ] **Step 5: Commit any proof-driven correction**
+
+If Steps 1–4 required a source/test correction, stage only those exact files and commit one logical `fix:` commit after rerunning both guardrails. Otherwise create no empty commit.
+
+## Plan self-review
+
+- Tasks map every requirement in the linked specification: Task 1 owns strict resources/types, Task 2 assets/events/dependencies/digest, Task 3 journal/redaction, and Task 4 behavior/package smoke.
+- All borrowed interfaces are Python 3.11 standard-library calls (`os.open`, `dir_fd`, `os.link`, `os.replace`, `fcntl.flock`, `json`, `hashlib`, immutable dataclasses) and are available on the declared macOS/Linux project hosts.
+- Every test step has an exact command and expected red/green result.
+- No task changes Compose, lifecycle, root entrypoints/config, `.env.example`, or `README.md`.
+- No deferrals, placeholders, plugin framework, mutation handler, or compatibility shim is introduced.
