@@ -47,6 +47,7 @@ _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z", re.ASCII)
 _SENSITIVE_SEGMENTS = {
     "token", "password", "secret", "cookie", "credential", "authorization", "apikey",
 }
+_ACL_TYPE_EXTENDED = 0x100
 
 _DARWIN_LIBC = ctypes.CDLL(None, use_errno=True) if sys.platform == "darwin" else None
 if _DARWIN_LIBC is not None:
@@ -378,8 +379,6 @@ class InFlightRecord:
     def __post_init__(self) -> None:
         object.__setattr__(self, "expected_postcondition", _validate_planned(self.expected_postcondition, "$.expected_postcondition"))
         _validate_common(self)
-        if not isinstance(self.expected_postcondition, Mapping):
-            raise _journal_error("$.expected_postcondition", "must be an object")
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,8 +400,6 @@ class CompletedRecord:
         object.__setattr__(self, "expected_postcondition", _validate_planned(self.expected_postcondition, "$.expected_postcondition"))
         object.__setattr__(self, "handler_output", _validate_json(self.handler_output, "$.handler_output"))
         _validate_common(self)
-        if not isinstance(self.expected_postcondition, Mapping):
-            raise _journal_error("$.expected_postcondition", "must be an object")
         if not isinstance(self.invocation, InvocationMetadata):
             raise _journal_error("$.invocation", "must be invocation metadata")
         action = self.expected_postcondition["action"]
@@ -678,7 +675,7 @@ def _clear_inherited_acl(fd: int, field: str) -> None:
     if not acl:
         raise _journal_error(field, "cannot allocate an empty access ACL")
     try:
-        if _DARWIN_LIBC.acl_set_fd_np(fd, acl, 0x100) != 0:
+        if _DARWIN_LIBC.acl_set_fd_np(fd, acl, _ACL_TYPE_EXTENDED) != 0:
             raise _journal_error(field, "cannot clear inherited access ACL")
     finally:
         _DARWIN_LIBC.acl_free(acl)
@@ -688,7 +685,7 @@ def _reject_access_acl(fd: int, field: str) -> None:
     if _DARWIN_LIBC is None:
         return
     ctypes.set_errno(0)
-    acl = _DARWIN_LIBC.acl_get_fd_np(fd, 0x100)
+    acl = _DARWIN_LIBC.acl_get_fd_np(fd, _ACL_TYPE_EXTENDED)
     if acl:
         _DARWIN_LIBC.acl_free(acl)
         raise _journal_error(field, "must not have an access ACL")
