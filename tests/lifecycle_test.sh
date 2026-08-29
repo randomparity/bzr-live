@@ -27,7 +27,7 @@ assert_not_contains() {
 
 assert_mode_600() {
   local file=$1 mode
-  mode=$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file")
+  mode=$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file")
   [[ $mode == 600 ]] || fail "expected mode 600 for $file, got $mode"
 }
 
