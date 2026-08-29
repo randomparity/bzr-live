@@ -67,9 +67,10 @@ metadata. Protocol identity and recovery fields are never redacted or rewritten:
 installing the in-flight intent, the store rejects a known secret occurring in any of them
 or in the expected postcondition. Completion likewise rejects secret-bearing structural
 metadata and preserves the in-flight record. Redaction is limited to opaque invocation
-arguments and handler output: sensitive-key values become null, and every caller-supplied
-non-empty known-secret substring is removed from other opaque strings until none remains.
-The secret list is never retained or serialized.
+arguments and handler output. Normalized keys named `authorization`, `api_key`, or `apikey`,
+or containing a `token`, `password`, `secret`, `cookie`, or `credential` segment, map to
+null. Every caller-supplied non-empty known-secret substring is removed from other opaque
+strings until none remains. The secret list is never retained or serialized.
 
 The package performs no Bugzilla mutation, network request, or subprocess invocation. Later
 runner code may execute only from a `ValidatedScenario` and must delegate supported

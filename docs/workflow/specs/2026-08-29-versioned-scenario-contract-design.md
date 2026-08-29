@@ -202,10 +202,15 @@ fields are:
 | `version` | `kind`, `name`, `product` | none | product is `product` |
 | `milestone` | `kind`, `name`, `product` | none | product is `product` |
 | `custom-field` | `kind`, `name`, `field_type` | `values` (default `[]`) | none |
+| `keyword` | `kind`, `name`, `description` | none | none |
+| `flag-type` | `kind`, `name`, `description`, `target` | `products` (default `[]`), `components` (default `[]`) | products are `product`; components are `component` |
 
 Emails must contain one non-edge `@` and no ASCII whitespace. `field_type` is one of `text`,
 `single-select`, or `multi-select`. Select fields require a non-empty unique list of non-empty
-string values; text fields require no values. Reference lists reject duplicate references.
+string values; text fields require no values. A flag type target is `bug` or `attachment`.
+Flag product/component lists are duplicate-free; an empty list means all values at that
+scope. When both lists are non-empty, every listed component's owning product must also be
+listed. All reference lists reject duplicate references.
 
 Dependencies are every typed reference in the kind-specific reference fields. All must
 resolve to declared resources of the required kind. The closed version 1 kind graph is
@@ -257,16 +262,16 @@ The fixed version 1 actions are:
 | `bug.attach` | `append` | `alias`, `bug`, `asset`, `description`, `content_type` | `private` | `attachment:<alias>` |
 | `bug.worktime` | `append` | `bug`, `hours`, `comment` | none | none |
 | `bug.custom-field-set` | `idempotent-set` | `bug`, `values` | none | none |
-| `bug.flag` | `idempotent-set` | `bug`, `name`, `status` | `requestee` | none |
+| `bug.flag` | `idempotent-set` | `bug`, `flag_type`, `status` | `requestee` | none |
 | `attachment.update` | `idempotent-set` | `attachment`, `obsolete` | `description` | none |
 
 `bug.create` references must have the kinds implied by their key. Its component, version, and
 milestone (when present) must resolve to resources owned by its selected product. The
-validator records that product against the created bug identity. `cc`, `groups`,
+validator records that product and component against the created bug identity. `cc`, `groups`,
 `depends_on`, and `blocks` are duplicate-free lists. `keywords` is a duplicate-free list of
-non-empty strings. Optional hours use the decimal-string grammar above. `custom_fields` and
-`bug.custom-field-set.values` are non-empty lists of objects containing exactly `field` and
-`value`; `field` references `custom-field`, and field names are unique in the assignment.
+`keyword` references. Optional hours use the decimal-string grammar above. `custom_fields`
+and `bug.custom-field-set.values` are non-empty lists of objects containing exactly `field`
+and `value`; `field` references `custom-field`, and field names are unique in the assignment.
 Text fields require a string. Single-select fields require one string present in the
 resource's declared `values`; every member assigned to a multi-select field must occur in its
 declared `values`, and the assignment list is duplicate-free.
@@ -274,15 +279,17 @@ declared `values`, and the assignment list is duplicate-free.
 `bug.update.set` is non-empty and accepts only `summary`, `status`, `resolution`, `assignee`,
 `cc`, `groups`, `depends_on`, `blocks`, `duplicate_of`, `version`, `milestone`, `keywords`,
 `estimated_hours`, and `remaining_hours`. Each reference field has its named kind; list and
-hours rules match `bug.create`. A version or milestone must belong to the target bug's
-recorded product. Null is accepted only for `resolution`, `assignee`, `duplicate_of`,
-`version`, and `milestone`, where it explicitly clears the field.
+hours rules match `bug.create`, including `keyword` references. A version or milestone must
+belong to the target bug's recorded product. Null is accepted only for `resolution`,
+`assignee`, `duplicate_of`, `version`, and `milestone`, where it explicitly clears the field.
 
 Comment/work-time body text is non-empty. Attachment `content_type` must match
 `[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+`: exactly one slash, non-empty
-type/subtype, and no whitespace or control characters. Flag status is one of `?`, `+`, `-`,
-or `X`; requestee is an actor and is allowed only with `?`. `obsolete` and `private` are
-strict booleans. `private` defaults false.
+type/subtype, and no whitespace or control characters. A `bug.flag` `flag_type` references a
+declared `flag-type` whose target is `bug`; if its product or component scopes are non-empty,
+the target bug's recorded product/component must occur in them. Flag status is one of `?`,
+`+`, `-`, or `X`; requestee is an actor and is allowed only with `?`. `obsolete` and
+`private` are strict booleans. `private` defaults false.
 
 Every event receives the deterministic reconciliation marker
 `bzr-live:<scenario-name>:<event-name>`. Append handlers must include it in the semantic
@@ -296,13 +303,13 @@ reference for create/attach and the payload's target reference for every other a
 
 | Action | `values` mapping |
 |---|---|
-| `bug.create` | the normalized payload without `alias`, plus `server_alias: \"bzr-live-<scenario>-<alias>\"`; absent lists become `[]`, absent nullable references/hours become `null`, absent description becomes `\"\"`, and absent custom fields become `[]` |
+| `bug.create` | the normalized payload without `alias`, plus `server_alias: "bzr-live-<31hex>"`, where `<31hex>` is the first 31 lowercase hexadecimal characters of SHA-256 over UTF-8 bytes `v1\\0<scenario-name>\\0<alias>`; the result is exactly 40 ASCII characters; absent lists become `[]`, absent nullable references/hours become `null`, absent description becomes `""`, and absent custom fields become `[]` |
 | `bug.update` | the normalized `set` mapping with only explicitly supplied keys; explicit nulls remain null |
 | `bug.comment` | `body` and default-expanded `private` |
 | `bug.attach` | `bug`, `asset`, the validated `asset_sha256`, `description`, `content_type`, and default-expanded `private` |
 | `bug.worktime` | `bug`, canonical decimal-string `hours`, and `comment` |
 | `bug.custom-field-set` | `bug` and normalized `values`, preserving declared field order |
-| `bug.flag` | `bug`, `name`, `status`, and `requestee` defaulted to null |
+| `bug.flag` | `bug`, `flag_type`, `status`, and `requestee` defaulted to null |
 | `attachment.update` | `attachment`, `obsolete`, and `description` only when explicitly supplied |
 
 These mappings and nested sequences are immutable. A later handler must compare the exact
@@ -440,13 +447,17 @@ caller may mutate. `replace_completed` rejects a secret in completion-only struc
 and leaves the in-flight record intact.
 
 Redaction copies only `invocation.arguments` and `handler_output`. Within those opaque values,
-keys compare case-insensitively after replacing `-` with `_`; `api_key`, `apikey`, `token`,
-`password`, `secret`, `authorization`, and `cookie` values become JSON null. In all other
-opaque strings, every non-empty `known_secrets` substring is removed, longest secrets first,
-until no supplied secret remains in that value. The collection is neither retained nor
-serialized. The invariant applies to parsed opaque payload values, not coincidental bytes in
-JSON syntax or protocol identities. Tests cover secrets such as `redacted`, `<`, and `act`,
-require no opaque output string to contain them, and require identities to remain unchanged.
+key normalization inserts `_` before ASCII capitals, replaces every non-alphanumeric run
+with `_`, strips edge underscores, and lowercases. A key is sensitive when the normalized
+value is `authorization`, `api_key`, or `apikey`, or any underscore-delimited segment is
+`token`, `password`, `secret`, `cookie`, or `credential`; its value becomes JSON null. This
+covers `access_token`, `refreshToken`, `client-secret`, and `set-cookie` with an empty
+`known_secrets` collection. In all other opaque strings, every non-empty known-secret
+substring is removed, longest secrets first, until none remains in that value. The collection
+is neither retained nor serialized. The invariant applies to parsed opaque payload values,
+not coincidental bytes in JSON syntax or protocol identities. Tests cover the compound keys
+above and secrets such as `redacted`, `<`, and `act`, require no opaque output string to
+contain them, and require identities to remain unchanged.
 
 The journal makes local write transitions atomic across runner process termination. File and
 directory `fsync` request persistence but do not promise survival of an operating-system
@@ -524,14 +535,16 @@ Focused tests must prove:
   values contain `Reference` objects, plus a stable plan;
 - duplicate JSON keys, unknown fields, invalid versions/types, malformed resource/action
   shapes, duplicate resource/event/asset/output names, unresolved/forward/self references,
-  wrong-kind and cross-product references, out-of-catalog select values, missing actors/assets,
-  invalid custom-field values, and invalid dependencies fail with source and field context;
+  wrong-kind and cross-product references, undeclared keywords/flag types, out-of-scope flag
+  targets, out-of-catalog select values, missing actors/assets, invalid custom-field values,
+  and invalid dependencies fail with source and field context;
 - unsafe, missing, ancestor/final symlinked, non-regular, and checksum-mismatched assets fail;
 - equivalent JSON formatting/key order and reordered asset declarations have the same digest,
   while every manifest/resource/event field, resource/event order, asset field, and asset byte
   mutation changes it;
 - every supported action exposes the exact declared recovery class, ordered complete
   dependency tuple, marker, created identity, and action-specific postcondition mapping;
+  every created bug server alias is deterministic and exactly 40 ASCII characters;
 - media types `/`, `/plain`, `text/`, values with extra slashes, whitespace, or controls fail;
 - state ownership/permissions are exact, replacing the state path after construction cannot
   redirect descriptor-relative work, in-flight install refuses overwrite, constructors/store
@@ -543,9 +556,10 @@ Focused tests must prove:
   after replacement leaves the completed record, and temporary files are cleaned;
 - known secrets in structural fields or expected postconditions are rejected without
   installing/replacing a record; exceptions retain field context but contain neither the
-  supplied secret nor the sensitive value; protocol identities remain byte-stable; and parsed
-  opaque output values contain none of the known secrets—including collision cases
-  `redacted`, `<`, and `act`—while non-sensitive values remain;
+  supplied secret nor the sensitive value; protocol identities remain byte-stable; parsed
+  opaque output values null compound credential keys including `access_token`, `refreshToken`,
+  `client-secret`, and `set-cookie`, and contain none of the known secrets—including collision
+  cases `redacted`, `<`, and `act`—while non-sensitive values remain;
 - source inspection plus import behavior confirms the package never imports or invokes a
   mutation/network subprocess surface.
 
