@@ -90,7 +90,11 @@ acquire_lock() {
 }
 
 volume_exists() {
-  docker volume inspect "$1" >/dev/null 2>&1
+  local volumes
+  if ! volumes=$(docker volume ls --quiet --filter "name=^${1}$"); then
+    die init 'start Docker, verify daemon access, and retry' 'cannot inspect Docker volumes'
+  fi
+  [[ $volumes == "$1" ]]
 }
 
 init_unlocked() {

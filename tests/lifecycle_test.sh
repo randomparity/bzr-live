@@ -46,9 +46,15 @@ if [[ ${1:-} == compose && ${2:-} == up && ${3:-} == --help ]]; then
   printf '%s\n' '      --wait' '      --wait-timeout int'
   exit 0
 fi
-if [[ ${1:-} == volume && ${2:-} == inspect ]]; then
-  [[ ${STUB_EXISTING_VOLUME:-0} == 1 ]] && exit 0
-  exit 1
+if [[ ${1:-} == volume && ${2:-} == ls ]]; then
+  if [[ ${STUB_VOLUME_INSPECT_ERROR:-0} == 1 ]]; then
+    printf 'daemon unavailable\n' >&2
+    exit 2
+  fi
+  volume_name=${*: -1}
+  volume_name=${volume_name#name=^}
+  [[ ${STUB_EXISTING_VOLUME:-0} == 1 ]] && printf '%s\n' "${volume_name%\$}"
+  exit 0
 fi
 if [[ " $* " == *" port bugzilla 80 "* ]]; then
   printf '127.0.0.1:8080\n'
@@ -136,6 +142,13 @@ if run_lifecycle "$root" init "$TEST_TMP/retained.out" STUB_EXISTING_VOLUME=1; t
 fi
 assert_contains "$TEST_TMP/retained.out" 'init failed'
 assert_contains "$TEST_TMP/retained.out" 'restore .env or run confirmed cleanup'
+
+root=$(new_root volume-inspection-failure)
+if run_lifecycle "$root" init "$TEST_TMP/volume-inspection-failure.out" STUB_VOLUME_INSPECT_ERROR=1; then
+  fail 'init generated credentials after volume inspection failed'
+fi
+[[ ! -e $root/.env ]] || fail 'init left .env after volume inspection failed'
+assert_contains "$TEST_TMP/volume-inspection-failure.out" 'cannot inspect Docker volumes'
 
 rm -f "$STUB_OPENSSL_COUNT"
 root=$(new_root failed-secret)
