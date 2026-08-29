@@ -230,6 +230,13 @@ order. References may resolve to declared resources/assets or outputs created by
 events. A self-reference, forward reference, duplicate created identity, or reference to a
 wrong kind is rejected. No topological reorder of events is performed.
 
+`PlannedEvent.dependencies` is complete and stable. It starts with the event actor, then adds
+every typed reference in the validated payload—including assets and earlier event outputs—in
+the field order shown by the action table (required fields first, then optional fields) and
+the nested-field order stated below. Repeated identities collapse at their first occurrence.
+The identity produced by the current event is recorded only in `creates`, never as its own
+dependency. Tests assert the exact tuple for every reference-bearing field of every action.
+
 The fixed version 1 actions are:
 
 | Action | Class | Required payload keys | Optional payload keys | Creates |
@@ -256,16 +263,36 @@ strings or duplicate-free lists of strings consistent with the declared field ty
 hours rules match `bug.create`. Null is accepted only for `resolution`, `assignee`,
 `duplicate_of`, `version`, and `milestone`, where it explicitly clears the field.
 
-Comment/work-time body text is non-empty. Attachment `content_type` is a non-empty string
-containing one `/`. Flag status is one of `?`, `+`, `-`, or `X`; requestee is an actor and is
-allowed only with `?`. `obsolete` and `private` are strict booleans. `private` defaults false.
+Comment/work-time body text is non-empty. Attachment `content_type` must match
+`[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+`: exactly one slash, non-empty
+type/subtype, and no whitespace or control characters. Flag status is one of `?`, `+`, `-`,
+or `X`; requestee is an actor and is allowed only with `?`. `obsolete` and `private` are
+strict booleans. `private` defaults false.
 
 Every event receives the deterministic reconciliation marker
 `bzr-live:<scenario-name>:<event-name>`. Append handlers must include it in the semantic
 mutation: comment and work-time bodies, and attachment descriptions together with the
-validated asset checksum. The expected postcondition is a read-only canonical mapping built
-from the target reference and validated values. A later handler must not weaken it or invent
-recovery metadata at mutation time.
+validated asset checksum.
+
+Every `expected_postcondition` has exactly `action`, `target`, `values`, and `marker`.
+`action` and `marker` equal the planned event. `target` is the created `bug` or `attachment`
+reference for create/attach and the payload's target reference for every other action.
+`values` is constructed exactly as follows:
+
+| Action | `values` mapping |
+|---|---|
+| `bug.create` | the normalized payload without `alias`, plus `server_alias: \"bzr-live-<scenario>-<alias>\"`; absent lists become `[]`, absent nullable references/hours become `null`, absent description becomes `\"\"`, and absent custom fields become `[]` |
+| `bug.update` | the normalized `set` mapping with only explicitly supplied keys; explicit nulls remain null |
+| `bug.comment` | `body` and default-expanded `private` |
+| `bug.attach` | `bug`, `asset`, the validated `asset_sha256`, `description`, `content_type`, and default-expanded `private` |
+| `bug.worktime` | `bug`, canonical decimal-string `hours`, and `comment` |
+| `bug.custom-field-set` | `bug` and normalized `values`, preserving declared field order |
+| `bug.flag` | `bug`, `name`, `status`, and `requestee` defaulted to null |
+| `attachment.update` | `attachment`, `obsolete`, and `description` only when explicitly supplied |
+
+These mappings and nested sequences are immutable. A later handler must compare the exact
+normalized values, must not weaken the postcondition, and must not invent recovery metadata
+at mutation time.
 
 ## Canonical digest
 
@@ -286,14 +313,18 @@ After full validation, construct this semantic envelope:
 ```
 
 The three input values are their validated, default-expanded semantic forms; the event value
-is ordered. Asset entries are sorted by path, and their checksums were computed from exact
-bytes. Serialize as UTF-8 JSON with lexicographically sorted keys, no ASCII escaping, and
-separators `,` and `:` with no added whitespace, then hash those bytes with SHA-256. Floats
-are absent by contract, eliminating platform-dependent number rendering.
+is ordered. Within normalized `scenario.json`, asset declarations are sorted by canonical
+path. The envelope's asset table is the same sorted name/path/checksum projection, and each
+checksum was computed from the exact immutable bytes retained in `Asset.content`. Reordering
+asset declarations alone therefore leaves the digest unchanged. Serialize as UTF-8 JSON with
+lexicographically sorted keys, no ASCII escaping, and separators `,` and `:` with no added
+whitespace, then hash those bytes with SHA-256. Floats are absent by contract, eliminating
+platform-dependent number rendering.
 
 The digest includes the version in both the envelope and normalized documents. Any accepted
 field value, resource/event order, event action, declared asset identity/path/checksum, or
-asset byte change affects the digest. JSON formatting and object-key order do not.
+asset byte change affects the digest. JSON formatting, object-key order, and asset declaration
+order do not.
 
 ## Journal contract
 
@@ -324,6 +355,7 @@ class CompletedRecord:
     attempt: int
     actor: Reference
     action_class: str
+    expected_postcondition: Mapping[str, JsonValue]
     reconciliation_marker: str
     invocation: InvocationMetadata
     handler_output: JsonValue
@@ -365,14 +397,15 @@ gaps or conflicting attempts. With no attempt argument, `read` returns the lates
 A transition serializes canonical JSON plus one newline to a mode-0600 same-directory
 temporary regular file, flushes and `fsync`s it. `write_in_flight` permits attempt 1 only
 when no attempt exists. It permits attempt $n+1$ only when the latest record is completed
-attempt $n$ with `next_safe_action: \"retry\"`; all prior attempt files remain immutable. It
-uses `os.link` to install the fully written inode without replacing an existing name, then
-unlinks the temporary name. `replace_completed` reads the same attempt's valid in-flight
-record and requires matching attempt, scenario digest, event, actor, action class, and marker,
-then calls `os.replace`. Both transitions `fsync` the containing directory after directory
-changes. Temporary files are removed after any pre-install failure. Every other overwrite or
-mismatch is rejected. The exclusive store lock prevents two compliant writers from passing a
-read-before-replace check concurrently.
+attempt $n$ with `next_safe_action: "retry"` and the new digest, event, actor, action class,
+expected postcondition, and marker equal that completed record; all prior attempt files
+remain immutable. It uses `os.link` to install the fully written inode without replacing an
+existing name, then unlinks the temporary name. `replace_completed` reads the same attempt's
+valid in-flight record and requires matching attempt, scenario digest, event, actor, action
+class, expected postcondition, and marker, then calls `os.replace`. Both transitions `fsync`
+the containing directory after directory changes. Temporary files are removed after any
+pre-install failure. Every other overwrite or mismatch is rejected. The exclusive store lock
+prevents two compliant writers from passing a read-before-replace check concurrently.
 
 Invocation metadata is structurally allowlisted to mutation boundary, operation, argument
 strings, and credential environment _variable names_; environment values have no input field.
@@ -470,19 +503,24 @@ Focused tests must prove:
   shapes, duplicate resource/event/asset/output names, unresolved/forward/self references,
   wrong-kind references, missing actors/assets, invalid custom-field values, and resource
   cycles fail with source and field context;
-- unsafe, missing, symlinked, non-regular, and checksum-mismatched assets fail;
-- equivalent JSON formatting/key order has the same digest, while every manifest/resource/
-  event field, event order, asset declaration, and asset byte mutation changes it;
-- all supported actions expose the declared recovery class, marker, postcondition, and output;
+- unsafe, missing, ancestor/final symlinked, non-regular, and checksum-mismatched assets fail;
+- equivalent JSON formatting/key order and reordered asset declarations have the same digest,
+  while every manifest/resource/event field, resource/event order, asset field, and asset byte
+  mutation changes it;
+- every supported action exposes the exact declared recovery class, ordered complete
+  dependency tuple, marker, created identity, and action-specific postcondition mapping;
+- media types `/`, `/plain`, `text/`, values with extra slashes, whitespace, or controls fail;
 - state permissions are exact, in-flight install refuses overwrite, completion requires a
-  matching attempt, retry requires the latest completed attempt to authorize it, completed
-  history remains immutable, concurrent stores fail, and reads reject unsafe files;
+  matching attempt and expected postcondition, retry requires the latest completed attempt to
+  authorize identical recovery metadata, completed history remains immutable, concurrent
+  stores fail, and reads reject unsafe files;
 - controlled failure before replacement leaves the valid in-flight record, controlled failure
   after replacement leaves the completed record, and temporary files are cleaned;
 - known secrets in structural fields or expected postconditions are rejected without
-  installing/replacing a record; protocol identities remain byte-stable; and nested sensitive
-  values or known-secret substrings are absent only from opaque completed payloads while
-  non-sensitive values remain;
+  installing/replacing a record; exceptions retain field context but contain neither the
+  supplied secret nor the sensitive value; protocol identities remain byte-stable; and nested
+  sensitive values or known-secret substrings are absent only from opaque completed payloads
+  while non-sensitive values remain;
 - source inspection plus import behavior confirms the package never imports or invokes a
   mutation/network subprocess surface.
 

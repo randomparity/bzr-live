@@ -48,17 +48,20 @@ Journal state lives in an exact mode-0700 local directory. One non-blocking excl
 on an exact mode-0600 lock file gives each state directory a single writer. Each event has
 numbered exact mode-0600 attempt records. Attempt 1 transitions from absent to matching
 `in_flight`, then atomically to matching `completed`. A completed attempt whose
-`next_safe_action` is `retry` permits only the next consecutive attempt to begin; older
-completed attempts remain as the audit trail. The first transition uses an fsynced
-same-directory temporary file and an atomic no-replace link. After `bzr` returns, the second
-transition verifies the existing attempt, digest, event, actor, recovery class, and marker,
-then atomically replaces it with an fsynced completed record. Both transitions fsync the
-containing directory. Every other overwrite, a concurrent writer, unsafe permissions,
+`next_safe_action` is `retry` permits only the next consecutive attempt with identical
+scenario/event/actor/class/postcondition/marker recovery metadata to begin; older completed
+attempts remain as the audit trail. The first transition uses an fsynced same-directory
+temporary file and an atomic no-replace link. After `bzr` returns, the second transition
+verifies the existing attempt, digest, event, actor, recovery class, expected postcondition,
+and marker, then atomically replaces it with an fsynced completed record. Both transitions
+fsync the containing directory.
+Every other overwrite, a concurrent writer, unsafe permissions,
 symlinks, malformed records, and mismatch fails closed.
 
-The completed record names its mutation boundary and contains an allowlisted invocation
-shape, structured handler output, exit status, resolved IDs, and the next safe action. The
-boundary is `bzr` except for the explicit custom-field adapter value. Credential environment
+The completed record retains the exact expected postcondition, names its mutation boundary,
+and contains an allowlisted invocation shape, structured handler output, exit status,
+resolved IDs, and the next safe action.
+The boundary is `bzr` except for the explicit custom-field adapter value. Credential environment
 values are never accepted as invocation metadata. Protocol identity and recovery fields are
 never redacted or rewritten: before installing the in-flight intent, the store rejects a
 known secret occurring in any of them or in the expected postcondition. Completion likewise
