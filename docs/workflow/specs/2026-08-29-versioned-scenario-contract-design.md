@@ -63,6 +63,13 @@ class Reference:
     kind: str
     name: str
 
+RecoveryClass = Literal["unique-create", "idempotent-set", "append"]
+JsonValue = None | bool | int | str | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
+PlannedValue = (
+    None | bool | int | str | Reference
+    | tuple["PlannedValue", ...] | Mapping[str, "PlannedValue"]
+)
+
 @dataclass(frozen=True)
 class Asset:
     name: str
@@ -74,7 +81,7 @@ class Asset:
 class PlannedResource:
     kind: str
     name: str
-    data: Mapping[str, JsonValue]
+    data: Mapping[str, PlannedValue]
     dependencies: tuple[Reference, ...]
 
 @dataclass(frozen=True)
@@ -82,11 +89,11 @@ class PlannedEvent:
     name: str
     actor: Reference
     action: str
-    action_class: Literal["unique-create", "idempotent-set", "append"]
-    payload: Mapping[str, JsonValue]
+    action_class: RecoveryClass
+    payload: Mapping[str, PlannedValue]
     dependencies: tuple[Reference, ...]
     reconciliation_marker: str
-    expected_postcondition: Mapping[str, JsonValue]
+    expected_postcondition: Mapping[str, PlannedValue]
     creates: Reference | None
 
 @dataclass(frozen=True)
@@ -103,8 +110,11 @@ class ValidatedScenario:
 load_scenario(path: str | Path) -> ValidatedScenario
 ```
 
-`JsonValue` is the closed recursive set `None | bool | int | str | tuple[JsonValue, ...] |
-Mapping[str, JsonValue]`. Returned mappings are read-only and returned sequences are tuples.
+`PlannedValue` is the immutable recursive runtime domain and includes typed `Reference`
+objects. `JsonValue` is the same closed domain without references. Canonical digest and journal
+serialization recursively convert every `Reference(kind, name)` to exactly
+`{"ref":"<kind>:<name>"}`; deserialization performs the inverse only in schema-declared
+reference fields. Returned mappings are read-only and returned sequences are tuples.
 Validated assets retain the exact immutable `bytes` that produced their checksum; later
 handlers must consume `Asset.content` and must not reopen the author-controlled path. The
 implementation may use private mutable dictionaries while decoding but none escape.
@@ -250,18 +260,23 @@ The fixed version 1 actions are:
 | `bug.flag` | `idempotent-set` | `bug`, `name`, `status` | `requestee` | none |
 | `attachment.update` | `idempotent-set` | `attachment`, `obsolete` | `description` | none |
 
-`bug.create` references must have the kinds implied by their key. `cc`, `groups`,
+`bug.create` references must have the kinds implied by their key. Its component, version, and
+milestone (when present) must resolve to resources owned by its selected product. The
+validator records that product against the created bug identity. `cc`, `groups`,
 `depends_on`, and `blocks` are duplicate-free lists. `keywords` is a duplicate-free list of
 non-empty strings. Optional hours use the decimal-string grammar above. `custom_fields` and
 `bug.custom-field-set.values` are non-empty lists of objects containing exactly `field` and
-`value`; `field` references `custom-field`, names are unique in the list, and values are
-strings or duplicate-free lists of strings consistent with the declared field type.
+`value`; `field` references `custom-field`, and field names are unique in the assignment.
+Text fields require a string. Single-select fields require one string present in the
+resource's declared `values`; every member assigned to a multi-select field must occur in its
+declared `values`, and the assignment list is duplicate-free.
 
 `bug.update.set` is non-empty and accepts only `summary`, `status`, `resolution`, `assignee`,
 `cc`, `groups`, `depends_on`, `blocks`, `duplicate_of`, `version`, `milestone`, `keywords`,
 `estimated_hours`, and `remaining_hours`. Each reference field has its named kind; list and
-hours rules match `bug.create`. Null is accepted only for `resolution`, `assignee`,
-`duplicate_of`, `version`, and `milestone`, where it explicitly clears the field.
+hours rules match `bug.create`. A version or milestone must belong to the target bug's
+recorded product. Null is accepted only for `resolution`, `assignee`, `duplicate_of`,
+`version`, and `milestone`, where it explicitly clears the field.
 
 Comment/work-time body text is non-empty. Attachment `content_type` must match
 `[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+`: exactly one slash, non-empty
@@ -344,8 +359,8 @@ class InFlightRecord:
     event: str
     attempt: int
     actor: Reference
-    action_class: str
-    expected_postcondition: Mapping[str, JsonValue]
+    action_class: RecoveryClass
+    expected_postcondition: Mapping[str, PlannedValue]
     reconciliation_marker: str
 
 @dataclass(frozen=True)
@@ -354,8 +369,8 @@ class CompletedRecord:
     event: str
     attempt: int
     actor: Reference
-    action_class: str
-    expected_postcondition: Mapping[str, JsonValue]
+    action_class: RecoveryClass
+    expected_postcondition: Mapping[str, PlannedValue]
     reconciliation_marker: str
     invocation: InvocationMetadata
     handler_output: JsonValue
@@ -379,11 +394,12 @@ class JournalStore:
     ) -> InFlightRecord | CompletedRecord | None: ...
 ```
 
-Record JSON adds `journal_version: 1` and `phase: "in_flight" | "completed"`. Actors serialize
-as typed references. Digests are lowercase SHA-256; event names use the slug grammar;
-attempts are positive integers; exit statuses are integers excluding booleans; resolved ID
-keys are typed references and values are positive integers. `next_safe_action` is closed to
-the four values above.
+Record JSON adds `journal_version: 1` and `phase: "in_flight" | "completed"`. Actors and
+postcondition references serialize as typed reference objects. Digests are lowercase SHA-256;
+event names use the slug grammar; attempts are positive integers; exit statuses are integers
+excluding booleans; resolved ID keys are typed references and values are positive integers.
+Both constructors and store reads/writes reject an action class outside `RecoveryClass`;
+`next_safe_action` is closed to the four values above.
 
 `JournalStore` creates only an absent state directory with mode 0700. It rejects existing
 state directories whose permission bits are not exactly 0700, and rejects non-directories or
@@ -498,11 +514,12 @@ enforce that contract before each atomic transition.
 
 Focused tests must prove:
 
-- a minimal valid scenario returns immutable typed resources/events and a stable plan;
+- a minimal valid scenario returns immutable typed resources/events whose nested planned
+  values contain `Reference` objects, plus a stable plan;
 - duplicate JSON keys, unknown fields, invalid versions/types, malformed resource/action
   shapes, duplicate resource/event/asset/output names, unresolved/forward/self references,
-  wrong-kind references, missing actors/assets, invalid custom-field values, and resource
-  cycles fail with source and field context;
+  wrong-kind and cross-product references, out-of-catalog select values, missing actors/assets,
+  invalid custom-field values, and resource cycles fail with source and field context;
 - unsafe, missing, ancestor/final symlinked, non-regular, and checksum-mismatched assets fail;
 - equivalent JSON formatting/key order and reordered asset declarations have the same digest,
   while every manifest/resource/event field, resource/event order, asset field, and asset byte
@@ -510,10 +527,11 @@ Focused tests must prove:
 - every supported action exposes the exact declared recovery class, ordered complete
   dependency tuple, marker, created identity, and action-specific postcondition mapping;
 - media types `/`, `/plain`, `text/`, values with extra slashes, whitespace, or controls fail;
-- state permissions are exact, in-flight install refuses overwrite, completion requires a
-  matching attempt and expected postcondition, retry requires the latest completed attempt to
-  authorize identical recovery metadata, completed history remains immutable, concurrent
-  stores fail, and reads reject unsafe files;
+- state permissions are exact, in-flight install refuses overwrite, constructors/store
+  reads/writes reject unsupported recovery classes, completion requires a matching attempt
+  and expected postcondition, retry requires the latest completed attempt to authorize
+  identical recovery metadata, completed history remains immutable, concurrent stores fail,
+  and reads reject unsafe files;
 - controlled failure before replacement leaves the valid in-flight record, controlled failure
   after replacement leaves the completed record, and temporary files are cleaned;
 - known secrets in structural fields or expected postconditions are rejected without
