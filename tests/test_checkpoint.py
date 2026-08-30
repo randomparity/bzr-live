@@ -677,6 +677,31 @@ class RunnerArchiveTests(unittest.TestCase):
         member.mode = mode
         return member, None
 
+    def test_runner_archive_rechecks_link_count_on_open(self) -> None:
+        source = self.base / "source"
+        source.mkdir(mode=0o700)
+        runner_file = source / "state"
+        runner_file.write_bytes(b"runner state")
+        late_link = self.base / "late-link"
+        original_open = os.open
+        linked = False
+
+        def add_link_before_source_open(path, *args, **kwargs):
+            nonlocal linked
+            if Path(path) == runner_file and not linked:
+                os.link(runner_file, late_link)
+                linked = True
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=add_link_before_source_open):
+            with self.assertRaisesRegex(CheckpointError, "hard link"):
+                create_runner_archive(source, self.archive)
+
+        self.assertTrue(linked)
+        self.assertTrue(late_link.samefile(runner_file))
+        self.assertFalse(self.archive.exists())
+
+
     def test_runner_archive_rejects_unsafe_member_names(self) -> None:
         for name in (
             "",

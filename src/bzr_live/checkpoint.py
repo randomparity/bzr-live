@@ -431,11 +431,14 @@ def _open_verified_regular(path: Path, expected: os.stat_result):
         raise CheckpointError(f"runner archive: cannot open {path}: {error}") from error
     try:
         opened = os.fstat(file_descriptor)
+        if opened.st_nlink != 1:
+            raise CheckpointError(f"runner archive: hard links are not supported at {path}")
         if (
             not stat.S_ISREG(opened.st_mode)
             or opened.st_dev != expected.st_dev
             or opened.st_ino != expected.st_ino
             or opened.st_uid != expected.st_uid
+            or opened.st_nlink != expected.st_nlink
             or stat.S_IMODE(opened.st_mode) != stat.S_IMODE(expected.st_mode)
             or opened.st_size != expected.st_size
         ):
