@@ -27,6 +27,11 @@ The operator interface is:
 - `scripts/checkpoint save NAME --store DIRECTORY --runner-state DIRECTORY`;
 - `scripts/checkpoint restore NAME --store DIRECTORY --runner-state DIRECTORY`.
 
+This decision qualifies ADR 0001's single lifecycle-script ownership boundary. `scripts/checkpoint`
+is the authorized second operator entry point only for checkpoint save/restore, including its
+scoped destructive restore and restart/health flow. `scripts/lifecycle` retains ownership of its
+existing lifecycle operations. Both entry points serialize through the same fixed lifecycle lock.
+
 `NAME` matches `[a-z0-9][a-z0-9_-]{0,63}`. `pristine` is the conventional reserved name;
 invoking `save pristine` is the explicit act that creates the post-install baseline.
 
