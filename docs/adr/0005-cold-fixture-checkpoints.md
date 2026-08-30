@@ -40,16 +40,18 @@ A bundle is an owner-only directory containing:
 
 The manifest records format version 1, checkpoint name, creation time, checkout revision, a
 fingerprint of the relevant stack and checkpoint inputs, and each artifact's byte size and
-SHA-256 checksum. The fingerprint includes the owner-only `.env` bytes without storing them in the
-bundle, so a different credential generation is incompatible before destructive restore.
+SHA-256 checksum. The fingerprint includes the owner-only `.env` bytes and the exact local Docker
+image IDs used by the `db` and `bugzilla` services without storing those inputs in the bundle.
+A different credential or runtime-image generation is incompatible before destructive restore.
 Checksums detect accidental corruption; they do not authenticate provenance. Checkpoints are
 trusted local fixture artifacts and are not portable backups.
 
 Save requires the caller to keep runner activity stopped from before invocation through a
 successful stack health check. It acquires the existing lifecycle lock before reading the current
-revision, stack fingerprint, `.env`, or fixture state; validates the destination; cleanly stops the
-complete Compose stack; archives both cold Docker volumes and the opaque runner-state directory;
-and validates the runner archive's members with the same rules restore uses. It writes and verifies
+revision, stack fingerprint, `.env`, service image IDs, or fixture state; validates the
+destination and existing fixture health; cleanly stops the complete Compose stack; archives both
+cold Docker volumes and the opaque runner-state directory; and validates the runner archive's
+members with the same rules restore uses. It writes and verifies
 the manifest in an owner-only sibling staging directory, then renames
 staging to the absent final name. That rename commits the checkpoint; existing names are never
 overwritten. Once stack shutdown begins, every save exit attempts to restart and health-check the
@@ -60,12 +62,12 @@ post-commit failure states that the checkpoint exists and never removes it. A pa
 directory is not a checkpoint and may be removed by a later save.
 
 Restore acquires the lifecycle lock before reading the current revision, stack fingerprint,
-`.env`, or fixture state. While retaining the lock, it validates the complete manifest,
-revision/fingerprint, artifact sizes, checksums, runner archive members, and paths before
-destructive work. It then stops the stack, deletes and recreates the canonical Docker volumes and
-runner-state directory, extracts all three archives, starts the stack, and runs the existing
-health check. Each retry starts by recreating the targets, so an interrupted or failed restore is
-recoverable by rerunning the same
+`.env`, service image IDs, or fixture state. While retaining the lock, it validates the complete
+manifest, revision/fingerprint, exact availability of both recorded local image IDs, artifact
+sizes, checksums, runner archive members, and paths before destructive work. It then stops the
+stack, deletes and recreates the canonical Docker volumes and runner-state directory, extracts all
+three archives, starts the stack, and runs the existing health check. Each retry starts by
+recreating the targets, so an interrupted or failed restore is recoverable by rerunning the same
 command. If abrupt termination leaves the existing lifecycle lock stale, the operator must first
 verify that no holder remains and remove it using the lifecycle command's existing manual
 procedure. Every nonzero exit after the stack stops directs the operator to keep runners stopped
@@ -82,8 +84,9 @@ The design trusts the invoking account, reviewed checkout, Docker daemon, existi
 and locally produced bundle. It does not add HMAC keys, encryption, multi-user isolation, or a
 hostile-bundle promise.
 
-Compose continues to use its fixed canonical volumes. Checkpoint shares the existing lifecycle
-lock identity but does not add active-volume pointers, transaction phases, durable recovery
+Compose continues to use its fixed canonical volumes. Lifecycle and checkpoint commands use the
+single fixed absolute lock path `/tmp/<checkout-project>.lifecycle.lock`; `TMPDIR` does not alter
+its identity. Checkpoint does not add active-volume pointers, transaction phases, durable recovery
 owners, candidate generations, rollback state, capacity reserves, or a recovery command.
 
 ## Consequences
@@ -97,6 +100,8 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
   formats; no migration or cross-version restore is promised.
 - Restore requires the exact `.env` credential generation fingerprinted at save time. Recreated
   credentials at the same Git revision are incompatible and fail before active state changes.
+- Restore requires the exact local `db` and `bugzilla` image IDs fingerprinted at save time.
+  Rebuilding or removing either image makes the checkpoint incompatible before active state changes.
 - Normal validation rejects corrupt or incompatible input before deleting active state.
 - Disk exhaustion, process termination, or startup failure after deletion can leave the fixture
   unusable until restore is rerun.
@@ -132,5 +137,9 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
   generation is sufficient for same-fixture compatibility. Copying secret configuration into
   every bundle and replacing active credentials would expand secret lifecycle and rollback
   behavior without making the temporal fixture more useful.
+- **Rebuild a missing service image during restore.** judgment: a locally rebuilt Bugzilla image
+  is not guaranteed byte-for-byte identical even at the same checkout revision. Requiring the
+  exact saved local image IDs keeps incompatibility pre-destructive; rebuilding is an explicit
+  operator action that cannot make the old checkpoint compatible.
 - **Do nothing.** verified: issue #5 states that developers need named complete checkpoints to
   preserve and restore coherent intermediate fixture state.
