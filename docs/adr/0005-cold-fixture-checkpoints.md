@@ -6,16 +6,18 @@ Proposed
 
 ## Context
 
-Issue #5 needs reusable pristine and named states for the local Bugzilla test fixture. A
-complete state contains the MariaDB volume, Bugzilla's mutable-data volume, and an opaque
-runner-state directory containing journals and actor credentials.
+Issue #5 needs reusable pristine and named states for the local Bugzilla test fixture. A complete
+archived state contains the MariaDB volume, Bugzilla's mutable-data volume, and an opaque
+runner-state directory containing journals and actor credentials. The active owner-only `.env`
+credential generation is a compatibility prerequisite: Bugzilla cannot open a restored raw
+MariaDB volume with a different database password.
 
 The original design treated restore as a production backup transaction: it retained two
 volume generations, authenticated portable bundles, promoted candidates through an atomic
 pointer, and recovered interrupted operations. The operator clarified that this is a temporal
 test fixture. Save may stop every writer, restore may destructively replace the active fixture,
 and a failed restore is recovered by rerunning it from the unchanged checkpoint. A checkpoint
-only needs to work with the same checkout and stack revision.
+only needs to work with the same checkout, stack revision, and `.env` credential generation.
 
 ## Decision
 
@@ -38,14 +40,17 @@ A bundle is an owner-only directory containing:
 
 The manifest records format version 1, checkpoint name, creation time, checkout revision, a
 fingerprint of the relevant stack and checkpoint inputs, and each artifact's byte size and
-SHA-256 checksum. Checksums detect accidental corruption; they do not authenticate provenance.
-Checkpoints are trusted local fixture artifacts and are not portable backups.
+SHA-256 checksum. The fingerprint includes the owner-only `.env` bytes without storing them in the
+bundle, so a different credential generation is incompatible before destructive restore.
+Checksums detect accidental corruption; they do not authenticate provenance. Checkpoints are
+trusted local fixture artifacts and are not portable backups.
 
 Save requires the caller to keep runner activity stopped from before invocation through a
-successful stack health check. It acquires the existing lifecycle lock, validates the destination,
-cleanly stops the complete Compose stack, archives both cold Docker volumes and the opaque
-runner-state directory, and validates the runner archive's members with the same rules restore
-uses. It writes and verifies the manifest in an owner-only sibling staging directory, then renames
+successful stack health check. It acquires the existing lifecycle lock before reading the current
+revision, stack fingerprint, `.env`, or fixture state; validates the destination; cleanly stops the
+complete Compose stack; archives both cold Docker volumes and the opaque runner-state directory;
+and validates the runner archive's members with the same rules restore uses. It writes and verifies
+the manifest in an owner-only sibling staging directory, then renames
 staging to the absent final name. That rename commits the checkpoint; existing names are never
 overwritten. Once stack shutdown begins, every save exit attempts to restart and health-check the
 unchanged stack. A capture failure before commit removes staging where practical and reports that
@@ -54,11 +59,13 @@ nonzero and directs the operator to keep runners stopped until `scripts/lifecycl
 post-commit failure states that the checkpoint exists and never removes it. A partial staging
 directory is not a checkpoint and may be removed by a later save.
 
-Restore validates the complete manifest, revision/fingerprint, artifact sizes, checksums, runner
-archive members, and paths before destructive work. It then acquires the lifecycle lock, stops the
-stack, deletes and recreates the canonical Docker volumes and runner-state directory, extracts all
-three archives, starts the stack, and runs the existing health check. Each retry starts by
-recreating the targets, so an interrupted or failed restore is recoverable by rerunning the same
+Restore acquires the lifecycle lock before reading the current revision, stack fingerprint,
+`.env`, or fixture state. While retaining the lock, it validates the complete manifest,
+revision/fingerprint, artifact sizes, checksums, runner archive members, and paths before
+destructive work. It then stops the stack, deletes and recreates the canonical Docker volumes and
+runner-state directory, extracts all three archives, starts the stack, and runs the existing
+health check. Each retry starts by recreating the targets, so an interrupted or failed restore is
+recoverable by rerunning the same
 command. If abrupt termination leaves the existing lifecycle lock stale, the operator must first
 verify that no holder remains and remove it using the lifecycle command's existing manual
 procedure. Every nonzero exit after the stack stops directs the operator to keep runners stopped
@@ -88,6 +95,8 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
 - Restoring is simple, deterministic, destructive, and retryable from the immutable bundle.
 - Raw volume archives are coupled to the recorded checkout, container images, and storage
   formats; no migration or cross-version restore is promised.
+- Restore requires the exact `.env` credential generation fingerprinted at save time. Recreated
+  credentials at the same Git revision are incompatible and fail before active state changes.
 - Normal validation rejects corrupt or incompatible input before deleting active state.
 - Disk exhaustion, process termination, or startup failure after deletion can leave the fixture
   unusable until restore is rerun.
@@ -119,5 +128,9 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
   explicitly assigned continuous runner quiescence to the caller and excluded automatic runner
   coordination. Checkpoint treats runner state as opaque and does not own its writers; starting a
   writer before checkpoint recovery finishes violates the command precondition.
+- **Archive and replace `.env` during restore.** judgment: fingerprinting the active credential
+  generation is sufficient for same-fixture compatibility. Copying secret configuration into
+  every bundle and replacing active credentials would expand secret lifecycle and rollback
+  behavior without making the temporal fixture more useful.
 - **Do nothing.** verified: issue #5 states that developers need named complete checkpoints to
   preserve and restore coherent intermediate fixture state.
