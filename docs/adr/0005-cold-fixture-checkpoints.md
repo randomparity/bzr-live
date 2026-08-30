@@ -40,46 +40,53 @@ A bundle is an owner-only directory containing:
 
 The manifest records format version 1, checkpoint name, creation time, checkout revision, a
 fingerprint of the relevant stack and checkpoint inputs, and each artifact's byte size and
-SHA-256 checksum. The fingerprint includes the owner-only `.env` bytes and the exact local Docker
-image IDs used by the `db` and `bugzilla` services without storing those inputs in the bundle.
-A different credential or runtime-image generation is incompatible before destructive restore.
-Checksums detect accidental corruption; they do not authenticate provenance. Checkpoints are
-trusted local fixture artifacts and are not portable backups.
+SHA-256 checksum. The fingerprint binds the owner-only `.env` bytes, canonical runner-state path,
+and exact local Docker image IDs used by the healthy `db` and `bugzilla` services without storing
+those inputs in the bundle. A different credential, runner target, or runtime-image generation is
+incompatible before destructive restore. Checksums detect accidental corruption; they do not
+authenticate provenance. Checkpoints are trusted local fixture artifacts, not portable backups.
 
 Save requires the caller to keep runner activity stopped from before invocation through a
 successful stack health check. It acquires the existing lifecycle lock before reading the current
 revision, stack fingerprint, `.env`, service image IDs, or fixture state; validates the
-destination and existing fixture health; cleanly stops the complete Compose stack; archives both
-cold Docker volumes and the opaque runner-state directory; and validates the runner archive's
-members with the same rules restore uses. It writes and verifies
-the manifest in an owner-only sibling staging directory, then renames
-staging to the absent final name. That rename commits the checkpoint; existing names are never
-overwritten. Once stack shutdown begins, every save exit attempts to restart and health-check the
-unchanged stack. A capture failure before commit removes staging where practical and reports that
-no checkpoint was published. A readiness failure after either a pre-commit error or commit returns
-nonzero and directs the operator to keep runners stopped until `scripts/lifecycle up` succeeds. A
-post-commit failure states that the checkpoint exists and never removes it. A partial staging
-directory is not a checkpoint and may be removed by a later save.
+destination and existing fixture health; records the running containers' exact image IDs; cleanly
+stops the complete Compose stack; archives both cold Docker volumes and the opaque runner-state
+directory; and validates the runner archive's members with the same rules restore uses. It writes
+and verifies the manifest in an owner-only sibling staging directory, then renames staging to the
+absent final name. That rename commits the checkpoint; existing names are never overwritten.
+Once stack shutdown begins, every save exit attempts a no-build, no-pull restart, verifies that
+the recreated service containers use the recorded image IDs before relying on their health, and
+runs the existing health check. A capture failure before commit removes staging where practical
+and reports that no checkpoint was published. A readiness or image-identity failure after either
+a pre-commit error or commit returns nonzero and directs the operator to keep runners stopped until
+the recorded images are restored and `scripts/lifecycle up` succeeds. A post-commit failure states
+that the checkpoint exists and never removes it. A partial staging directory is not a checkpoint
+and may be removed by a later save.
 
 Restore acquires the lifecycle lock before reading the current revision, stack fingerprint,
-`.env`, service image IDs, or fixture state. While retaining the lock, it validates the complete
-manifest, revision/fingerprint, exact availability of both recorded local image IDs, artifact
-sizes, checksums, runner archive members, and paths before destructive work. It then stops the
-stack, deletes and recreates the canonical Docker volumes and runner-state directory, extracts all
-three archives, starts the stack, and runs the existing health check. Each retry starts by
-recreating the targets, so an interrupted or failed restore is recoverable by rerunning the same
-command. If abrupt termination leaves the existing lifecycle lock stale, the operator must first
-verify that no holder remains and remove it using the lifecycle command's existing manual
-procedure. Every nonzero exit after the stack stops directs the operator to keep runners stopped
-until a retry completes and the restored stack passes health checks. The active fixture may be
-unusable between a failed restore and a successful retry; the source checkpoint remains unchanged.
+`.env`, service image IDs, runner path, or fixture state. While retaining the lock, it requires the
+current Compose image references to resolve to the fingerprinted IDs and validates the complete
+manifest, revision/fingerprint, artifact sizes, checksums, runner archive members, and paths before
+destructive work. It then stops the stack, deletes and recreates the canonical Docker volumes and
+runner-state directory, and extracts all three archives. It creates the service containers with
+builds and pulls disabled, verifies their image IDs against the preflight values before starting
+them, starts them, and runs the existing health check. Each retry starts by recreating the targets,
+so an interrupted or failed restore is recoverable by rerunning the same command. If abrupt
+termination leaves the existing lifecycle lock stale, the operator must first verify that no
+holder remains and remove it using the lifecycle command's existing manual procedure. Every
+nonzero exit after the stack stops directs the operator to keep runners stopped until a retry
+completes and the restored stack passes health checks. The active fixture may be unusable between
+a failed restore and a successful retry; the source checkpoint remains unchanged.
 
-Docker-volume archive and extraction run in a network-disabled ephemeral container based on an
-existing pinned stack image. Only the source or destination volume is writable as required;
-archive bytes stream through standard input or output. Runner-state extraction is host-side and
-rejects absolute paths, parent traversal, links, devices, and other special files.
+Docker-volume archive and extraction run in a network-disabled ephemeral container using the
+validated `db` image ID. Only the source or destination volume is writable as required; archive
+bytes stream through standard input or output. Runner-state extraction is host-side and rejects
+absolute paths, parent traversal, links, devices, and other special files.
 
-Bundle and runner paths must be owned by the invoking user, owner-only, and non-overlapping.
+Bundle and runner paths must be owned by the invoking user, owner-only, canonical, and
+non-overlapping. The canonical runner-state path is fingerprinted at save and must match at
+restore. It may not be the filesystem root, invoking user's home, checkout root, store root, or an
+ancestor of any of them.
 The design trusts the invoking account, reviewed checkout, Docker daemon, existing stack images,
 and locally produced bundle. It does not add HMAC keys, encryption, multi-user isolation, or a
 hostile-bundle promise.
@@ -102,6 +109,10 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
   credentials at the same Git revision are incompatible and fail before active state changes.
 - Restore requires the exact local `db` and `bugzilla` image IDs fingerprinted at save time.
   Rebuilding or removing either image makes the checkpoint incompatible before active state changes.
+- Restore creates services with builds and pulls disabled and checks their actual container image
+  IDs before starting them; mutable Compose tags are not trusted after the preflight comparison.
+- Restore may recursively replace only the fingerprinted canonical runner-state path after
+  rejecting broad roots and ancestors that could contain unrelated user or checkout data.
 - Normal validation rejects corrupt or incompatible input before deleting active state.
 - Disk exhaustion, process termination, or startup failure after deletion can leave the fixture
   unusable until restore is rerun.
