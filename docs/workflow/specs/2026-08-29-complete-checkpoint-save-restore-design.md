@@ -35,8 +35,11 @@ contract.
 2. `scripts/checkpoint restore NAME --store DIRECTORY --runner-state DIRECTORY` restores the
    complete fixture destructively. Restore may leave the active fixture unusable on failure; the
    source checkpoint remains unchanged, and rerunning the same command is the supported recovery.
-3. The caller stops runner activity before either command. Checkpoint does not inspect, signal,
-   lock, or recover runner processes. The command reports this precondition in usage and errors.
+3. The caller keeps runner activity stopped from before either command starts through a successful
+   stack health check. After a nonzero exit following stack stop, the caller keeps runners stopped
+   through the reported manual restart or restore-retry interval. Checkpoint does not inspect,
+   signal, lock, or recover runner processes. Usage and every relevant error report this continuous
+   precondition.
 4. Save and restore share the existing checkout-scoped lifecycle lock identity. They do not change
    the lifecycle lock format or add durable checkpoint ownership/recovery records.
 5. Save cleanly stops the entire Compose stack before reading either Docker volume. Restore stops
@@ -60,9 +63,11 @@ contract.
 11. Restore always removes and recreates the fixed canonical MariaDB and Bugzilla volumes and the
     runner-state directory before extraction. It never selects dynamic volume names or modifies
     volume pointers in `.env`.
-12. Save restarts and health-checks the unchanged stack after capture. Restore starts and
-    health-checks the reconstructed stack. Health failure returns nonzero with the exact retry
-    command; it does not roll back.
+12. The staging-to-final rename commits save. Save then restarts and health-checks the unchanged
+    stack. A readiness failure after commit returns nonzero, states that the checkpoint exists,
+    and directs the operator to `scripts/lifecycle up`; it does not delete or overwrite the
+    checkpoint. Restore starts and health-checks the reconstructed stack. Restore health failure
+    returns nonzero with the exact retry command and does not roll back.
 13. Named checkpoints round-trip representative database, Bugzilla mutable-data, and runner-state
     markers. Repeating restore from the same checkpoint succeeds.
 
@@ -133,8 +138,9 @@ compatibility obligation because they have never merged or shipped.
    checkout revision, and stack fingerprint. Require the final checkpoint name to be absent.
 2. Acquire the existing lifecycle lock. Revalidate the absent final name and remove only the
    deterministic owner-only `.<NAME>.staging` directory from an interrupted prior save.
-3. Require the existing fixture health check to pass and require the caller-declared runner-stopped
-   precondition.
+3. Require the existing fixture health check to pass. Report the caller's continuous
+   runner-stopped responsibility through successful health, including any post-return manual
+   restart interval; checkpoint cannot verify it.
 4. Cleanly stop the complete Compose stack without deleting volumes.
 5. Create `.<NAME>.staging` mode 0700. Stream the canonical MariaDB volume and Bugzilla data volume
    to their mode-0600 uncompressed tar files through the isolated helper container. Create the
@@ -159,8 +165,9 @@ also run the existing lifecycle `up` command. No recovery command is added.
    checkout revision, and stack fingerprint.
 2. Validate the final bundle's exact files, manifest schema, regular-file sizes, checksums, and all
    runner archive headers. Finish this step before acquiring destructive intent.
-3. Acquire the lifecycle lock, revalidate the unchanged bundle, and require the caller-declared
-   runner-stopped precondition.
+3. Acquire the lifecycle lock, revalidate the unchanged bundle, and report the caller's continuous
+   runner-stopped responsibility through successful restored-stack health, including any
+   post-return retry interval.
 4. Stop the complete Compose stack without relying on its current health.
 5. Remove and recreate the fixed canonical MariaDB and Bugzilla Docker volumes. Remove and recreate
    the runner-state directory mode 0700.
@@ -186,7 +193,11 @@ cannot accumulate across attempts.
   and health phases. Every post-delete error includes the retry command.
 - Existing final checkpoints are never removed or overwritten by save, restore, or staging cleanup.
 - `SIGINT` and `SIGTERM` follow ordinary best-effort cleanup/restart paths, but abrupt process or OS
-  termination has no stronger guarantee.
+  termination has no stronger guarantee. If abrupt termination leaves the lifecycle lock stale,
+  the operator first verifies no holder remains and removes it through the lifecycle command's
+  existing manual procedure, then reruns the exact restore command.
+- Every nonzero save or restore exit after the stack stops states that runners must remain stopped
+  until the reported manual restart or repeated restore succeeds and passes health checks.
 - Disk exhaustion is an ordinary save/restore failure. No capacity forecast or reserve is promised.
 
 ## Threat model
@@ -256,10 +267,10 @@ active pointers, aliases, and crash durability are deleted with those guarantees
 
 ## Durable workflow context
 
-- Branch: `feat/complete-checkpoint-save-restore-5`.
+- Branch: `design/cold-fixture-checkpoints-5`.
 - Base branch: `main` at `124295f703bbb0fa54d4b897e10891b8b7a7b487` when redesign began.
 - ADR: `docs/adr/0005-cold-fixture-checkpoints.md`.
 - Guardrails known at redesign: `make test`, `make check`,
   `actionlint .github/workflows/container-lifecycle.yml`, and live checkpoint smoke.
-- No implementation plan is approved by this specification review. Rewrite the existing plan only
-  after the operator approves these durable design documents.
+- The operator approved the durable ADR and specification on 2026-08-30. A replacement
+  implementation plan is the next gate; no implementation begins before that plan is reviewed.
