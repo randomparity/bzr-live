@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import os
 import shlex
+import stat
 import shutil
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,13 +17,20 @@ from unittest import mock
 from bzr_live.checkpoint import (
     ARTIFACT_NAMES,
     CHECKPOINT_FORMAT,
+    FINAL_NAMES,
     CheckpointError,
     canonical_json,
+    cleanup_staging,
+    create_runner_archive,
+    create_staging,
+    extract_runner_archive,
     read_manifest,
     render_retry_command,
     stack_fingerprint,
     validate_bundle,
     validate_name,
+    validate_paths,
+    validate_runner_archive,
 )
 
 
@@ -346,6 +356,413 @@ class BundleContractTests(unittest.TestCase):
             ],
         )
 
+
+class HostPathTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.base = Path(self._temporary.name).resolve()
+        self.root = self.base / "checkout"
+        self.store = self.base / "checkpoint store"
+        self.runner_parent = self.base / "runner parent"
+        self.runner = self.runner_parent / "runner state"
+        for path in (self.root, self.store, self.runner_parent, self.runner):
+            path.mkdir(mode=0o700)
+        self.name = "pristine"
+
+    def _validate(
+        self,
+        operation: str = "save",
+        *,
+        store: Path | None = None,
+        runner: Path | None = None,
+    ):
+        return validate_paths(
+            operation,
+            self.root,
+            self.name,
+            str(store or self.store),
+            str(runner or self.runner),
+        )
+
+    def _marker(self, paths) -> bytes:
+        return canonical_json(
+            {
+                "checkpoint_name": self.name,
+                "final_path": str(paths.final),
+                "staging_format": 1,
+            }
+        )
+
+    def test_directory_arguments_reject_ascii_controls(self) -> None:
+        for codepoint in (*range(0x20), 0x7F):
+            with self.subTest(codepoint=codepoint), self.assertRaises(CheckpointError):
+                validate_paths(
+                    "save",
+                    self.root,
+                    self.name,
+                    f"{self.store}{chr(codepoint)}suffix",
+                    str(self.runner),
+                )
+            with self.subTest(codepoint=codepoint, argument="runner"), self.assertRaises(
+                CheckpointError
+            ):
+                validate_paths(
+                    "save",
+                    self.root,
+                    self.name,
+                    str(self.store),
+                    f"{self.runner}{chr(codepoint)}suffix",
+                )
+
+    def test_store_and_runner_must_be_canonical_owned_and_nonoverlapping(self) -> None:
+        noncanonical_store = str(self.store / ".." / self.store.name)
+        noncanonical_runner = str(self.runner / ".." / self.runner.name)
+        for store, runner in (
+            (noncanonical_store, str(self.runner)),
+            (str(self.store), noncanonical_runner),
+            (str(self.store), str(self.store / "runner")),
+            (str(self.runner / "store"), str(self.runner)),
+        ):
+            with self.subTest(store=store, runner=runner), self.assertRaises(CheckpointError):
+                validate_paths("save", self.root, self.name, store, runner)
+
+        original_lstat = os.lstat
+        store_inode = self.store.lstat().st_ino
+
+        def foreign_store(path, *args, **kwargs):
+            metadata = original_lstat(path, *args, **kwargs)
+            if metadata.st_ino == store_inode:
+                values = list(metadata)
+                values[4] = os.getuid() + 1
+                return os.stat_result(values)
+            return metadata
+
+        with mock.patch("os.lstat", side_effect=foreign_store), self.assertRaises(CheckpointError):
+            self._validate()
+
+    def test_runner_rejects_root_home_checkout_store_and_their_ancestors(self) -> None:
+        dangerous = {
+            Path("/"),
+            Path.home(),
+            self.root,
+            self.root.parent,
+            self.store,
+            self.store.parent,
+        }
+        for runner in dangerous:
+            with self.subTest(runner=runner), self.assertRaises(CheckpointError):
+                self._validate(runner=runner)
+
+    def test_save_rejects_absent_runner_before_health_or_docker(self) -> None:
+        self.runner.rmdir()
+        with self.assertRaisesRegex(CheckpointError, "save.*runner"):
+            self._validate("save")
+
+    def test_restore_accepts_absent_runner_only_at_fingerprinted_safe_path(self) -> None:
+        self.runner.rmdir()
+        paths = self._validate("restore")
+        self.assertEqual(paths.runner_state, self.runner)
+
+        self.runner_parent.chmod(0o750)
+        with self.assertRaises(CheckpointError):
+            self._validate("restore")
+        self.runner_parent.chmod(0o700)
+
+        missing_parent_runner = self.base / "missing" / "runner"
+        with self.assertRaises(CheckpointError):
+            self._validate("restore", runner=missing_parent_runner)
+
+    def test_runner_rejects_links_mounts_cross_filesystem_and_foreign_owners(self) -> None:
+        linked = self.runner / "linked"
+        linked.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(CheckpointError):
+            self._validate()
+        linked.unlink()
+
+        mounted = self.runner / "mounted"
+        mounted.mkdir(mode=0o700)
+        original_is_mount = Path.is_mount
+        with mock.patch.object(
+            Path,
+            "is_mount",
+            autospec=True,
+            side_effect=lambda path: path == mounted or original_is_mount(path),
+        ), self.assertRaises(CheckpointError):
+            self._validate()
+
+        original_lstat = os.lstat
+        mounted_inode = mounted.lstat().st_ino
+
+        def mutate_metadata(path, *args, **kwargs):
+            metadata = original_lstat(path, *args, **kwargs)
+            if metadata.st_ino != mounted_inode:
+                return metadata
+            values = list(metadata)
+            values[2] = metadata.st_dev + 1
+            return os.stat_result(values)
+
+        with mock.patch("os.lstat", side_effect=mutate_metadata), self.assertRaises(CheckpointError):
+            self._validate()
+
+        def foreign_metadata(path, *args, **kwargs):
+            metadata = original_lstat(path, *args, **kwargs)
+            if metadata.st_ino != mounted_inode:
+                return metadata
+            values = list(metadata)
+            values[4] = os.getuid() + 1
+            return os.stat_result(values)
+
+        with mock.patch("os.lstat", side_effect=foreign_metadata), self.assertRaises(
+            CheckpointError
+        ):
+            self._validate()
+
+    def test_runner_rejects_directories_without_owner_rwx(self) -> None:
+        child = self.runner / "restricted"
+        child.mkdir(mode=0o700)
+        self.addCleanup(child.chmod, 0o700)
+        for mode in (0o600, 0o500, 0o300):
+            with self.subTest(mode=oct(mode)):
+                child.chmod(mode)
+                with self.assertRaises(CheckpointError):
+                    self._validate()
+        child.chmod(0o755)
+        self._validate()
+
+    def test_staging_cleanup_requires_exact_matching_marker(self) -> None:
+        paths = self._validate()
+        marker_path = paths.staging / ".checkpoint-staging.json"
+        mismatches = (
+            b"",
+            canonical_json(
+                {
+                    "checkpoint_name": "other",
+                    "final_path": str(paths.final),
+                    "staging_format": 1,
+                }
+            ),
+            canonical_json(
+                {
+                    "checkpoint_name": self.name,
+                    "final_path": str(paths.final.with_name("other")),
+                    "staging_format": 1,
+                }
+            ),
+            canonical_json(
+                {
+                    "checkpoint_name": self.name,
+                    "final_path": str(paths.final),
+                    "staging_format": 2,
+                }
+            ),
+            self._marker(paths).rstrip(b"\n"),
+        )
+        for marker in mismatches:
+            with self.subTest(marker=marker):
+                paths.staging.mkdir(mode=0o700)
+                marker_path.write_bytes(marker)
+                marker_path.chmod(0o600)
+                with self.assertRaisesRegex(CheckpointError, "inspect.*remove.*manually"):
+                    cleanup_staging(paths, self.name)
+                marker_path.unlink()
+                paths.staging.rmdir()
+
+    def test_staging_cleanup_rejects_unknown_nested_linked_and_mounted_content(self) -> None:
+        paths = self._validate()
+
+        def make_staging() -> Path:
+            paths.staging.mkdir(mode=0o700)
+            marker = paths.staging / ".checkpoint-staging.json"
+            marker.write_bytes(self._marker(paths))
+            marker.chmod(0o600)
+            return marker
+
+        marker = make_staging()
+        unknown = paths.staging / "unknown"
+        unknown.write_bytes(b"x")
+        unknown.chmod(0o600)
+        with self.assertRaises(CheckpointError):
+            cleanup_staging(paths, self.name)
+        unknown.unlink()
+        marker.unlink()
+        paths.staging.rmdir()
+
+        marker = make_staging()
+        nested = paths.staging / "manifest.json"
+        nested.mkdir(mode=0o700)
+        with self.assertRaises(CheckpointError):
+            cleanup_staging(paths, self.name)
+        nested.rmdir()
+        marker.unlink()
+        paths.staging.rmdir()
+
+        marker = make_staging()
+        linked = paths.staging / "manifest.json"
+        linked.symlink_to(self.root)
+        with self.assertRaises(CheckpointError):
+            cleanup_staging(paths, self.name)
+        linked.unlink()
+        marker.unlink()
+        paths.staging.rmdir()
+
+        marker = make_staging()
+        mounted = paths.staging / "manifest.json"
+        mounted.write_bytes(b"x")
+        mounted.chmod(0o600)
+        original_is_mount = Path.is_mount
+        with mock.patch.object(
+            Path,
+            "is_mount",
+            autospec=True,
+            side_effect=lambda path: path == mounted or original_is_mount(path),
+        ), self.assertRaises(CheckpointError):
+            cleanup_staging(paths, self.name)
+        mounted.unlink()
+        marker.unlink()
+        paths.staging.rmdir()
+
+    def test_staging_cleanup_unlinks_valid_children_then_removes_directory(self) -> None:
+        paths = self._validate()
+        created = create_staging(paths, self.name)
+        self.assertEqual(created, paths.staging)
+        self.assertEqual(stat.S_IMODE(paths.staging.lstat().st_mode), 0o700)
+        marker = paths.staging / ".checkpoint-staging.json"
+        self.assertEqual(marker.read_bytes(), self._marker(paths))
+        self.assertEqual(stat.S_IMODE(marker.lstat().st_mode), 0o600)
+        for filename in FINAL_NAMES:
+            child = paths.staging / filename
+            child.write_bytes(filename.encode())
+            child.chmod(0o600)
+
+        cleanup_staging(paths, self.name)
+        self.assertFalse(paths.staging.exists())
+
+
+class RunnerArchiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.base = Path(self._temporary.name)
+        self.archive = self.base / "runner-state.tar"
+
+    def _write_archive(self, members: list[tuple[tarfile.TarInfo, bytes | None]]) -> None:
+        with tarfile.open(self.archive, "w") as archive:
+            for member, payload in members:
+                archive.addfile(member, io.BytesIO(payload) if payload is not None else None)
+
+    def _regular(self, name: str, payload: bytes = b"x", mode: int = 0o640) -> tuple:
+        member = tarfile.TarInfo(name)
+        member.type = tarfile.REGTYPE
+        member.mode = mode
+        member.size = len(payload)
+        return member, payload
+
+    def _directory(self, name: str, mode: int = 0o700) -> tuple:
+        member = tarfile.TarInfo(name)
+        member.type = tarfile.DIRTYPE
+        member.mode = mode
+        return member, None
+
+    def test_runner_archive_rejects_unsafe_member_names(self) -> None:
+        for name in (
+            "",
+            "/absolute",
+            "../parent",
+            "a/../parent",
+            "a//b",
+            "a\\b",
+            ".",
+            "a/./b",
+        ):
+            with self.subTest(name=name):
+                self._write_archive([self._regular(name)])
+                with self.assertRaises(CheckpointError):
+                    validate_runner_archive(self.archive)
+
+    def test_runner_archive_rejects_duplicates_links_special_sparse_and_unknown_types(self) -> None:
+        cases: list[list[tuple[tarfile.TarInfo, bytes | None]]] = [
+            [self._regular("duplicate"), self._regular("duplicate")],
+        ]
+        for member_type in (
+            tarfile.SYMTYPE,
+            tarfile.LNKTYPE,
+            tarfile.CHRTYPE,
+            tarfile.BLKTYPE,
+            tarfile.FIFOTYPE,
+            tarfile.GNUTYPE_SPARSE,
+            b"s",
+            b"Z",
+        ):
+            member = tarfile.TarInfo(f"type-{member_type!r}")
+            member.type = member_type
+            cases.append([(member, None)])
+        sparse = tarfile.TarInfo("sparse")
+        sparse.type = tarfile.REGTYPE
+        sparse.size = 0
+        sparse.pax_headers = {"GNU.sparse.size": "0"}
+        cases.append([(sparse, b"")])
+
+        for members in cases:
+            with self.subTest(member=members[0][0].name, type=members[0][0].type):
+                self._write_archive(members)
+                with self.assertRaises(CheckpointError):
+                    validate_runner_archive(self.archive)
+
+    def test_runner_archive_rejects_directories_without_owner_rwx(self) -> None:
+        for mode in (0o600, 0o500, 0o300):
+            with self.subTest(mode=oct(mode)):
+                self._write_archive([self._directory("directory", mode)])
+                with self.assertRaises(CheckpointError):
+                    validate_runner_archive(self.archive)
+
+    def test_runner_archive_rejects_regular_file_before_descendant(self) -> None:
+        self._write_archive([self._regular("a"), self._regular("a/b")])
+        with self.assertRaises(CheckpointError):
+            validate_runner_archive(self.archive)
+
+    def test_runner_archive_rejects_descendant_before_regular_file(self) -> None:
+        self._write_archive([self._regular("a/b"), self._regular("a")])
+        with self.assertRaises(CheckpointError):
+            validate_runner_archive(self.archive)
+
+    def test_runner_archive_accepts_implicit_directories_empty_files_and_unicode(self) -> None:
+        self._write_archive(
+            [
+                self._regular("implicit/nested/empty", b"", 0o700),
+                self._regular("unicodé/雪", b"payload", 0o500),
+            ]
+        )
+        members = validate_runner_archive(self.archive)
+        self.assertEqual(
+            [(member.name, member.size, member.mode & 0o700) for member in members],
+            [("implicit/nested/empty", 0, 0o700), ("unicodé/雪", 7, 0o500)],
+        )
+
+    def test_runner_archive_nested_tree_round_trips_modes_and_content(self) -> None:
+        source = self.base / "source"
+        source.mkdir(mode=0o750)
+        (source / "empty").write_bytes(b"")
+        (source / "empty").chmod(0o600)
+        nested = source / "nested"
+        nested.mkdir(mode=0o750)
+        unicode_file = nested / "unicodé-雪"
+        unicode_file.write_bytes(b"runner payload")
+        unicode_file.chmod(0o510)
+
+        create_runner_archive(source, self.archive)
+        self.assertEqual(stat.S_IMODE(self.archive.lstat().st_mode), 0o600)
+        validate_runner_archive(self.archive)
+
+        destination = self.base / "restored"
+        extract_runner_archive(self.archive, destination)
+        self.assertEqual(stat.S_IMODE(destination.lstat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE((destination / "nested").lstat().st_mode), 0o700)
+        self.assertEqual((destination / "empty").read_bytes(), b"")
+        self.assertEqual(stat.S_IMODE((destination / "empty").lstat().st_mode), 0o600)
+        restored_unicode = destination / "nested" / unicode_file.name
+        self.assertEqual(unicode_file.read_bytes(), restored_unicode.read_bytes())
+        self.assertEqual(stat.S_IMODE(restored_unicode.lstat().st_mode), 0o500)
 
 if __name__ == "__main__":
     unittest.main()
