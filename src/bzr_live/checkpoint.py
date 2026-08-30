@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -11,7 +13,7 @@ import stat
 import subprocess
 import sys
 import tarfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -57,6 +59,9 @@ _REQUIRED_STACK_FILES = (
     "src/bzr_live/checkpoint.py",
 )
 _STAGING_MARKER = ".checkpoint-staging.json"
+_DARWIN_RENAME_EXCL = 0x00000004
+_LINUX_AT_FDCWD = -100
+_LINUX_RENAME_NOREPLACE = 1
 _STAGING_FORMAT = 1
 _ASCII_CONTROLS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -1077,23 +1082,39 @@ def run_child(
     stdin: BinaryIO | None = None,
     stdout: BinaryIO | int | None = None,
     capture_stderr: bool = True,
+    on_started: Callable[[], None] | None = None,
+    allow_requested: bool = False,
 ) -> bytes:
     if isinstance(argv, (str, bytes)) or not argv or any(not isinstance(arg, str) for arg in argv):
         raise CheckpointError("command: argv must be a nonempty fixed sequence of strings")
     fixed_argv = tuple(argv)
     requested_before = signal_state.requested
+    handled_signals = {signal.SIGINT, signal.SIGTERM}
     try:
-        process = subprocess.Popen(
-            fixed_argv,
-            stdin=stdin,
-            stdout=subprocess.PIPE if stdout is None else stdout,
-            stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError as error:
-        raise CheckpointError(f"command: cannot start {fixed_argv[0]}: {error}") from error
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals)
+    except (AttributeError, OSError) as error:
+        raise CheckpointError(
+            f"command: cannot block handled signals before starting {fixed_argv[0]}: {error}"
+        ) from error
+    try:
+        if signal_state.requested is not None and not allow_requested:
+            raise _HandledSignal(signal_state.requested)
+        try:
+            process = subprocess.Popen(
+                fixed_argv,
+                stdin=stdin,
+                stdout=subprocess.PIPE if stdout is None else stdout,
+                stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as error:
+            raise CheckpointError(f"command: cannot start {fixed_argv[0]}: {error}") from error
+        signal_state.active_process = process
+        if on_started is not None:
+            on_started()
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
-    signal_state.active_process = process
     try:
         captured_stdout, captured_stderr = process.communicate()
     except OSError as error:
@@ -1121,6 +1142,7 @@ def _run_normal(
     signal_state: SignalState,
     stdin: BinaryIO | None = None,
     stdout: BinaryIO | int | None = None,
+    on_started: Callable[[], None] | None = None,
 ) -> bytes:
     _check_signal(signal_state)
     result = run_child(
@@ -1128,6 +1150,7 @@ def _run_normal(
         signal_state=signal_state,
         stdin=stdin,
         stdout=stdout,
+        on_started=on_started,
     )
     _check_signal(signal_state)
     return result
@@ -1236,22 +1259,31 @@ def _health_check(
     *,
     recovery: bool,
 ) -> None:
-    invoke = run_child if recovery else _run_normal
-
-    def call(
+    def invoke(
         argv: Sequence[str],
         *,
         stdout: BinaryIO | int | None = None,
     ) -> bytes:
-        return invoke(argv, signal_state=signal_state, stdout=stdout)
+        if recovery:
+            return run_child(
+                argv,
+                signal_state=signal_state,
+                stdout=stdout,
+                allow_requested=True,
+            )
+        return _run_normal(
+            argv,
+            signal_state=signal_state,
+            stdout=stdout,
+        )
 
     try:
-        call((*context.compose, "config", "--quiet"))
-        call((*context.compose, "ps"))
+        invoke((*context.compose, "config", "--quiet"))
+        invoke((*context.compose, "ps"))
         endpoint = _loopback_endpoint(
-            call((*context.compose, "port", "bugzilla", "80"))
+            invoke((*context.compose, "port", "bugzilla", "80"))
         )
-        call(
+        invoke(
             (
                 "curl",
                 "--fail",
@@ -1268,8 +1300,7 @@ def _health_check(
     except CheckpointError as error:
         try:
             diagnostics = invoke(
-                (*context.compose, "logs", "--tail", "100", "db", "bugzilla"),
-                signal_state=signal_state,
+                (*context.compose, "logs", "--tail", "100", "db", "bugzilla")
             )
         except _HandledSignal:
             raise
@@ -1303,7 +1334,11 @@ def _start_argv(context: CheckpointContext) -> tuple[str, ...]:
 
 
 def _restart_fixture(context: CheckpointContext, signal_state: SignalState) -> None:
-    run_child(_start_argv(context), signal_state=signal_state)
+    run_child(
+        _start_argv(context),
+        signal_state=signal_state,
+        allow_requested=True,
+    )
     _health_check(context, signal_state, recovery=True)
 
 
@@ -1465,6 +1500,59 @@ def _cleanup_save_staging(context: CheckpointContext) -> None:
     cleanup_staging(context.paths, context.name)
 
 
+def _rename_directory_no_replace(source: Path, destination: Path) -> None:
+    encoded_source = os.fsencode(source)
+    encoded_destination = os.fsencode(destination)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        try:
+            rename = libc.renamex_np
+        except AttributeError as error:
+            raise CheckpointError(
+                "save: native exclusive rename is unavailable on Darwin"
+            ) from error
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        result = rename(
+            encoded_source,
+            encoded_destination,
+            _DARWIN_RENAME_EXCL,
+        )
+    elif sys.platform.startswith("linux"):
+        try:
+            rename = libc.renameat2
+        except AttributeError as error:
+            raise CheckpointError(
+                "save: native no-replace rename is unavailable on Linux"
+            ) from error
+        rename.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        result = rename(
+            _LINUX_AT_FDCWD,
+            encoded_source,
+            _LINUX_AT_FDCWD,
+            encoded_destination,
+            _LINUX_RENAME_NOREPLACE,
+        )
+    else:
+        raise CheckpointError(
+            f"save: native no-replace publication is unsupported on {sys.platform}"
+        )
+    if result != 0:
+        error_number = ctypes.get_errno() or errno.EIO
+        raise OSError(
+            error_number,
+            os.strerror(error_number),
+            str(destination),
+        )
+
+
 def _publish_staging(
     context: CheckpointContext,
     signal_state: SignalState,
@@ -1472,7 +1560,7 @@ def _publish_staging(
     _require_absent_final(context)
     _check_signal(signal_state)
     try:
-        os.rename(context.paths.staging, context.paths.final)
+        _rename_directory_no_replace(context.paths.staging, context.paths.final)
     except OSError as error:
         raise CheckpointError(
             f"save: cannot publish {context.paths.final} without overwrite: {error}"
@@ -1664,12 +1752,15 @@ def _replace_runner_target(
 def _remove_and_create_volumes(
     context: CheckpointContext,
     signal_state: SignalState,
+    *,
+    on_first_delete_started: Callable[[], None],
 ) -> None:
-    for compose_name, _artifact_name in _VOLUME_ARTIFACTS:
+    for index, (compose_name, _artifact_name) in enumerate(_VOLUME_ARTIFACTS):
         volume = _volume_name(context, compose_name)
         _run_normal(
             ("docker", "volume", "rm", "--force", volume),
             signal_state=signal_state,
+            on_started=on_first_delete_started if index == 0 else None,
         )
         _run_normal(
             _create_volume_argv(context, compose_name),
@@ -1739,6 +1830,7 @@ def _best_effort_signal_shutdown(
         run_child(
             (*context.compose, "down", "--remove-orphans"),
             signal_state=signal_state,
+            allow_requested=True,
         )
     except (CheckpointError, _HandledSignal):
         pass
@@ -1776,8 +1868,16 @@ def restore_checkpoint(context: CheckpointContext, signal_state: SignalState) ->
         )
         _check_signal(signal_state)
         phase = "target deletion and recreation"
-        destructive = True
-        _remove_and_create_volumes(context, signal_state)
+
+        def mark_destructive() -> None:
+            nonlocal destructive
+            destructive = True
+
+        _remove_and_create_volumes(
+            context,
+            signal_state,
+            on_first_delete_started=mark_destructive,
+        )
         _replace_runner_target(context, signal_state, runner_entries)
         for compose_name, artifact_name in _VOLUME_ARTIFACTS:
             phase = f"{compose_name} volume extraction"

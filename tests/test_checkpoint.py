@@ -831,11 +831,15 @@ class ArgvRecorder:
         stdin=None,
         stdout=None,
         capture_stderr=True,
+        on_started=None,
+        allow_requested=False,
     ) -> bytes:
         fixed = tuple(argv)
         self.calls.append(fixed)
         self.stdin_bytes.append(stdin.read() if stdin is not None else None)
         invocation = len(self.calls)
+        if on_started is not None:
+            on_started()
         if self.on_call is not None:
             self.on_call(invocation, fixed, signal_state)
         if self.fail_when is not None and self.fail_when(invocation, fixed):
@@ -1123,7 +1127,7 @@ class OrchestrationTests(unittest.TestCase):
         recorder.on_call = lambda _number, argv, _state: events.append(
             "list volume archive" if argv == self._tar_list() else "child"
         )
-        real_rename = os.rename
+        real_rename = checkpoint_module._rename_directory_no_replace
 
         def rename(source, destination, *args, **kwargs):
             self.assertEqual(events.count("list volume archive"), 2)
@@ -1131,7 +1135,11 @@ class OrchestrationTests(unittest.TestCase):
             events.append("publish")
             return real_rename(source, destination, *args, **kwargs)
 
-        with mock.patch.object(checkpoint_module.os, "rename", side_effect=rename):
+        with mock.patch.object(
+            checkpoint_module,
+            "_rename_directory_no_replace",
+            side_effect=rename,
+        ):
             self._run_save(recorder, events)
         self.assertLess(events.index("validate runner archive"), events.index("publish"))
 
@@ -1155,6 +1163,40 @@ class OrchestrationTests(unittest.TestCase):
             set(path.name for path in self.paths.final.iterdir()),
             FINAL_NAMES,
         )
+
+    def test_publication_atomically_refuses_raced_empty_final(self) -> None:
+        recorder = ArgvRecorder()
+        real_require_absent = checkpoint_module._require_absent_final
+        checks = 0
+        raced_identity: tuple[int, int] | None = None
+
+        def race_after_absence_check(context: CheckpointContext) -> None:
+            nonlocal checks, raced_identity
+            real_require_absent(context)
+            checks += 1
+            if checks == 2:
+                context.paths.final.mkdir(mode=0o711)
+                context.paths.final.chmod(0o711)
+                metadata = context.paths.final.lstat()
+                raced_identity = (metadata.st_dev, metadata.st_ino)
+
+        with (
+            mock.patch.object(
+                checkpoint_module,
+                "_require_absent_final",
+                side_effect=race_after_absence_check,
+            ),
+            self.assertRaisesRegex(CheckpointError, "not published.*publication"),
+        ):
+            self._run_save(recorder)
+
+        self.assertIsNotNone(raced_identity)
+        metadata = self.paths.final.lstat()
+        self.assertEqual((metadata.st_dev, metadata.st_ino), raced_identity)
+        self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o711)
+        self.assertEqual(list(self.paths.final.iterdir()), [])
+        self.assertFalse(self.paths.staging.exists())
+        self.assertIn(self._start, recorder.calls)
 
     def test_restore_validates_every_input_before_down_or_delete(self) -> None:
         self._write_bundle()
@@ -1502,6 +1544,56 @@ class SignalTests(unittest.TestCase):
         self.assertTrue((self.runner / "state").exists())
         self.assertFalse(any(argv[:3] == ("docker", "volume", "rm") for argv in recorder.calls))
 
+    def test_signal_after_down_before_delete_spawn_recovers_unchanged_fixture(self) -> None:
+        self._write_bundle()
+        recorder = ArgvRecorder()
+        real_remove = checkpoint_module._remove_and_create_volumes
+
+        def interrupt_before_spawn(*args, **kwargs):
+            with mock.patch.object(checkpoint_module.signal, "signal"):
+                checkpoint_module._handle_signal(
+                    signal.SIGTERM,
+                    None,
+                    self.signal_state,
+                )
+            return real_remove(*args, **kwargs)
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                checkpoint_module,
+                "_remove_and_create_volumes",
+                side_effect=interrupt_before_spawn,
+            ),
+            redirect_stderr(stderr),
+            self.assertRaises(checkpoint_module._HandledSignal),
+        ):
+            self._run_restore(recorder)
+        self.assertFalse(any(argv[:3] == ("docker", "volume", "rm") for argv in recorder.calls))
+        self.assertTrue((self.runner / "state").exists())
+        self.assertIn(self._start, recorder.calls)
+        self.assertNotIn("Keep runners stopped and retry:", stderr.getvalue())
+
+    def test_signal_after_first_delete_spawn_reports_retry_without_restart(self) -> None:
+        self._write_bundle()
+        recorder = ArgvRecorder()
+        events: list[str] = []
+
+        def interrupt_delete(_number, argv, state):
+            if argv[:3] == ("docker", "volume", "rm") and state.requested is None:
+                self._inject_signal(state, events)
+
+        recorder.on_call = interrupt_delete
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(checkpoint_module._HandledSignal):
+            self._run_restore(recorder)
+        self.assertEqual(events, ["forward", "reap"])
+        self.assertNotIn(self._start, recorder.calls)
+        self.assertIn(
+            render_retry_command(self.name, self.store, self.runner),
+            stderr.getvalue(),
+        )
+
     def test_each_post_delete_subprocess_signal_leaves_down_and_reports_retry(self) -> None:
         phases = ("mariadb extraction", "bugzilla extraction", "startup", "health")
         for phase in phases:
@@ -1634,5 +1726,50 @@ class SignalTests(unittest.TestCase):
             run_child(("fixed", "argv"), signal_state=state)
         self.assertEqual(events, ["forward", "reap"])
         self.assertIsNone(state.active_process)
+
+    def test_spawn_registration_blocks_signal_window(self) -> None:
+        events: list[str] = []
+        state = SignalState()
+
+        class Popen:
+            def __init__(self, argv, **kwargs):
+                self.pid = 4242
+                self.returncode = 0
+                events.append("spawn")
+
+            def communicate(self):
+                return b"", b""
+
+            def wait(self):
+                events.append("reap")
+                return self.returncode
+
+        def pthread_sigmask(how, mask):
+            if how == signal.SIG_BLOCK:
+                events.append("block")
+                return set()
+            self.assertEqual(how, signal.SIG_SETMASK)
+            self.assertIsNotNone(state.active_process)
+            events.append("unblock")
+            checkpoint_module._handle_signal(signal.SIGTERM, None, state)
+            return set()
+
+        def killpg(pid: int, requested_signal: int) -> None:
+            self.assertEqual((pid, requested_signal), (4242, signal.SIGTERM))
+            events.append("forward")
+
+        with (
+            mock.patch.object(checkpoint_module.subprocess, "Popen", Popen),
+            mock.patch.object(
+                checkpoint_module.signal,
+                "pthread_sigmask",
+                side_effect=pthread_sigmask,
+            ),
+            mock.patch.object(checkpoint_module.signal, "signal"),
+            mock.patch.object(checkpoint_module.os, "killpg", side_effect=killpg),
+            self.assertRaises(checkpoint_module._HandledSignal),
+        ):
+            run_child(("fixed", "argv"), signal_state=state)
+        self.assertEqual(events, ["block", "spawn", "unblock", "forward", "reap"])
 if __name__ == "__main__":
     unittest.main()
