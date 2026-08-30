@@ -19,10 +19,10 @@
   cross-version or cross-host portability; no logical SQL dump; no candidate/rollback volumes;
   no active-volume pointers; no transaction/recovery state machine; no HMAC, encryption, capacity
   reservation, alias verification, or automatic runner coordination; no issue #4 actor-secret
-  parsing or schema ownership.
 - **Surface:** ADR 0005; this specification; `src/bzr_live/checkpoint.py`;
-  `scripts/checkpoint`; focused checkpoint and lifecycle-lock tests; live checkpoint smoke;
-  lifecycle CI. Existing fixed Compose volumes and lifecycle behavior remain authoritative.
+  `scripts/checkpoint`; the lifecycle lock root in `scripts/lifecycle`; focused checkpoint and
+  lifecycle-lock tests; live checkpoint smoke; lifecycle CI. Existing fixed Compose volumes and
+  all other lifecycle behavior remain authoritative.
 - **Ambiguities:** none after the operator decisions above.
 
 [ADR 0005](../../adr/0005-cold-fixture-checkpoints.md) governs the bundle and failure
@@ -41,15 +41,17 @@ contract.
    through the reported manual restart or restore-retry interval. Checkpoint does not inspect,
    signal, lock, or recover runner processes. Usage and every relevant error report this continuous
    precondition.
-4. Save and restore share the existing checkout-scoped lifecycle lock identity. They acquire it
-   before reading the current revision, stack fingerprint, `.env`, or fixture state and retain it
-   through completion. They do not change the lock format or add durable checkpoint
-   ownership/recovery records.
+4. Save and restore share the existing checkout-scoped lifecycle lock identity. Lifecycle and
+   checkpoint commands use `/tmp/<checkout-project>.lifecycle.lock` regardless of `TMPDIR`. They
+   acquire it before reading the current revision, stack fingerprint, `.env`, service image IDs, or
+   fixture state and retain it through completion. They do not change the lock-directory format or
+   add durable checkpoint ownership/recovery records.
 5. Save cleanly stops the entire Compose stack before reading either Docker volume. Restore stops
    it before deleting fixture state. No live or cross-domain snapshot promise exists.
 6. A checkpoint contains exactly `manifest.json`, `mariadb-volume.tar`,
    `bugzilla-volume.tar`, and `runner-state.tar`. It is accepted only by the same checkpoint
-   format, checkout revision, stack-input fingerprint, and active `.env` credential generation.
+   format, checkout revision, stack-input fingerprint, active `.env` credential generation, and
+   exact local Docker image IDs recorded from the healthy `db` and `bugzilla` services.
 7. Bundle staging and final directories are mode 0700; files are mode 0600. Store and runner roots
    are owned by the invoking user and do not equal or contain one another.
 8. The manifest and every artifact are fully validated before restore deletes volumes or runner
@@ -99,13 +101,15 @@ computed over the exact uncompressed tar bytes. Checkpoint does not accept extra
 extra files, or missing files.
 
 `checkout_revision` is `git rev-parse HEAD`. `stack_fingerprint` is SHA-256 over a versioned,
-length-delimited sequence of relative path bytes and file-content bytes, sorted by relative path.
-The inputs are the owner-only `.env`, `compose.yaml`, every regular file under `containers/`,
-`scripts/lifecycle`, `scripts/checkpoint`, `src/bzr_live/checkpoint.py`, and the fingerprint format
-identifier. The manifest stores only the resulting fingerprint, never `.env` bytes or individual
-secret hashes. This catches relevant dirty working-tree changes and a recreated credential
-generation without requiring a clean checkout. A mismatch is incompatible; there is no migration
-path.
+length-delimited sequence of tagged input-name bytes and input-value bytes, sorted by input name.
+File inputs are the owner-only `.env`, `compose.yaml`, every regular file under `containers/`,
+`scripts/lifecycle`, `scripts/checkpoint`, and `src/bzr_live/checkpoint.py`. Runtime inputs are the
+exact local Docker image IDs used by the healthy `db` and `bugzilla` service containers at save
+time. The fingerprint format identifier is also an input. The manifest stores only the resulting
+fingerprint, never `.env` bytes, individual secret hashes, or image IDs. This catches relevant
+dirty working-tree changes, recreated credentials, rebuilt service images, and removed service
+images without requiring a clean checkout. A mismatch or unavailable recorded image is
+incompatible; restore never builds or pulls an image before this gate.
 
 Tar archives are uncompressed. This avoids decompression-bomb behavior and keeps failure/retry
 semantics observable. Docker-volume archives preserve the cold volume's numeric ownership, mode,
@@ -141,12 +145,14 @@ compatibility obligation because they have never merged or shipped.
 
 1. Parse and validate root, name, store, runner-state path, ownership, modes, non-overlap, and
    required tools. Require the final checkpoint name to be absent.
-2. Acquire the existing lifecycle lock. Under the lock, read and validate the owner-only `.env`,
-   checkout revision, and stack fingerprint; revalidate the absent final name; and remove only the
-   deterministic owner-only `.<NAME>.staging` directory from an interrupted prior save.
-3. Require the existing fixture health check to pass. Report the caller's continuous
-   runner-stopped responsibility through successful health, including any post-return manual
-   restart interval; checkpoint cannot verify it.
+2. Acquire the existing lifecycle lock. Under the lock, read and validate the owner-only `.env`
+   and checkout revision; revalidate the absent final name; remove only the deterministic
+   owner-only `.<NAME>.staging` directory from an interrupted prior save; and require the existing
+   fixture health check to pass.
+3. Resolve the exact image IDs used by the healthy `db` and `bugzilla` containers, then compute the
+   stack fingerprint. Report the caller's continuous runner-stopped responsibility through
+   successful health, including any post-return manual restart interval; checkpoint cannot verify
+   it.
 4. Cleanly stop the complete Compose stack without deleting volumes.
 5. Create `.<NAME>.staging` mode 0700. Stream the canonical MariaDB volume and Bugzilla data volume
    to their mode-0600 uncompressed tar files through the isolated helper container. Create the
@@ -171,9 +177,10 @@ also run the existing lifecycle `up` command. No recovery command is added.
    required tools.
 2. Acquire the lifecycle lock and report the caller's continuous runner-stopped responsibility
    through successful restored-stack health, including any post-return retry interval.
-3. While retaining the lock, read and validate the owner-only `.env`, checkout revision, and stack
-   fingerprint, then validate the final bundle's exact files, manifest schema, regular-file sizes,
-   checksums, and all runner archive headers. Finish every check before destructive work.
+3. While retaining the lock, read and validate the owner-only `.env`, checkout revision, required
+   local `db` and `bugzilla` image IDs, and stack fingerprint, then validate the final bundle's
+   exact files, manifest schema, regular-file sizes, checksums, and all runner archive headers.
+   Finish every check before destructive work. Restore does not build or pull images.
 4. Stop the complete Compose stack without relying on its current health.
 5. Remove and recreate the fixed canonical MariaDB and Bugzilla Docker volumes. Remove and recreate
    the runner-state directory mode 0700.
@@ -231,9 +238,10 @@ contract.
 - The helper container has no network or Docker socket, sees only one source/destination volume, and
   receives archive data through standard I/O.
 - Fixed argv arrays prevent shell interpolation. Error output is bounded and excludes `.env` values.
-- The stack fingerprint binds the complete owner-only `.env` without writing its bytes or
-  individual secret hashes into the manifest.
-- The lifecycle lock serializes supported lifecycle and checkpoint mutations.
+- The stack fingerprint binds the complete owner-only `.env` and exact local service image IDs
+  without writing their bytes or individual values into the manifest.
+- The fixed absolute lock root serializes supported lifecycle and checkpoint mutations even when
+  callers use different `TMPDIR` values.
 
 ### Out of scope
 
@@ -250,17 +258,20 @@ Focused tests must prove:
 - canonical manifest encoding, revision/fingerprint mismatch, exact file set, size mismatch, and
   checksum corruption;
 - a recreated `.env` at the same Git revision fails before any volume or runner deletion;
+- a rebuilt or missing `db` or `bugzilla` image fails before any volume or runner deletion;
 - runner archive rejection for traversal, duplicates, links, sparse files, and special types;
-- save ordering: validate paths, lock, read compatibility inputs, health, stop, archive three
-  domains, validate, publish, restart;
+- save ordering: validate paths, lock, read compatibility inputs, health, resolve service images,
+  fingerprint, stop, archive three domains, validate, publish, restart;
 - save phase errors preserve existing final names and distinguish restart failure after publication;
 - restore acquires the lifecycle lock before reading compatibility inputs and validates every
   bundle/header condition before volume or runner deletion;
 - restore ordering: lock, validate, stop, recreate all targets, extract all domains, start, health;
-- injected failures after each destructive phase retain the bundle and print the exact retry command;
+- injected failures during and after each destructive phase retain the bundle and print the exact
+  retry command;
 - a second restore begins from fresh targets rather than partial prior output;
 - Docker/helper commands use fixed argv, disabled networking, minimal mounts, and no shell;
-- checkpoint and existing lifecycle commands contend on the same lock identity.
+- checkpoint and existing lifecycle commands contend on the same fixed lock when launched from
+  different working directories with different `TMPDIR` values.
 
 The live smoke must:
 
