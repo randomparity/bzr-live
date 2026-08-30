@@ -48,20 +48,23 @@ authenticate provenance. Checkpoints are trusted local fixture artifacts, not po
 
 Save requires the caller to keep runner activity stopped from before invocation through a
 successful stack health check. It acquires the existing lifecycle lock before reading the current
-revision, stack fingerprint, `.env`, service image IDs, or fixture state; validates the
-destination and existing fixture health; records the running containers' exact image IDs; cleanly
-stops the complete Compose stack; archives both cold Docker volumes and the opaque runner-state
-directory; and validates the runner archive's members with the same rules restore uses. It writes
+revision, stack fingerprint, `.env`, service image IDs, or fixture state; validates the destination
+and existing fixture health; records the running containers' exact image IDs; and requires the
+current Compose image references to resolve to those same IDs before shutdown. It then cleanly
+stops the complete Compose stack, archives both cold Docker volumes and the opaque runner-state
+directory, and validates the runner archive's members with the same rules restore uses. It writes
 and verifies the manifest in an owner-only sibling staging directory, then renames staging to the
 absent final name. That rename commits the checkpoint; existing names are never overwritten.
 Once stack shutdown begins, every save exit attempts a no-build, no-pull restart, verifies that
 the recreated service containers use the recorded image IDs before relying on their health, and
 runs the existing health check. A capture failure before commit removes staging where practical
-and reports that no checkpoint was published. A readiness or image-identity failure after either
-a pre-commit error or commit returns nonzero and directs the operator to keep runners stopped until
-the recorded images are restored and `scripts/lifecycle up` succeeds. A post-commit failure states
-that the checkpoint exists and never removes it. A partial staging directory is not a checkpoint
-and may be removed by a later save.
+and reports that no checkpoint was published. A readiness or image-identity failure returns
+nonzero, reports both recorded IDs, and prints the exact no-build/no-pull create, container-ID
+verification, start, and health commands that preserve those identities; it never directs the
+operator through the rebuilding lifecycle `up` path. A post-commit failure also states that the
+checkpoint exists and prints the exact restore command as an alternative recovery path. It never
+removes the committed checkpoint. A partial staging directory is not a checkpoint and may be
+removed by a later save.
 
 Restore acquires the lifecycle lock before reading the current revision, stack fingerprint,
 `.env`, service image IDs, runner path, or fixture state. While retaining the lock, it requires the
@@ -86,7 +89,10 @@ absolute paths, parent traversal, links, devices, and other special files.
 Bundle and runner paths must be owned by the invoking user, owner-only, canonical, and
 non-overlapping. The canonical runner-state path is fingerprinted at save and must match at
 restore. It may not be the filesystem root, invoking user's home, checkout root, store root, or an
-ancestor of any of them.
+ancestor of any of them. On restore the leaf may be absent after a prior failed attempt; only the
+fingerprinted path remains authoritative, and its existing canonical parent must be a non-symlink
+directory owned by the invoking user and owner-only before the exact leaf is recreated mode 0700.
+An existing leaf must satisfy the same ownership, mode, canonical-path, and dangerous-root checks.
 The design trusts the invoking account, reviewed checkout, Docker daemon, existing stack images,
 and locally produced bundle. It does not add HMAC keys, encryption, multi-user isolation, or a
 hostile-bundle promise.
@@ -117,9 +123,10 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
 - Disk exhaustion, process termination, or startup failure after deletion can leave the fixture
   unusable until restore is rerun.
 - Every save failure after shutdown begins attempts to restore fixture readiness. Failure of that
-  attempt keeps the runner-quiescence precondition active until manual lifecycle restart succeeds.
+  attempt keeps runner quiescence active and reports an identity-preserving no-build/no-pull manual
+  route; the rebuilding lifecycle `up` path is not valid recovery.
 - Rename is save's commit point. A later restart or health failure returns nonzero but leaves the
-  immutable checkpoint valid; the operator restarts the unchanged stack separately.
+  immutable checkpoint valid and may be recovered by the printed exact restore command.
 - Abrupt termination may leave the existing lifecycle lock stale. Retry then requires its existing
   verified manual-clear procedure before rerunning restore.
 - Owner-only permissions and safe host extraction protect local secrets without claiming backup
