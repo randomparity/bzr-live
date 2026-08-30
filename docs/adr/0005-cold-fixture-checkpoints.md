@@ -56,13 +56,16 @@ sibling staging directory, then
 renames staging to the absent final name. That rename commits the checkpoint; existing names are
 never overwritten.
 
-Once stack shutdown begins, every save exit attempts to restart the current local stack without
-building or pulling images and runs the existing health check. A capture failure before commit
-removes staging where practical and reports that no checkpoint was published. A restart failure
-returns nonzero and directs the operator to keep runners stopped, restore the expected local
-images if necessary, and run `scripts/lifecycle up`. A post-commit failure also states that the
-checkpoint exists and never removes it. A partial staging directory is not a checkpoint and may be
-removed by a later save.
+On handled failure after stack shutdown begins, save attempts to restart the current local stack
+without building or pulling images and runs the existing health check. A capture failure before
+commit removes staging where practical and reports that no checkpoint was published. A restart
+failure returns nonzero and directs the operator to keep runners stopped, restore the expected
+local images if necessary, and run `scripts/lifecycle up`. A post-commit failure also states that
+the checkpoint exists and never removes it. A partial staging directory is not a checkpoint and
+may be removed by a later save. Uncatchable process or host termination can bypass cleanup, leave
+the stack down, and leave the fixed lock stale. The operator must then keep runners stopped, verify
+that no lock holder remains, clear the lock with the lifecycle command's existing procedure, and
+run `scripts/lifecycle up`.
 
 Restore acquires the lifecycle lock before reading the current revision, stack fingerprint,
 `.env`, runner path, or fixture state. While retaining the lock, it validates the complete
@@ -129,13 +132,13 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
   input before deleting active state.
 - Disk exhaustion, process termination, image drift, or startup failure after deletion can leave
   the fixture unusable until restore is rerun.
-- Every save failure after shutdown begins attempts to restore fixture readiness. Failure of that
-  attempt keeps runner quiescence active until compatible local images are restored and lifecycle
-  restart succeeds.
-- Rename is save's commit point. A later restart or health failure returns nonzero but leaves the
-  immutable checkpoint valid.
-- Abrupt termination may leave the existing lifecycle lock stale. Retry then requires its existing
-  verified manual-clear procedure before rerunning restore.
+- A handled save failure after shutdown begins attempts to restore fixture readiness. Failure of
+  that attempt keeps runner quiescence active until compatible local images are restored and
+  lifecycle restart succeeds.
+- Uncatchable process or host termination may leave the stack down and the existing lifecycle lock
+  stale during save or restore. Recovery requires continued runner quiescence, verification that
+  no holder remains, and the existing manual lock-clear procedure before lifecycle restart or an
+  exact restore retry.
 - Owner-only permissions and safe host extraction protect local secrets without claiming backup
   authenticity or encryption.
 - The implementation and test matrix lose the production transaction, crash-recovery, capacity,
