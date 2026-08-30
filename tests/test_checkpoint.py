@@ -6,26 +6,39 @@ import io
 import json
 import os
 import shlex
+import signal
 import stat
 import shutil
 import tarfile
 import tempfile
 import unittest
+from contextlib import contextmanager, nullcontext, redirect_stderr
 from pathlib import Path
 from unittest import mock
 
+from bzr_live import checkpoint as checkpoint_module
 from bzr_live.checkpoint import (
     ARTIFACT_NAMES,
     CHECKPOINT_FORMAT,
     FINAL_NAMES,
+    CheckpointContext,
     CheckpointError,
+    PreLockContext,
+    SignalState,
+    ValidatedPaths,
+    build_checkpoint_context,
     canonical_json,
     cleanup_staging,
     create_runner_archive,
     create_staging,
     extract_runner_archive,
+    health_check,
+    main,
     read_manifest,
     render_retry_command,
+    restore_checkpoint,
+    run_child,
+    save_checkpoint,
     stack_fingerprint,
     validate_bundle,
     validate_name,
@@ -802,5 +815,824 @@ class RunnerArchiveTests(unittest.TestCase):
         self.assertEqual(unicode_file.read_bytes(), restored_unicode.read_bytes())
         self.assertEqual(stat.S_IMODE(restored_unicode.lstat().st_mode), 0o500)
 
+
+class ArgvRecorder:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.stdin_bytes: list[bytes | None] = []
+        self.on_call = None
+        self.fail_when = None
+
+    def __call__(
+        self,
+        argv,
+        *,
+        signal_state,
+        stdin=None,
+        stdout=None,
+        capture_stderr=True,
+    ) -> bytes:
+        fixed = tuple(argv)
+        self.calls.append(fixed)
+        self.stdin_bytes.append(stdin.read() if stdin is not None else None)
+        invocation = len(self.calls)
+        if self.on_call is not None:
+            self.on_call(invocation, fixed, signal_state)
+        if self.fail_when is not None and self.fail_when(invocation, fixed):
+            raise CheckpointError(f"command: injected failure at invocation {invocation}")
+        if hasattr(stdout, "write"):
+            stdout.write(f"archive-{invocation}".encode())
+            stdout.flush()
+        if fixed[-3:] == ("port", "bugzilla", "80"):
+            return b"127.0.0.1:8080\n"
+        return b""
+
+
+class OrchestrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.base = Path(self._temporary.name).resolve()
+        self.root = self.base / "checkout"
+        self.store = self.base / "checkpoint store"
+        self.runner_parent = self.base / "runner parent"
+        self.runner = self.runner_parent / "runner state"
+        for path in (self.root, self.store, self.runner_parent, self.runner):
+            path.mkdir(mode=0o700)
+        (self.runner / "state").write_bytes(b"runner state")
+        self.name = "pristine"
+        self.project = "bzr-live-0123456789ab"
+        self.compose = (
+            "docker",
+            "compose",
+            "--project-name",
+            self.project,
+            "--project-directory",
+            str(self.root),
+            "--file",
+            str(self.root / "compose.yaml"),
+        )
+        self.paths = ValidatedPaths(
+            store=self.store,
+            runner_state=self.runner,
+            final=self.store / self.name,
+            staging=self.store / f".{self.name}.staging",
+        )
+        self.context = CheckpointContext(
+            operation="save",
+            root=self.root,
+            project=self.project,
+            name=self.name,
+            wait_timeout=37,
+            compose=self.compose,
+            paths=self.paths,
+            revision=REVISION,
+            fingerprint="b" * 64,
+        )
+        self.signal_state = SignalState()
+
+    def _restore_context(self) -> CheckpointContext:
+        return CheckpointContext(
+            operation="restore",
+            root=self.context.root,
+            project=self.context.project,
+            name=self.context.name,
+            wait_timeout=self.context.wait_timeout,
+            compose=self.context.compose,
+            paths=self.context.paths,
+            revision=self.context.revision,
+            fingerprint=self.context.fingerprint,
+        )
+
+    def _write_bundle(self) -> None:
+        if self.paths.final.exists():
+            shutil.rmtree(self.paths.final)
+        self.paths.final.mkdir(mode=0o700)
+        for name, content in (
+            ("mariadb-volume.tar", b"mariadb tar"),
+            ("bugzilla-volume.tar", b"bugzilla tar"),
+        ):
+            artifact = self.paths.final / name
+            artifact.write_bytes(content)
+            artifact.chmod(0o600)
+        runner_archive = self.paths.final / "runner-state.tar"
+        create_runner_archive(self.runner, runner_archive)
+        artifacts = {}
+        for name in ARTIFACT_NAMES:
+            artifact = self.paths.final / name
+            content = artifact.read_bytes()
+            artifacts[name] = {
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+            }
+        manifest = {
+            "artifacts": artifacts,
+            "checkpoint_format": CHECKPOINT_FORMAT,
+            "checkpoint_name": self.name,
+            "checkout_revision": REVISION,
+            "created_at": "2026-08-30T12:34:56Z",
+            "stack_fingerprint": self.context.fingerprint,
+        }
+        manifest_path = self.paths.final / "manifest.json"
+        manifest_path.write_bytes(canonical_json(manifest))
+        manifest_path.chmod(0o600)
+
+    def _save_patches(self, recorder: ArgvRecorder, events: list[str] | None = None):
+        observed = events if events is not None else []
+
+        def create_runner(source: Path, destination: Path) -> None:
+            observed.append("create runner archive")
+            destination.write_bytes(b"runner tar")
+            destination.chmod(0o600)
+
+        def validate_runner(source: Path):
+            observed.append("validate runner archive")
+            return ()
+
+        return (
+            mock.patch.object(checkpoint_module, "run_child", side_effect=recorder),
+            mock.patch.object(
+                checkpoint_module,
+                "create_runner_archive",
+                side_effect=create_runner,
+            ),
+            mock.patch.object(
+                checkpoint_module,
+                "validate_runner_archive",
+                side_effect=validate_runner,
+            ),
+        )
+
+    def _run_save(self, recorder: ArgvRecorder, events: list[str] | None = None) -> None:
+        first, second, third = self._save_patches(recorder, events)
+        with first, second, third:
+            save_checkpoint(self.context, self.signal_state)
+
+    def _run_restore(self, recorder: ArgvRecorder) -> None:
+        with mock.patch.object(checkpoint_module, "run_child", side_effect=recorder):
+            restore_checkpoint(self._restore_context(), self.signal_state)
+
+    @property
+    def _start(self) -> tuple[str, ...]:
+        return self.compose + (
+            "up",
+            "--detach",
+            "--no-build",
+            "--pull",
+            "never",
+            "--wait",
+            "--wait-timeout",
+            "37",
+        )
+
+    @property
+    def _health(self) -> list[tuple[str, ...]]:
+        return [
+            self.compose + ("config", "--quiet"),
+            self.compose + ("ps",),
+            self.compose + ("port", "bugzilla", "80"),
+            (
+                "curl",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "37",
+                "http://127.0.0.1:8080/",
+            ),
+        ]
+
+    def _archive(self, volume: str) -> tuple[str, ...]:
+        return (
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--mount",
+            f"type=volume,src={volume},dst=/volume,readonly",
+            checkpoint_module.HELPER_IMAGE,
+            "tar",
+            "-C",
+            "/volume",
+            "-cf",
+            "-",
+            ".",
+        )
+
+    def _tar_list(self) -> tuple[str, ...]:
+        return (
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--interactive",
+            checkpoint_module.HELPER_IMAGE,
+            "tar",
+            "-tf",
+            "-",
+        )
+
+    def _extract(self, volume: str) -> tuple[str, ...]:
+        return (
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--interactive",
+            "--mount",
+            f"type=volume,src={volume},dst=/volume",
+            checkpoint_module.HELPER_IMAGE,
+            "tar",
+            "-C",
+            "/volume",
+            "-xf",
+            "-",
+        )
+
+    def test_no_store_or_runner_access_precedes_lock(self) -> None:
+        prelock = PreLockContext(
+            operation="save",
+            root=self.root,
+            project=self.project,
+            lock_dir=self.base / "lifecycle.lock",
+            name=self.name,
+            store_arg=str(self.store),
+            runner_arg=str(self.runner),
+            wait_timeout=37,
+            compose=self.compose,
+        )
+        order: list[str] = []
+
+        @contextmanager
+        def locked(lock_dir: Path, operation: str):
+            order.append("lock entered")
+            yield
+            order.append("lock exited")
+
+        def build(candidate: PreLockContext) -> CheckpointContext:
+            self.assertIs(candidate, prelock)
+            order.append("fixture paths read")
+            return self.context
+
+        with (
+            mock.patch.object(
+                checkpoint_module,
+                "_parse_prelock_context",
+                return_value=prelock,
+            ),
+            mock.patch.object(checkpoint_module, "lifecycle_lock", side_effect=locked),
+            mock.patch.object(
+                checkpoint_module,
+                "build_checkpoint_context",
+                side_effect=build,
+            ),
+            mock.patch.object(
+                checkpoint_module,
+                "save_checkpoint",
+                side_effect=lambda *_: order.append("save"),
+            ),
+        ):
+            self.assertEqual(main(["save", self.name, "--store", "x", "--runner-state", "y"]), 0)
+        self.assertEqual(order, ["lock entered", "fixture paths read", "save", "lock exited"])
+
+    def test_save_order_and_exact_compose_and_helper_argv(self) -> None:
+        recorder = ArgvRecorder()
+        self._run_save(recorder)
+        mariadb = f"{self.project}_mariadb-data"
+        bugzilla = f"{self.project}_bugzilla-data"
+        self.assertEqual(
+            recorder.calls,
+            [
+                *self._health,
+                self.compose + ("down", "--remove-orphans"),
+                self._archive(mariadb),
+                self._archive(bugzilla),
+                self._tar_list(),
+                self._tar_list(),
+                self._start,
+                *self._health,
+            ],
+        )
+
+    def test_save_parses_all_three_tars_before_publication(self) -> None:
+        recorder = ArgvRecorder()
+        events: list[str] = []
+        recorder.on_call = lambda _number, argv, _state: events.append(
+            "list volume archive" if argv == self._tar_list() else "child"
+        )
+        real_rename = os.rename
+
+        def rename(source, destination, *args, **kwargs):
+            self.assertEqual(events.count("list volume archive"), 2)
+            self.assertIn("validate runner archive", events)
+            events.append("publish")
+            return real_rename(source, destination, *args, **kwargs)
+
+        with mock.patch.object(checkpoint_module.os, "rename", side_effect=rename):
+            self._run_save(recorder, events)
+        self.assertLess(events.index("validate runner archive"), events.index("publish"))
+
+    def test_save_never_overwrites_final_and_reports_post_publish_restart_failure(self) -> None:
+        self.paths.final.mkdir(mode=0o700)
+        sentinel = self.paths.final / "sentinel"
+        sentinel.write_bytes(b"keep")
+        recorder = ArgvRecorder()
+        with self.assertRaisesRegex(CheckpointError, "already exists"):
+            self._run_save(recorder)
+        self.assertEqual(sentinel.read_bytes(), b"keep")
+        self.assertEqual(recorder.calls, [])
+
+        shutil.rmtree(self.paths.final)
+        recorder = ArgvRecorder()
+        recorder.fail_when = lambda _number, argv: argv == self._start
+        with self.assertRaisesRegex(CheckpointError, "published.*restart failed"):
+            self._run_save(recorder)
+        self.assertTrue(self.paths.final.is_dir())
+        self.assertEqual(
+            set(path.name for path in self.paths.final.iterdir()),
+            FINAL_NAMES,
+        )
+
+    def test_restore_validates_every_input_before_down_or_delete(self) -> None:
+        self._write_bundle()
+        recorder = ArgvRecorder()
+        validated: list[str] = []
+        real_validate_bundle = checkpoint_module.validate_bundle
+        real_validate_runner = checkpoint_module.validate_runner_archive
+
+        def validate_bundle_first(*args, **kwargs):
+            validated.append("manifest")
+            return real_validate_bundle(*args, **kwargs)
+
+        def validate_runner_first(*args, **kwargs):
+            validated.append("runner tar")
+            return real_validate_runner(*args, **kwargs)
+
+        def on_call(_number, argv, _state):
+            if argv == self._tar_list():
+                validated.append("volume tar")
+            if argv == self.compose + ("down", "--remove-orphans"):
+                self.assertIn("manifest", validated)
+                self.assertIn("runner tar", validated)
+                self.assertEqual(validated.count("volume tar"), 2)
+
+        recorder.on_call = on_call
+        with (
+            mock.patch.object(
+                checkpoint_module,
+                "validate_bundle",
+                side_effect=validate_bundle_first,
+            ),
+            mock.patch.object(
+                checkpoint_module,
+                "validate_runner_archive",
+                side_effect=validate_runner_first,
+            ),
+        ):
+            self._run_restore(recorder)
+
+    def test_restore_uses_down_remove_orphans_not_stop_or_volumes(self) -> None:
+        self._write_bundle()
+        recorder = ArgvRecorder()
+        self._run_restore(recorder)
+        down_calls = [argv for argv in recorder.calls if "down" in argv or "stop" in argv]
+        self.assertEqual(down_calls, [self.compose + ("down", "--remove-orphans")])
+        self.assertNotIn("--volumes", down_calls[0])
+
+    def test_restore_recreates_both_fixed_volumes_and_runner_before_extraction(self) -> None:
+        self._write_bundle()
+        recorder = ArgvRecorder()
+        mariadb = f"{self.project}_mariadb-data"
+        bugzilla = f"{self.project}_bugzilla-data"
+        required = [
+            ("docker", "volume", "rm", "--force", mariadb),
+            (
+                "docker",
+                "volume",
+                "create",
+                "--label",
+                f"com.docker.compose.project={self.project}",
+                "--label",
+                "com.docker.compose.volume=mariadb-data",
+                mariadb,
+            ),
+            ("docker", "volume", "rm", "--force", bugzilla),
+            (
+                "docker",
+                "volume",
+                "create",
+                "--label",
+                f"com.docker.compose.project={self.project}",
+                "--label",
+                "com.docker.compose.volume=bugzilla-data",
+                bugzilla,
+            ),
+        ]
+
+        def before_extract(_number, argv, _state):
+            if argv in (self._extract(mariadb), self._extract(bugzilla)):
+                for command in required:
+                    self.assertIn(command, recorder.calls)
+                    self.assertLess(recorder.calls.index(command), recorder.calls.index(argv))
+                self.assertTrue(self.runner.is_dir())
+                self.assertEqual(list(self.runner.iterdir()), [])
+
+        recorder.on_call = before_extract
+        self._run_restore(recorder)
+
+    def test_each_post_delete_failure_keeps_bundle_and_prints_retry(self) -> None:
+        targets = (
+            "volume create",
+            "mariadb extraction",
+            "bugzilla extraction",
+            "runner cleanup",
+            "runner extraction",
+            "startup",
+            "health",
+        )
+        for target in targets:
+            with self.subTest(target=target):
+                if self.paths.final.exists():
+                    shutil.rmtree(self.paths.final)
+                if self.runner.exists():
+                    shutil.rmtree(self.runner)
+                self.runner.mkdir(mode=0o700)
+                (self.runner / "state").write_bytes(b"runner state")
+                self._write_bundle()
+                recorder = ArgvRecorder()
+                mariadb = f"{self.project}_mariadb-data"
+                bugzilla = f"{self.project}_bugzilla-data"
+                matches = {
+                    "volume create": lambda argv: argv[:3]
+                    == ("docker", "volume", "create"),
+                    "mariadb extraction": lambda argv: argv == self._extract(mariadb),
+                    "bugzilla extraction": lambda argv: argv == self._extract(bugzilla),
+                    "startup": lambda argv: argv == self._start,
+                    "health": lambda argv: argv == self.compose + ("ps",),
+                }
+                recorder.fail_when = lambda _number, argv: (
+                    target in matches and matches[target](argv)
+                )
+                patcher = nullcontext()
+                if target == "runner cleanup":
+                    real_cleanup = checkpoint_module._replace_runner_target
+
+                    def fail_cleanup(*args, **kwargs):
+                        real_cleanup(*args, **kwargs)
+                        raise CheckpointError("injected runner cleanup failure")
+
+                    patcher = mock.patch.object(
+                        checkpoint_module,
+                        "_replace_runner_target",
+                        side_effect=fail_cleanup,
+                    )
+                elif target == "runner extraction":
+                    patcher = mock.patch.object(
+                        checkpoint_module,
+                        "extract_runner_archive",
+                        side_effect=CheckpointError("injected runner extraction failure"),
+                    )
+                stderr = io.StringIO()
+                with (
+                    patcher,
+                    redirect_stderr(stderr),
+                    self.assertRaises(CheckpointError) as raised,
+                ):
+                    self._run_restore(recorder)
+                message = str(raised.exception)
+                retry = render_retry_command(self.name, self.store, self.runner)
+                self.assertIn(str(self.paths.final), message)
+                self.assertIn(retry, message)
+                self.assertIn(retry, stderr.getvalue())
+                self.assertTrue(self.paths.final.is_dir())
+
+    def test_repeat_restore_recreates_targets_instead_of_accumulating_output(self) -> None:
+        self._write_bundle()
+        recorder = ArgvRecorder()
+        self._run_restore(recorder)
+        extra = self.runner / "must disappear"
+        extra.write_bytes(b"partial output")
+        self.signal_state = SignalState()
+        self._run_restore(recorder)
+        self.assertFalse(extra.exists())
+        for volume in (
+            f"{self.project}_mariadb-data",
+            f"{self.project}_bugzilla-data",
+        ):
+            self.assertEqual(
+                recorder.calls.count(("docker", "volume", "rm", "--force", volume)),
+                2,
+            )
+
+    def test_start_never_builds_or_pulls(self) -> None:
+        recorder = ArgvRecorder()
+        self._run_save(recorder)
+        starts = [argv for argv in recorder.calls if "up" in argv]
+        self.assertEqual(starts, [self._start])
+        self.assertIn("--no-build", starts[0])
+        self.assertNotIn("--build", starts[0])
+        self.assertEqual(starts[0][starts[0].index("--pull") + 1], "never")
+        self.assertNotIn(("docker", "pull"), [argv[:2] for argv in recorder.calls])
+        self.assertNotIn(("docker", "build"), [argv[:2] for argv in recorder.calls])
+
+    def test_helper_has_no_network_socket_or_extra_mount(self) -> None:
+        recorder = ArgvRecorder()
+        self._run_save(recorder)
+        helpers = [argv for argv in recorder.calls if argv[:2] == ("docker", "run")]
+        self.assertTrue(helpers)
+        for argv in helpers:
+            self.assertIn(("--network", "none"), list(zip(argv, argv[1:])))
+            self.assertNotIn("docker.sock", " ".join(argv))
+            self.assertLessEqual(argv.count("--mount"), 1)
+            if argv == self._tar_list():
+                self.assertEqual(argv.count("--mount"), 0)
+
+    def test_health_uses_exact_config_ps_port_curl_and_bounded_logs_argv(self) -> None:
+        recorder = ArgvRecorder()
+        with mock.patch.object(checkpoint_module, "run_child", side_effect=recorder):
+            health_check(self.context, self.signal_state)
+        self.assertEqual(recorder.calls, self._health)
+
+        failing = ArgvRecorder()
+        failing.fail_when = lambda _number, argv: argv == self.compose + ("ps",)
+        with (
+            mock.patch.object(checkpoint_module, "run_child", side_effect=failing),
+            self.assertRaisesRegex(CheckpointError, "health"),
+        ):
+            health_check(self.context, SignalState())
+        self.assertEqual(
+            failing.calls[-1],
+            self.compose + ("logs", "--tail", "100", "db", "bugzilla"),
+        )
+
+    def test_context_fields_requiring_fixture_access_are_built_only_under_lock(self) -> None:
+        self.assertEqual(
+            tuple(PreLockContext.__dataclass_fields__),
+            (
+                "operation",
+                "root",
+                "project",
+                "lock_dir",
+                "name",
+                "store_arg",
+                "runner_arg",
+                "wait_timeout",
+                "compose",
+            ),
+        )
+        prelock = PreLockContext(
+            operation="save",
+            root=self.root,
+            project=self.project,
+            lock_dir=self.base / "lifecycle.lock",
+            name=self.name,
+            store_arg=str(self.store),
+            runner_arg=str(self.runner),
+            wait_timeout=37,
+            compose=self.compose,
+        )
+
+        def require_lock(value):
+            self.assertTrue(prelock.lock_dir.is_dir())
+            return value
+
+        with (
+            mock.patch.object(
+                checkpoint_module,
+                "validate_paths",
+                side_effect=lambda *_: require_lock(self.paths),
+            ),
+            mock.patch.object(
+                checkpoint_module,
+                "checkout_revision",
+                side_effect=lambda *_: require_lock(REVISION),
+            ),
+            mock.patch.object(
+                checkpoint_module,
+                "stack_fingerprint",
+                side_effect=lambda *_: require_lock("b" * 64),
+            ),
+            checkpoint_module.lifecycle_lock(prelock.lock_dir, "save"),
+        ):
+            locked = build_checkpoint_context(prelock)
+        self.assertEqual(locked.paths, self.paths)
+        self.assertEqual(locked.revision, REVISION)
+        self.assertEqual(locked.fingerprint, "b" * 64)
+
+
+class _FakeProcess:
+    def __init__(self, events: list[str]) -> None:
+        self.pid = 4242
+        self.returncode = 0
+        self.events = events
+
+    def wait(self):
+        self.events.append("reap")
+        return self.returncode
+
+
+class SignalTests(unittest.TestCase):
+    setUp = OrchestrationTests.setUp
+    _restore_context = OrchestrationTests._restore_context
+    _write_bundle = OrchestrationTests._write_bundle
+    _save_patches = OrchestrationTests._save_patches
+    _run_save = OrchestrationTests._run_save
+    _run_restore = OrchestrationTests._run_restore
+    _start = OrchestrationTests._start
+    _health = OrchestrationTests._health
+    _archive = OrchestrationTests._archive
+    _tar_list = OrchestrationTests._tar_list
+    _extract = OrchestrationTests._extract
+
+    def _inject_signal(self, state: SignalState, events: list[str]) -> None:
+        process = _FakeProcess(events)
+        state.active_process = process  # type: ignore[assignment]
+
+        def killpg(pid: int, requested_signal: int) -> None:
+            self.assertEqual(pid, process.pid)
+            self.assertEqual(requested_signal, signal.SIGTERM)
+            events.append("forward")
+
+        with (
+            mock.patch.object(checkpoint_module.os, "killpg", side_effect=killpg),
+            mock.patch.object(checkpoint_module.signal, "signal"),
+        ):
+            checkpoint_module._handle_signal(signal.SIGTERM, None, state)
+        state.active_process = None
+        raise checkpoint_module._HandledSignal(signal.SIGTERM)
+
+    def test_subprocess_signals_reap_before_save_recovery(self) -> None:
+        recorder = ArgvRecorder()
+        events: list[str] = []
+        down = self.compose + ("down", "--remove-orphans")
+
+        def on_call(_number, argv, state):
+            events.append("recovery" if state.requested else "normal")
+            if argv == down and state.requested is None:
+                self._inject_signal(state, events)
+
+        recorder.on_call = on_call
+        with self.assertRaises(checkpoint_module._HandledSignal):
+            self._run_save(recorder, events)
+        self.assertLess(events.index("forward"), events.index("reap"))
+        self.assertLess(events.index("reap"), events.index("recovery"))
+        self.assertFalse(self.paths.staging.exists())
+        self.assertIn(self._start, recorder.calls)
+        for command in self._health:
+            self.assertIn(command, recorder.calls)
+
+    def test_pre_delete_restore_signal_restarts_unchanged_fixture(self) -> None:
+        self._write_bundle()
+        recorder = ArgvRecorder()
+        events: list[str] = []
+        down = self.compose + ("down", "--remove-orphans")
+
+        def on_call(_number, argv, state):
+            if argv == down and state.requested is None:
+                self._inject_signal(state, events)
+
+        recorder.on_call = on_call
+        with self.assertRaises(checkpoint_module._HandledSignal):
+            self._run_restore(recorder)
+        self.assertEqual(events[:2], ["forward", "reap"])
+        self.assertIn(self._start, recorder.calls)
+        self.assertTrue((self.runner / "state").exists())
+        self.assertFalse(any(argv[:3] == ("docker", "volume", "rm") for argv in recorder.calls))
+
+    def test_each_post_delete_subprocess_signal_leaves_down_and_reports_retry(self) -> None:
+        phases = ("mariadb extraction", "bugzilla extraction", "startup", "health")
+        for phase in phases:
+            with self.subTest(phase=phase):
+                self.signal_state = SignalState()
+                if self.paths.final.exists():
+                    shutil.rmtree(self.paths.final)
+                if self.runner.exists():
+                    shutil.rmtree(self.runner)
+                self.runner.mkdir(mode=0o700)
+                (self.runner / "state").write_bytes(b"runner state")
+                self._write_bundle()
+                recorder = ArgvRecorder()
+                events: list[str] = []
+                mariadb = f"{self.project}_mariadb-data"
+                bugzilla = f"{self.project}_bugzilla-data"
+                targets = {
+                    "mariadb extraction": self._extract(mariadb),
+                    "bugzilla extraction": self._extract(bugzilla),
+                    "startup": self._start,
+                    "health": self.compose + ("ps",),
+                }
+
+                def on_call(_number, argv, state):
+                    if argv == targets[phase] and state.requested is None:
+                        self._inject_signal(state, events)
+                    if state.requested is not None:
+                        events.append("cleanup")
+
+                recorder.on_call = on_call
+                stderr = io.StringIO()
+                with (
+                    redirect_stderr(stderr),
+                    self.assertRaises(checkpoint_module._HandledSignal),
+                ):
+                    self._run_restore(recorder)
+                self.assertEqual(events[:2], ["forward", "reap"])
+                retry = render_retry_command(self.name, self.store, self.runner)
+                self.assertIn(retry, stderr.getvalue())
+                self.assertTrue(self.paths.final.is_dir())
+                if phase in ("startup", "health"):
+                    self.assertGreater(
+                        recorder.calls.count(self.compose + ("down", "--remove-orphans")),
+                        1,
+                    )
+
+    def test_runner_extraction_signal_has_no_child_and_launches_no_later_phase(self) -> None:
+        self._write_bundle()
+        recorder = ArgvRecorder()
+        events: list[str] = []
+        real_extract = checkpoint_module.extract_runner_archive
+
+        def interrupted_extract(source: Path, destination: Path) -> None:
+            real_extract(source, destination)
+            events.append("runner extraction completed")
+            with mock.patch.object(checkpoint_module.signal, "signal"):
+                checkpoint_module._handle_signal(
+                    signal.SIGTERM,
+                    None,
+                    self.signal_state,
+                )
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                checkpoint_module,
+                "extract_runner_archive",
+                side_effect=interrupted_extract,
+            ),
+            redirect_stderr(stderr),
+            self.assertRaises(checkpoint_module._HandledSignal),
+        ):
+            self._run_restore(recorder)
+        self.assertEqual(events, ["runner extraction completed"])
+        self.assertNotIn(self._start, recorder.calls)
+        self.assertNotIn("forward", events)
+        self.assertNotIn("reap", events)
+        self.assertIn(
+            render_retry_command(self.name, self.store, self.runner),
+            stderr.getvalue(),
+        )
+
+    def test_first_signal_installs_default_second_signal_behavior(self) -> None:
+        state = SignalState()
+        installed: list[tuple[int, object]] = []
+        with mock.patch.object(
+            checkpoint_module.signal,
+            "signal",
+            side_effect=lambda sig, handler: installed.append((sig, handler)),
+        ):
+            checkpoint_module._handle_signal(signal.SIGINT, None, state)
+        self.assertEqual(state.requested, signal.SIGINT)
+        self.assertIn((signal.SIGINT, signal.SIG_DFL), installed)
+        self.assertIn((signal.SIGTERM, signal.SIG_DFL), installed)
+
+    def test_run_child_starts_new_session_forwards_and_reaps(self) -> None:
+        events: list[str] = []
+
+        class Popen:
+            def __init__(self, argv, **kwargs):
+                self.pid = 4242
+                self.returncode = 0
+                self.argv = tuple(argv)
+                self.kwargs = kwargs
+
+            def communicate(self):
+                checkpoint_module._handle_signal(
+                    signal.SIGTERM,
+                    None,
+                    state,
+                )
+                return b"", b""
+
+            def wait(self):
+                events.append("reap")
+                return self.returncode
+
+        state = SignalState()
+
+        def killpg(pid: int, requested_signal: int) -> None:
+            self.assertEqual((pid, requested_signal), (4242, signal.SIGTERM))
+            events.append("forward")
+
+        with (
+            mock.patch.object(checkpoint_module.subprocess, "Popen", Popen),
+            mock.patch.object(checkpoint_module.os, "killpg", side_effect=killpg),
+            mock.patch.object(checkpoint_module.signal, "signal"),
+            self.assertRaises(checkpoint_module._HandledSignal),
+        ):
+            run_child(("fixed", "argv"), signal_state=state)
+        self.assertEqual(events, ["forward", "reap"])
+        self.assertIsNone(state.active_process)
 if __name__ == "__main__":
     unittest.main()

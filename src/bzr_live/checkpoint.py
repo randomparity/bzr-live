@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
 import re
 import shlex
+import signal
 import stat
 import subprocess
+import sys
 import tarfile
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Mapping
+from typing import BinaryIO, Literal, Mapping
 
 
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
@@ -22,6 +27,10 @@ ARTIFACT_NAMES = (
 )
 FINAL_NAMES = frozenset(("manifest.json", *ARTIFACT_NAMES))
 CHECKPOINT_FORMAT = 1
+HELPER_IMAGE = (
+    "mariadb:10.6@sha256:"
+    "92e50059ea0a5965a33ef751970eab37d421b91ebbd01ac909039cffe159e574"
+)
 
 _MANIFEST_NAMES = frozenset(
     (
@@ -58,6 +67,38 @@ class ValidatedPaths:
     runner_state: Path
     final: Path
     staging: Path
+
+
+@dataclass(frozen=True)
+class PreLockContext:
+    operation: Literal["save", "restore"]
+    root: Path
+    project: str
+    lock_dir: Path
+    name: str
+    store_arg: str
+    runner_arg: str
+    wait_timeout: int
+    compose: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CheckpointContext:
+    operation: Literal["save", "restore"]
+    root: Path
+    project: str
+    name: str
+    wait_timeout: int
+    compose: tuple[str, ...]
+    paths: ValidatedPaths
+    revision: str
+    fingerprint: str
+
+
+@dataclass
+class SignalState:
+    requested: int | None = None
+    active_process: subprocess.Popen[bytes] | None = None
 
 
 @dataclass
@@ -631,6 +672,19 @@ def extract_runner_archive(source: Path, destination: Path) -> None:
     try:
         destination.mkdir(mode=0o700)
         destination.chmod(0o700)
+    except FileExistsError:
+        metadata = _inspect_path(destination, "runner archive")
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+            or _is_mount(destination, "runner archive")
+            or _directory_children(destination, "runner archive")
+        ):
+            raise CheckpointError(
+                f"runner archive: existing destination must be an empty owner-owned "
+                f"mode-0700 directory: {destination}"
+            ) from None
     except OSError as error:
         raise CheckpointError(
             f"runner archive: cannot create destination {destination}: {error}"
@@ -882,24 +936,25 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def validate_bundle(
-    final: Path,
+def _validate_bundle_at(
+    bundle: Path,
     *,
     name: str,
+    directory_name: str,
     revision: str,
     fingerprint: str,
 ) -> dict[str, object]:
     validated_name = validate_name(name)
     try:
-        final_metadata = final.lstat()
+        bundle_metadata = bundle.lstat()
     except OSError as error:
-        raise CheckpointError(f"bundle: cannot inspect {final}: {error}") from error
-    if not stat.S_ISDIR(final_metadata.st_mode):
-        raise CheckpointError(f"bundle: expected a directory at {final}")
+        raise CheckpointError(f"bundle: cannot inspect {bundle}: {error}") from error
+    if not stat.S_ISDIR(bundle_metadata.st_mode):
+        raise CheckpointError(f"bundle: expected a directory at {bundle}")
     try:
-        entries = {entry.name: entry for entry in final.iterdir()}
+        entries = {entry.name: entry for entry in bundle.iterdir()}
     except OSError as error:
-        raise CheckpointError(f"bundle: cannot list {final}: {error}") from error
+        raise CheckpointError(f"bundle: cannot list {bundle}: {error}") from error
     if frozenset(entries) != FINAL_NAMES:
         missing = sorted(FINAL_NAMES - entries.keys())
         unknown = sorted(entries.keys() - FINAL_NAMES)
@@ -913,7 +968,7 @@ def validate_bundle(
     metadata = {entry_name: _final_regular_file(path) for entry_name, path in entries.items()}
     manifest = read_manifest(entries["manifest.json"])
     manifest_name = manifest["checkpoint_name"]
-    if manifest_name != validated_name or manifest_name != final.name:
+    if manifest_name != validated_name or manifest_name != directory_name:
         raise CheckpointError("bundle: checkpoint name does not match CLI name and final directory")
     if manifest["checkout_revision"] != revision:
         raise CheckpointError("bundle: checkout revision is incompatible")
@@ -932,6 +987,22 @@ def validate_bundle(
     return manifest
 
 
+def validate_bundle(
+    final: Path,
+    *,
+    name: str,
+    revision: str,
+    fingerprint: str,
+) -> dict[str, object]:
+    return _validate_bundle_at(
+        final,
+        name=name,
+        directory_name=final.name,
+        revision=revision,
+        fingerprint=fingerprint,
+    )
+
+
 def render_retry_command(name: str, store: Path, runner_state: Path) -> str:
     return shlex.join(
         [
@@ -944,3 +1015,917 @@ def render_retry_command(name: str, store: Path, runner_state: Path) -> str:
             str(runner_state),
         ]
     )
+
+
+_VOLUME_ARTIFACTS = (
+    ("mariadb-data", "mariadb-volume.tar"),
+    ("bugzilla-data", "bugzilla-volume.tar"),
+)
+_STDERR_LIMIT = 4096
+
+
+class _HandledSignal(Exception):
+    def __init__(self, requested_signal: int):
+        super().__init__(requested_signal)
+        self.requested_signal = requested_signal
+
+
+class _ReportedCheckpointError(CheckpointError):
+    pass
+
+
+def _handle_signal(
+    requested_signal: int,
+    _frame: object,
+    signal_state: SignalState,
+) -> None:
+    if signal_state.requested is not None:
+        return
+    signal_state.requested = requested_signal
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    process = signal_state.active_process
+    if process is None:
+        return
+    try:
+        os.killpg(process.pid, requested_signal)
+    except OSError:
+        pass
+    finally:
+        process.wait()
+        if signal_state.active_process is process:
+            signal_state.active_process = None
+
+
+def _check_signal(signal_state: SignalState) -> None:
+    if signal_state.requested is not None:
+        raise _HandledSignal(signal_state.requested)
+
+
+def _bounded_text(content: bytes) -> str:
+    bounded = content[:_STDERR_LIMIT]
+    rendered = bounded.decode("utf-8", errors="replace").strip()
+    if len(content) > _STDERR_LIMIT:
+        rendered += "\n[diagnostics truncated]"
+    return rendered
+
+
+def run_child(
+    argv: Sequence[str],
+    *,
+    signal_state: SignalState,
+    stdin: BinaryIO | None = None,
+    stdout: BinaryIO | int | None = None,
+    capture_stderr: bool = True,
+) -> bytes:
+    if isinstance(argv, (str, bytes)) or not argv or any(not isinstance(arg, str) for arg in argv):
+        raise CheckpointError("command: argv must be a nonempty fixed sequence of strings")
+    fixed_argv = tuple(argv)
+    requested_before = signal_state.requested
+    try:
+        process = subprocess.Popen(
+            fixed_argv,
+            stdin=stdin,
+            stdout=subprocess.PIPE if stdout is None else stdout,
+            stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise CheckpointError(f"command: cannot start {fixed_argv[0]}: {error}") from error
+
+    signal_state.active_process = process
+    try:
+        captured_stdout, captured_stderr = process.communicate()
+    except OSError as error:
+        if signal_state.requested is not None and requested_before is None:
+            raise _HandledSignal(signal_state.requested) from error
+        raise CheckpointError(f"command: failed while running {fixed_argv[0]}: {error}") from error
+    finally:
+        if signal_state.active_process is process:
+            signal_state.active_process = None
+
+    if signal_state.requested is not None and requested_before is None:
+        raise _HandledSignal(signal_state.requested)
+    if process.returncode != 0:
+        diagnostics = _bounded_text(captured_stderr or b"")
+        detail = f": {diagnostics}" if diagnostics else ""
+        raise CheckpointError(
+            f"command: {shlex.join(fixed_argv)} exited {process.returncode}{detail}"
+        )
+    return captured_stdout or b""
+
+
+def _run_normal(
+    argv: Sequence[str],
+    *,
+    signal_state: SignalState,
+    stdin: BinaryIO | None = None,
+    stdout: BinaryIO | int | None = None,
+) -> bytes:
+    _check_signal(signal_state)
+    result = run_child(
+        argv,
+        signal_state=signal_state,
+        stdin=stdin,
+        stdout=stdout,
+    )
+    _check_signal(signal_state)
+    return result
+
+
+def _lock_owner_state(lock_dir: Path) -> str:
+    owner_path = lock_dir / "owner"
+    try:
+        with owner_path.open("r", encoding="ascii") as owner_file:
+            owner = owner_file.read(64).strip()
+    except (OSError, UnicodeError):
+        return "unknown"
+    if re.fullmatch(r"[0-9]+", owner) is None:
+        return "unknown"
+    owner_pid = int(owner)
+    try:
+        os.kill(owner_pid, 0)
+    except ProcessLookupError:
+        return f"stale PID {owner_pid}"
+    except PermissionError:
+        return f"live PID {owner_pid}"
+    except OSError:
+        return "unknown"
+    return f"live PID {owner_pid}"
+
+
+@contextmanager
+def lifecycle_lock(lock_dir: Path, operation: str) -> Iterator[None]:
+    held = False
+    try:
+        try:
+            lock_dir.mkdir(mode=0o700)
+        except FileExistsError:
+            owner_state = _lock_owner_state(lock_dir)
+            raise CheckpointError(
+                f"{operation}: lifecycle lock is held ({owner_state}) at {lock_dir}. "
+                f"Next action: verify no lifecycle process is running, then remove "
+                f"{lock_dir} manually."
+            ) from None
+        except OSError as error:
+            raise CheckpointError(
+                f"{operation}: cannot create lifecycle lock {lock_dir}: {error}"
+            ) from error
+        held = True
+        try:
+            owner = lock_dir / "owner"
+            owner.write_text(f"{os.getpid()}\n", encoding="ascii")
+            owner.chmod(0o600)
+        except OSError:
+            pass
+        yield
+    finally:
+        if held:
+            try:
+                (lock_dir / "owner").unlink()
+            except OSError:
+                pass
+            try:
+                lock_dir.rmdir()
+            except OSError:
+                pass
+
+
+def build_checkpoint_context(prelock: PreLockContext) -> CheckpointContext:
+    paths = validate_paths(
+        prelock.operation,
+        prelock.root,
+        prelock.name,
+        prelock.store_arg,
+        prelock.runner_arg,
+    )
+    revision = checkout_revision(prelock.root)
+    fingerprint = stack_fingerprint(prelock.root, paths.runner_state)
+    return CheckpointContext(
+        operation=prelock.operation,
+        root=prelock.root,
+        project=prelock.project,
+        name=prelock.name,
+        wait_timeout=prelock.wait_timeout,
+        compose=prelock.compose,
+        paths=paths,
+        revision=revision,
+        fingerprint=fingerprint,
+    )
+
+
+def _loopback_endpoint(raw: bytes) -> str:
+    try:
+        endpoint = raw.decode("ascii").strip()
+    except UnicodeDecodeError as error:
+        raise CheckpointError("health: Compose port was not ASCII") from error
+    match = re.fullmatch(r"(127\.0\.0\.1|\[::1\]):([0-9]{1,5})", endpoint)
+    if match is None:
+        raise CheckpointError(
+            f"health: Compose port must be a loopback host and decimal port, got {endpoint!r}"
+        )
+    port = int(match.group(2))
+    if port < 1 or port > 65535:
+        raise CheckpointError(f"health: Compose port is outside 1..65535: {port}")
+    return endpoint
+
+
+def _health_check(
+    context: CheckpointContext,
+    signal_state: SignalState,
+    *,
+    recovery: bool,
+) -> None:
+    invoke = run_child if recovery else _run_normal
+
+    def call(
+        argv: Sequence[str],
+        *,
+        stdout: BinaryIO | int | None = None,
+    ) -> bytes:
+        return invoke(argv, signal_state=signal_state, stdout=stdout)
+
+    try:
+        call((*context.compose, "config", "--quiet"))
+        call((*context.compose, "ps"))
+        endpoint = _loopback_endpoint(
+            call((*context.compose, "port", "bugzilla", "80"))
+        )
+        call(
+            (
+                "curl",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                str(context.wait_timeout),
+                f"http://{endpoint}/",
+            ),
+            stdout=subprocess.DEVNULL,
+        )
+    except _HandledSignal:
+        raise
+    except CheckpointError as error:
+        try:
+            diagnostics = invoke(
+                (*context.compose, "logs", "--tail", "100", "db", "bugzilla"),
+                signal_state=signal_state,
+            )
+        except _HandledSignal:
+            raise
+        except CheckpointError:
+            diagnostics = b""
+        rendered = _bounded_text(diagnostics)
+        if rendered:
+            print(rendered, file=sys.stderr)
+        message = str(error)
+        if message.startswith("health:"):
+            raise CheckpointError(message) from error
+        raise CheckpointError(f"health: {message}") from error
+
+
+def health_check(context: CheckpointContext, signal_state: SignalState) -> None:
+    _health_check(context, signal_state, recovery=False)
+
+
+def _start_argv(context: CheckpointContext) -> tuple[str, ...]:
+    return (
+        *context.compose,
+        "up",
+        "--detach",
+        "--no-build",
+        "--pull",
+        "never",
+        "--wait",
+        "--wait-timeout",
+        str(context.wait_timeout),
+    )
+
+
+def _restart_fixture(context: CheckpointContext, signal_state: SignalState) -> None:
+    run_child(_start_argv(context), signal_state=signal_state)
+    _health_check(context, signal_state, recovery=True)
+
+
+def _volume_name(context: CheckpointContext, compose_name: str) -> str:
+    return f"{context.project}_{compose_name}"
+
+
+def _archive_argv(volume: str) -> tuple[str, ...]:
+    return (
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--mount",
+        f"type=volume,src={volume},dst=/volume,readonly",
+        HELPER_IMAGE,
+        "tar",
+        "-C",
+        "/volume",
+        "-cf",
+        "-",
+        ".",
+    )
+
+
+def _tar_list_argv() -> tuple[str, ...]:
+    return (
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--interactive",
+        HELPER_IMAGE,
+        "tar",
+        "-tf",
+        "-",
+    )
+
+
+def _extract_argv(volume: str) -> tuple[str, ...]:
+    return (
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--interactive",
+        "--mount",
+        f"type=volume,src={volume},dst=/volume",
+        HELPER_IMAGE,
+        "tar",
+        "-C",
+        "/volume",
+        "-xf",
+        "-",
+    )
+
+
+def _open_private_output(path: Path) -> BinaryIO:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        os.fchmod(descriptor, 0o600)
+        output = os.fdopen(descriptor, "wb")
+        descriptor = None
+        return output
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise CheckpointError(f"checkpoint: cannot create {path}: {error}") from error
+
+
+def _archive_volume(
+    context: CheckpointContext,
+    signal_state: SignalState,
+    compose_name: str,
+    destination: Path,
+) -> None:
+    try:
+        with _open_private_output(destination) as output:
+            _run_normal(
+                _archive_argv(_volume_name(context, compose_name)),
+                signal_state=signal_state,
+                stdout=output,
+            )
+    except OSError as error:
+        raise CheckpointError(f"checkpoint: cannot finish {destination}: {error}") from error
+
+
+def _validate_volume_archive(path: Path, signal_state: SignalState) -> None:
+    try:
+        with path.open("rb") as source:
+            _run_normal(
+                _tar_list_argv(),
+                signal_state=signal_state,
+                stdin=source,
+                stdout=subprocess.DEVNULL,
+            )
+    except OSError as error:
+        raise CheckpointError(f"volume archive: cannot read {path}: {error}") from error
+
+
+def _write_private_bytes(path: Path, content: bytes) -> None:
+    try:
+        with _open_private_output(path) as output:
+            output.write(content)
+            output.flush()
+    except OSError as error:
+        raise CheckpointError(f"checkpoint: cannot write {path}: {error}") from error
+
+
+def _manifest_for(context: CheckpointContext) -> dict[str, object]:
+    artifacts = {}
+    for artifact_name in ARTIFACT_NAMES:
+        artifact = context.paths.staging / artifact_name
+        try:
+            size = artifact.stat().st_size
+        except OSError as error:
+            raise CheckpointError(f"manifest: cannot inspect {artifact}: {error}") from error
+        artifacts[artifact_name] = {
+            "sha256": _sha256_file(artifact),
+            "size": size,
+        }
+    created_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    return {
+        "artifacts": artifacts,
+        "checkpoint_format": CHECKPOINT_FORMAT,
+        "checkpoint_name": context.name,
+        "checkout_revision": context.revision,
+        "created_at": created_at.replace("+00:00", "Z"),
+        "stack_fingerprint": context.fingerprint,
+    }
+
+
+def _require_absent_final(context: CheckpointContext) -> None:
+    try:
+        context.paths.final.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise CheckpointError(
+            f"save: cannot inspect final checkpoint {context.paths.final}: {error}"
+        ) from error
+    raise CheckpointError(f"save: final checkpoint already exists at {context.paths.final}")
+
+
+def _restore_marker_for_cleanup(context: CheckpointContext) -> None:
+    marker = context.paths.staging / _STAGING_MARKER
+    if not context.paths.staging.exists() or marker.exists():
+        return
+    _write_private_bytes(marker, _staging_marker(context.paths, context.name))
+
+
+def _cleanup_save_staging(context: CheckpointContext) -> None:
+    _restore_marker_for_cleanup(context)
+    cleanup_staging(context.paths, context.name)
+
+
+def _publish_staging(
+    context: CheckpointContext,
+    signal_state: SignalState,
+) -> None:
+    _require_absent_final(context)
+    _check_signal(signal_state)
+    try:
+        os.rename(context.paths.staging, context.paths.final)
+    except OSError as error:
+        raise CheckpointError(
+            f"save: cannot publish {context.paths.final} without overwrite: {error}"
+        ) from error
+
+
+def _save_failure(
+    context: CheckpointContext,
+    signal_state: SignalState,
+    error: Exception,
+    *,
+    phase: str,
+    published: bool,
+) -> CheckpointError:
+    cleanup_error: CheckpointError | None = None
+    if not published:
+        try:
+            _cleanup_save_staging(context)
+        except CheckpointError as failure:
+            cleanup_error = failure
+    restart_error: CheckpointError | None = None
+    try:
+        _restart_fixture(context, signal_state)
+    except CheckpointError as failure:
+        restart_error = failure
+
+    state = (
+        f"checkpoint published at {context.paths.final} but fixture restart failed"
+        if published
+        else "checkpoint not published"
+    )
+    details = [f"{state} during {phase}: {error}"]
+    if cleanup_error is not None:
+        details.append(f"staging cleanup failed: {cleanup_error}")
+    if restart_error is not None:
+        details.append(
+            "fixture restart failed; keep runners stopped, restore expected local images "
+            "if needed, then run scripts/lifecycle up: "
+            f"{restart_error}"
+        )
+    else:
+        details.append("fixture restart and health check succeeded")
+    return CheckpointError("; ".join(details))
+
+
+def save_checkpoint(context: CheckpointContext, signal_state: SignalState) -> None:
+    if context.operation != "save":
+        raise CheckpointError("save: checkpoint context operation is not save")
+    _require_absent_final(context)
+    _check_signal(signal_state)
+    cleanup_staging(context.paths, context.name)
+    _check_signal(signal_state)
+    health_check(context, signal_state)
+    print("Keep runners stopped until checkpoint save and fixture health complete.")
+
+    shutdown_started = False
+    published = False
+    phase = "stack shutdown"
+    try:
+        shutdown_started = True
+        _run_normal(
+            (*context.compose, "down", "--remove-orphans"),
+            signal_state=signal_state,
+        )
+        phase = "staging creation"
+        create_staging(context.paths, context.name)
+        for compose_name, artifact_name in _VOLUME_ARTIFACTS:
+            phase = f"{compose_name} archive"
+            _archive_volume(
+                context,
+                signal_state,
+                compose_name,
+                context.paths.staging / artifact_name,
+            )
+        phase = "runner archive"
+        runner_archive = context.paths.staging / "runner-state.tar"
+        create_runner_archive(context.paths.runner_state, runner_archive)
+        _check_signal(signal_state)
+        for _compose_name, artifact_name in _VOLUME_ARTIFACTS:
+            phase = f"{artifact_name} validation"
+            _validate_volume_archive(context.paths.staging / artifact_name, signal_state)
+        phase = "runner archive validation"
+        validate_runner_archive(runner_archive)
+        _check_signal(signal_state)
+        phase = "manifest creation"
+        manifest = canonical_json(_manifest_for(context))
+        _check_signal(signal_state)
+        _write_private_bytes(
+            context.paths.staging / "manifest.json",
+            manifest,
+        )
+        _check_signal(signal_state)
+        try:
+            (context.paths.staging / _STAGING_MARKER).unlink()
+        except OSError as error:
+            raise CheckpointError(f"save: cannot remove staging marker: {error}") from error
+        _check_signal(signal_state)
+        phase = "staged bundle validation"
+        _validate_bundle_at(
+            context.paths.staging,
+            name=context.name,
+            directory_name=context.name,
+            revision=context.revision,
+            fingerprint=context.fingerprint,
+        )
+        _check_signal(signal_state)
+        phase = "checkpoint publication"
+        _publish_staging(context, signal_state)
+        published = True
+        phase = "fixture startup"
+        _run_normal(_start_argv(context), signal_state=signal_state)
+        phase = "fixture health"
+        health_check(context, signal_state)
+    except _HandledSignal as error:
+        if shutdown_started:
+            failure = _save_failure(
+                context,
+                signal_state,
+                error,
+                published=published,
+                phase=phase,
+            )
+            print(failure, file=sys.stderr)
+        raise
+    except CheckpointError as error:
+        if not shutdown_started:
+            raise
+        raise _save_failure(
+            context,
+            signal_state,
+            error,
+            published=published,
+            phase=phase,
+        ) from error
+    print(f"Saved checkpoint {context.name} at {context.paths.final}.")
+
+
+def _create_volume_argv(
+    context: CheckpointContext,
+    compose_name: str,
+) -> tuple[str, ...]:
+    volume = _volume_name(context, compose_name)
+    return (
+        "docker",
+        "volume",
+        "create",
+        "--label",
+        f"com.docker.compose.project={context.project}",
+        "--label",
+        f"com.docker.compose.volume={compose_name}",
+        volume,
+    )
+
+
+def _validated_runner_entries(path: Path) -> tuple[tuple[Path, os.stat_result], ...]:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return ()
+    except OSError as error:
+        raise CheckpointError(f"runner: cannot inspect {path}: {error}") from error
+    return _validate_runner_tree(path)
+
+
+def _replace_runner_target(
+    context: CheckpointContext,
+    signal_state: SignalState,
+    entries: tuple[tuple[Path, os.stat_result], ...],
+) -> None:
+    for path, metadata in reversed(entries):
+        try:
+            if stat.S_ISDIR(metadata.st_mode):
+                path.rmdir()
+            else:
+                path.unlink()
+        except OSError as error:
+            raise CheckpointError(f"runner cleanup: cannot remove {path}: {error}") from error
+        _check_signal(signal_state)
+    try:
+        context.paths.runner_state.mkdir(mode=0o700)
+        context.paths.runner_state.chmod(0o700)
+    except OSError as error:
+        raise CheckpointError(
+            f"runner cleanup: cannot create {context.paths.runner_state}: {error}"
+        ) from error
+    _check_signal(signal_state)
+
+
+def _remove_and_create_volumes(
+    context: CheckpointContext,
+    signal_state: SignalState,
+) -> None:
+    for compose_name, _artifact_name in _VOLUME_ARTIFACTS:
+        volume = _volume_name(context, compose_name)
+        _run_normal(
+            ("docker", "volume", "rm", "--force", volume),
+            signal_state=signal_state,
+        )
+        _run_normal(
+            _create_volume_argv(context, compose_name),
+            signal_state=signal_state,
+        )
+
+
+def _extract_volume_archive(
+    context: CheckpointContext,
+    signal_state: SignalState,
+    compose_name: str,
+    source: Path,
+) -> None:
+    try:
+        with source.open("rb") as archive:
+            _run_normal(
+                _extract_argv(_volume_name(context, compose_name)),
+                signal_state=signal_state,
+                stdin=archive,
+            )
+    except OSError as error:
+        raise CheckpointError(f"volume extraction: cannot read {source}: {error}") from error
+
+
+def _restore_retry_message(
+    context: CheckpointContext,
+    phase: str,
+    error: Exception,
+) -> str:
+    retry = render_retry_command(
+        context.name,
+        context.paths.store,
+        context.paths.runner_state,
+    )
+    return (
+        f"restore {phase} failed after destructive replacement: {error}. "
+        f"Checkpoint remains unchanged at {context.paths.final}. "
+        f"Keep runners stopped and retry: {retry}"
+    )
+
+
+def _recover_unchanged_fixture(
+    context: CheckpointContext,
+    signal_state: SignalState,
+    phase: str,
+    error: Exception,
+) -> CheckpointError:
+    try:
+        _restart_fixture(context, signal_state)
+    except CheckpointError as restart_error:
+        return CheckpointError(
+            f"restore {phase} stopped before deletion: {error}; fixture restart failed; "
+            "keep runners stopped and run scripts/lifecycle up after restoring expected "
+            f"local images if needed: {restart_error}"
+        )
+    return CheckpointError(
+        f"restore {phase} stopped before deletion: {error}; unchanged fixture restart "
+        "and health check succeeded"
+    )
+
+
+def _best_effort_signal_shutdown(
+    context: CheckpointContext,
+    signal_state: SignalState,
+) -> None:
+    try:
+        run_child(
+            (*context.compose, "down", "--remove-orphans"),
+            signal_state=signal_state,
+        )
+    except (CheckpointError, _HandledSignal):
+        pass
+
+
+def restore_checkpoint(context: CheckpointContext, signal_state: SignalState) -> None:
+    if context.operation != "restore":
+        raise CheckpointError("restore: checkpoint context operation is not restore")
+    validate_bundle(
+        context.paths.final,
+        name=context.name,
+        revision=context.revision,
+        fingerprint=context.fingerprint,
+    )
+    for _compose_name, artifact_name in _VOLUME_ARTIFACTS:
+        _validate_volume_archive(context.paths.final / artifact_name, signal_state)
+    validate_runner_archive(context.paths.final / "runner-state.tar")
+    _check_signal(signal_state)
+    runner_entries = _validated_runner_entries(context.paths.runner_state)
+    _run_normal(
+        (*context.compose, "config", "--quiet"),
+        signal_state=signal_state,
+    )
+    print("Keep runners stopped until checkpoint restore and fixture health complete.")
+
+    shutdown_started = False
+    destructive = False
+    startup_attempted = False
+    phase = "stack shutdown"
+    try:
+        shutdown_started = True
+        _run_normal(
+            (*context.compose, "down", "--remove-orphans"),
+            signal_state=signal_state,
+        )
+        _check_signal(signal_state)
+        phase = "target deletion and recreation"
+        destructive = True
+        _remove_and_create_volumes(context, signal_state)
+        _replace_runner_target(context, signal_state, runner_entries)
+        for compose_name, artifact_name in _VOLUME_ARTIFACTS:
+            phase = f"{compose_name} volume extraction"
+            _extract_volume_archive(
+                context,
+                signal_state,
+                compose_name,
+                context.paths.final / artifact_name,
+            )
+        phase = "runner extraction"
+        extract_runner_archive(
+            context.paths.final / "runner-state.tar",
+            context.paths.runner_state,
+        )
+        _check_signal(signal_state)
+        phase = "fixture startup"
+        startup_attempted = True
+        _run_normal(_start_argv(context), signal_state=signal_state)
+        phase = "fixture health"
+        health_check(context, signal_state)
+    except _HandledSignal as error:
+        if destructive:
+            if startup_attempted:
+                _best_effort_signal_shutdown(context, signal_state)
+            print(_restore_retry_message(context, phase, error), file=sys.stderr)
+        elif shutdown_started:
+            print(
+                _recover_unchanged_fixture(context, signal_state, phase, error),
+                file=sys.stderr,
+            )
+        raise
+    except CheckpointError as error:
+        if destructive:
+            message = _restore_retry_message(context, phase, error)
+            print(message, file=sys.stderr)
+            raise _ReportedCheckpointError(message) from error
+        if shutdown_started:
+            raise _recover_unchanged_fixture(
+                context,
+                signal_state,
+                phase,
+                error,
+            ) from error
+        raise
+    print(f"Restored checkpoint {context.name} at revision {context.revision}.")
+
+
+def _validate_prelock_path_text(label: str, value: str) -> str:
+    if not value or _ASCII_CONTROLS_RE.search(value):
+        raise CheckpointError(f"{label}: directory argument is empty or contains control bytes")
+    return value
+
+
+def _checkout_root() -> Path:
+    configured = os.environ.get("BZ_LIVE_ROOT")
+    candidate = Path(configured).expanduser() if configured else Path(__file__).parents[2]
+    try:
+        return candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise CheckpointError(f"root: cannot resolve checkout root {candidate}: {error}") from error
+
+
+def _wait_timeout() -> int:
+    raw = os.environ.get("BZ_WAIT_TIMEOUT", "300")
+    if re.fullmatch(r"[0-9]+", raw) is None or int(raw) < 1:
+        raise CheckpointError("timeout: BZ_WAIT_TIMEOUT must be a positive decimal integer")
+    return int(raw)
+
+
+def _parse_prelock_context(argv: Sequence[str] | None) -> PreLockContext:
+    parser = argparse.ArgumentParser(
+        prog="scripts/checkpoint",
+        description=(
+            "Save or restore a cold fixture checkpoint. Keep all runners stopped until "
+            "the command completes and fixture health passes."
+        ),
+    )
+    parser.add_argument("operation", choices=("save", "restore"))
+    parser.add_argument("name")
+    parser.add_argument("--store", required=True)
+    parser.add_argument("--runner-state", required=True)
+    arguments = parser.parse_args(argv)
+
+    operation: Literal["save", "restore"] = arguments.operation
+    name = validate_name(arguments.name)
+    store_arg = _validate_prelock_path_text("store", arguments.store)
+    runner_arg = _validate_prelock_path_text("runner state", arguments.runner_state)
+    root = _checkout_root()
+    project_hash = hashlib.sha256(os.fsencode(str(root))).hexdigest()[:12]
+    project = f"bzr-live-{project_hash}"
+    compose = (
+        "docker",
+        "compose",
+        "--project-name",
+        project,
+        "--project-directory",
+        str(root),
+        "--file",
+        str(root / "compose.yaml"),
+    )
+    return PreLockContext(
+        operation=operation,
+        root=root,
+        project=project,
+        lock_dir=Path("/tmp") / f"{project}.lifecycle.lock",
+        name=name,
+        store_arg=store_arg,
+        runner_arg=runner_arg,
+        wait_timeout=_wait_timeout(),
+        compose=compose,
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    signal_state = SignalState()
+    previous_handlers: dict[int, object] = {}
+
+    def handle(requested_signal: int, frame: object) -> None:
+        _handle_signal(requested_signal, frame, signal_state)
+
+    for handled in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[handled] = signal.signal(handled, handle)
+    try:
+        try:
+            prelock = _parse_prelock_context(argv)
+        except SystemExit as error:
+            return int(error.code)
+        _check_signal(signal_state)
+        with lifecycle_lock(prelock.lock_dir, prelock.operation):
+            _check_signal(signal_state)
+            context = build_checkpoint_context(prelock)
+            _check_signal(signal_state)
+            if context.operation == "save":
+                save_checkpoint(context, signal_state)
+            else:
+                restore_checkpoint(context, signal_state)
+        return 0
+    except _HandledSignal as error:
+        print(
+            f"checkpoint interrupted by signal {error.requested_signal}",
+            file=sys.stderr,
+        )
+        return 128 + error.requested_signal
+    except _ReportedCheckpointError:
+        return 1
+    except CheckpointError as error:
+        print(error, file=sys.stderr)
+        return 1
+    finally:
+        for handled, previous in previous_handlers.items():
+            signal.signal(handled, previous)
