@@ -50,8 +50,9 @@ Save requires the caller to keep runner activity stopped from before invocation 
 successful stack health check. It acquires the existing lifecycle lock before reading the current
 revision, stack fingerprint, `.env`, or fixture state; validates the destination and existing
 fixture health; cleanly stops the complete Compose stack; archives both cold Docker volumes and
-the opaque runner-state directory; and validates the runner archive's members with the same rules
-restore uses. It writes and verifies the manifest in an owner-only sibling staging directory, then
+the opaque runner-state directory; verifies that every tar stream parses; and validates runner
+members with the same rules restore uses. It writes and verifies the manifest in an owner-only
+sibling staging directory, then
 renames staging to the absent final name. That rename commits the checkpoint; existing names are
 never overwritten.
 
@@ -65,9 +66,10 @@ removed by a later save.
 
 Restore acquires the lifecycle lock before reading the current revision, stack fingerprint,
 `.env`, runner path, or fixture state. While retaining the lock, it validates the complete
-manifest, revision/fingerprint, artifact sizes, checksums, runner archive members, and paths before
-destructive work. It then stops the stack, deletes and recreates the canonical Docker volumes and
-runner-state directory, extracts all three archives, starts the current local stack without
+manifest, revision/fingerprint, artifact sizes, checksums, all three tar streams, runner archive
+members, and paths before destructive work. It then stops the stack, deletes and recreates the
+canonical Docker volumes and runner-state directory, extracts all three archives, starts the
+current local stack without
 building or pulling images, and runs the existing health check. Each retry starts by recreating
 the targets, so an interrupted or failed restore is recoverable by rerunning the same command. If
 abrupt termination leaves the existing lifecycle lock stale, the operator must first verify that
@@ -78,9 +80,11 @@ checks. The active fixture may be unusable between a failed restore and a succes
 source checkpoint remains unchanged.
 
 Docker-volume archive and extraction run in a network-disabled ephemeral container based on the
-existing pinned MariaDB image. Only the source or destination volume is writable as required;
-archive bytes stream through standard input or output. Runner-state extraction is host-side and
-rejects absolute paths, parent traversal, links, devices, and other special files.
+existing pinned MariaDB image. Before publication or destructive restore, the same helper parses
+each complete volume archive with tar's list operation and must reach end-of-archive successfully.
+Only the source or destination volume is writable as required; archive bytes stream through
+standard input or output. Runner-state extraction is host-side and rejects absolute paths, parent
+traversal, links, devices, and other special files.
 
 Bundle and runner paths must be owned by the invoking user, owner-only, canonical, and
 non-overlapping. The canonical runner-state path is fingerprinted at save and must match at
@@ -88,11 +92,12 @@ restore. It may not be the filesystem root, invoking user's home, checkout root,
 ancestor of any of them. On restore the leaf may be absent after a prior failed attempt; only the
 fingerprinted path remains authoritative, and its existing canonical parent must be a non-symlink
 directory owned by the invoking user and owner-only before the exact leaf is recreated mode 0700.
-An existing leaf and every descendant must be non-symlink and owned by the invoking user before
-replacement. Cleanup temporarily adds owner rwx permission to owner-owned directories as needed
-for bottom-up deletion. Extraction creates directories mode 0700 until all children are written,
-then applies archived owner permission bits from the leaves upward. Restrictive archived directory
-modes therefore cannot prevent cleanup on a later retry.
+An existing leaf and every descendant must be non-symlink and owned by the invoking user. Every
+directory must already have owner read, write, and execute permissions; restrictive directory
+modes are rejected before save publication and before destructive restore. Validation also rejects
+mount points and descendants on another filesystem. Extraction creates every directory mode 0700
+and preserves owner permission bits only for regular files, so a partial restore always remains
+traversable and removable on retry.
 The design trusts the invoking account, reviewed checkout, Docker daemon, existing stack images,
 and locally produced bundle. It does not add HMAC keys, encryption, multi-user isolation, or a
 hostile-bundle promise.
@@ -118,9 +123,10 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
   only after destructive replacement; recovery is to restore compatible local images and rerun
   restore from the unchanged checkpoint.
 - Restore may recursively replace only the fingerprinted canonical runner-state path after
-  rejecting broad roots, unsafe ownership, and links. Permission normalization makes restrictive
-  owner-owned directories removable on every retry.
-- Normal validation rejects corrupt or fingerprint-incompatible input before deleting active state.
+  rejecting broad roots, unsafe ownership, links, mounts, filesystem crossings, and restrictive
+  directory modes. Restored directories are always mode 0700, so partial output remains removable.
+- Normal validation parses all three tar streams and rejects corrupt or fingerprint-incompatible
+  input before deleting active state.
 - Disk exhaustion, process termination, image drift, or startup failure after deletion can leave
   the fixture unusable until restore is rerun.
 - Every save failure after shutdown begins attempts to restore fixture readiness. Failure of that
@@ -160,5 +166,9 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
   an unchanged-local-images precondition instead. Image fingerprints, tag repair, staged service
   creation, and post-create identity verification add recovery machinery disproportionate to a
   same-checkout temporal fixture that already accepts destructive retry.
+- **Preserve restrictive runner-directory modes.** judgment: modes without owner rwx make safe
+  preflight and repeat deletion require permission-mutation rollback machinery. Runner directories
+  are fixture plumbing, so save rejects restrictive modes and restore normalizes directories to
+  0700 while preserving regular-file owner bits.
 - **Do nothing.** verified: issue #5 states that developers need named complete checkpoints to
   preserve and restore coherent intermediate fixture state.
