@@ -33,20 +33,26 @@ fingerprint of the relevant stack and checkpoint inputs, and each artifact's byt
 SHA-256 checksum. Checksums detect accidental corruption; they do not authenticate provenance.
 Checkpoints are trusted local fixture artifacts and are not portable backups.
 
-Save acquires the existing lifecycle lock after the caller has stopped runner activity. It
-validates the destination, cleanly stops the complete Compose stack, archives both cold Docker
-volumes and the opaque runner-state directory, writes and verifies the manifest in an
-owner-only sibling staging directory, renames staging to the absent final name, then restarts
-and health-checks the original stack. Existing names are never overwritten. A partial staging
-directory is not a checkpoint and may be removed by a later save.
+Save requires the caller to keep runner activity stopped from before invocation until the command
+returns. It acquires the existing lifecycle lock, validates the destination, cleanly stops the
+complete Compose stack, archives both cold Docker volumes and the opaque runner-state directory,
+and validates the runner archive's members with the same rules restore uses. It writes and
+verifies the manifest in an owner-only sibling staging directory, then renames staging to the
+absent final name. That rename commits the checkpoint; existing names are never overwritten. Save
+then restarts and health-checks the original stack. A readiness failure after commit returns
+nonzero, states that the checkpoint exists, and directs the operator to `scripts/lifecycle up`;
+it never removes the committed checkpoint. A partial staging directory is not a checkpoint and
+may be removed by a later save.
 
-Restore validates the complete manifest, revision/fingerprint, artifact sizes, checksums, and
-paths before destructive work. It then acquires the lifecycle lock, stops the stack, deletes
-and recreates the canonical Docker volumes and runner-state directory, extracts all three
-archives, starts the stack, and runs the existing health check. Each retry starts by recreating
-the targets, so an interrupted or failed restore is recoverable by rerunning the same command.
-The active fixture may be unusable between a failed restore and a successful retry; the source
-checkpoint remains unchanged.
+Restore validates the complete manifest, revision/fingerprint, artifact sizes, checksums, runner
+archive members, and paths before destructive work. It then acquires the lifecycle lock, stops the
+stack, deletes and recreates the canonical Docker volumes and runner-state directory, extracts all
+three archives, starts the stack, and runs the existing health check. Each retry starts by
+recreating the targets, so an interrupted or failed restore is recoverable by rerunning the same
+command. If abrupt termination leaves the existing lifecycle lock stale, the operator must first
+verify that no holder remains and remove it using the lifecycle command's existing manual
+procedure. The active fixture may be unusable between a failed restore and a successful retry; the
+source checkpoint remains unchanged.
 
 Docker-volume archive and extraction run in a network-disabled ephemeral container based on an
 existing pinned stack image. Only the source or destination volume is writable as required;
@@ -65,12 +71,18 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
 ## Consequences
 
 - Saving causes fixture downtime while every state domain is cold.
+- The caller owns continuous runner quiescence for the full save or restore command; checkpoint
+  does not coordinate runner processes.
 - Restoring is simple, deterministic, destructive, and retryable from the immutable bundle.
 - Raw volume archives are coupled to the recorded checkout, container images, and storage
   formats; no migration or cross-version restore is promised.
 - Normal validation rejects corrupt or incompatible input before deleting active state.
 - Disk exhaustion, process termination, or startup failure after deletion can leave the fixture
   unusable until restore is rerun.
+- Rename is save's commit point. A later restart or health failure returns nonzero but leaves the
+  immutable checkpoint valid; the operator restarts the unchanged stack separately.
+- Abrupt termination may leave the existing lifecycle lock stale. Retry then requires its existing
+  verified manual-clear procedure before rerunning restore.
 - Owner-only permissions and safe host extraction protect local secrets without claiming backup
   authenticity or encryption.
 - The implementation and test matrix lose the production transaction, crash-recovery, capacity,
