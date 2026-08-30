@@ -33,16 +33,16 @@ fingerprint of the relevant stack and checkpoint inputs, and each artifact's byt
 SHA-256 checksum. Checksums detect accidental corruption; they do not authenticate provenance.
 Checkpoints are trusted local fixture artifacts and are not portable backups.
 
-Save requires the caller to keep runner activity stopped from before invocation until the command
-returns. It acquires the existing lifecycle lock, validates the destination, cleanly stops the
-complete Compose stack, archives both cold Docker volumes and the opaque runner-state directory,
-and validates the runner archive's members with the same rules restore uses. It writes and
-verifies the manifest in an owner-only sibling staging directory, then renames staging to the
-absent final name. That rename commits the checkpoint; existing names are never overwritten. Save
-then restarts and health-checks the original stack. A readiness failure after commit returns
-nonzero, states that the checkpoint exists, and directs the operator to `scripts/lifecycle up`;
-it never removes the committed checkpoint. A partial staging directory is not a checkpoint and
-may be removed by a later save.
+Save requires the caller to keep runner activity stopped from before invocation through a
+successful stack health check. It acquires the existing lifecycle lock, validates the destination,
+cleanly stops the complete Compose stack, archives both cold Docker volumes and the opaque
+runner-state directory, and validates the runner archive's members with the same rules restore
+uses. It writes and verifies the manifest in an owner-only sibling staging directory, then renames
+staging to the absent final name. That rename commits the checkpoint; existing names are never
+overwritten. Save then restarts and health-checks the original stack. A readiness failure after
+commit returns nonzero, states that the checkpoint exists, directs the operator to keep runners
+stopped until `scripts/lifecycle up` succeeds, and never removes the committed checkpoint. A
+partial staging directory is not a checkpoint and may be removed by a later save.
 
 Restore validates the complete manifest, revision/fingerprint, artifact sizes, checksums, runner
 archive members, and paths before destructive work. It then acquires the lifecycle lock, stops the
@@ -51,8 +51,9 @@ three archives, starts the stack, and runs the existing health check. Each retry
 recreating the targets, so an interrupted or failed restore is recoverable by rerunning the same
 command. If abrupt termination leaves the existing lifecycle lock stale, the operator must first
 verify that no holder remains and remove it using the lifecycle command's existing manual
-procedure. The active fixture may be unusable between a failed restore and a successful retry; the
-source checkpoint remains unchanged.
+procedure. Every nonzero exit after the stack stops directs the operator to keep runners stopped
+until a retry completes and the restored stack passes health checks. The active fixture may be
+unusable between a failed restore and a successful retry; the source checkpoint remains unchanged.
 
 Docker-volume archive and extraction run in a network-disabled ephemeral container based on an
 existing pinned stack image. Only the source or destination volume is writable as required;
@@ -71,8 +72,9 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
 ## Consequences
 
 - Saving causes fixture downtime while every state domain is cold.
-- The caller owns continuous runner quiescence for the full save or restore command; checkpoint
-  does not coordinate runner processes.
+- The caller owns continuous runner quiescence through successful stack health, including manual
+  restart or restore-retry intervals after a nonzero exit. Checkpoint does not coordinate runner
+  processes; violating that precondition can produce incoherent state or lose intervening writes.
 - Restoring is simple, deterministic, destructive, and retryable from the immutable bundle.
 - Raw volume archives are coupled to the recorded checkout, container images, and storage
   formats; no migration or cross-version restore is promised.
@@ -101,5 +103,9 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
   lifecycle or recovery coupling.
 - **Copy live volumes without stopping writers.** judgment: the fixture may stop completely, so
   online cross-domain snapshot coordination adds risk without user value.
+- **Coordinate runner processes or acquire their advisory locks.** judgment: the operator
+  explicitly assigned continuous runner quiescence to the caller and excluded automatic runner
+  coordination. Checkpoint treats runner state as opaque and does not own its writers; starting a
+  writer before checkpoint recovery finishes violates the command precondition.
 - **Do nothing.** verified: issue #5 states that developers need named complete checkpoints to
   preserve and restore coherent intermediate fixture state.
