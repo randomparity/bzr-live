@@ -20,6 +20,14 @@ only needs to work with the same checkout and stack revision.
 ## Decision
 
 Use cold, immutable, same-revision checkpoint bundles.
+The operator interface is:
+
+- `scripts/checkpoint save NAME --store DIRECTORY --runner-state DIRECTORY`;
+- `scripts/checkpoint restore NAME --store DIRECTORY --runner-state DIRECTORY`.
+
+`NAME` matches `[a-z0-9][a-z0-9_-]{0,63}`. `pristine` is the conventional reserved name;
+invoking `save pristine` is the explicit act that creates the post-install baseline.
+
 
 A bundle is an owner-only directory containing:
 
@@ -39,10 +47,12 @@ cleanly stops the complete Compose stack, archives both cold Docker volumes and 
 runner-state directory, and validates the runner archive's members with the same rules restore
 uses. It writes and verifies the manifest in an owner-only sibling staging directory, then renames
 staging to the absent final name. That rename commits the checkpoint; existing names are never
-overwritten. Save then restarts and health-checks the original stack. A readiness failure after
-commit returns nonzero, states that the checkpoint exists, directs the operator to keep runners
-stopped until `scripts/lifecycle up` succeeds, and never removes the committed checkpoint. A
-partial staging directory is not a checkpoint and may be removed by a later save.
+overwritten. Once stack shutdown begins, every save exit attempts to restart and health-check the
+unchanged stack. A capture failure before commit removes staging where practical and reports that
+no checkpoint was published. A readiness failure after either a pre-commit error or commit returns
+nonzero and directs the operator to keep runners stopped until `scripts/lifecycle up` succeeds. A
+post-commit failure states that the checkpoint exists and never removes it. A partial staging
+directory is not a checkpoint and may be removed by a later save.
 
 Restore validates the complete manifest, revision/fingerprint, artifact sizes, checksums, runner
 archive members, and paths before destructive work. It then acquires the lifecycle lock, stops the
@@ -81,6 +91,8 @@ owners, candidate generations, rollback state, capacity reserves, or a recovery 
 - Normal validation rejects corrupt or incompatible input before deleting active state.
 - Disk exhaustion, process termination, or startup failure after deletion can leave the fixture
   unusable until restore is rerun.
+- Every save failure after shutdown begins attempts to restore fixture readiness. Failure of that
+  attempt keeps the runner-quiescence precondition active until manual lifecycle restart succeeds.
 - Rename is save's commit point. A later restart or health failure returns nonzero but leaves the
   immutable checkpoint valid; the operator restarts the unchanged stack separately.
 - Abrupt termination may leave the existing lifecycle lock stale. Retry then requires its existing
