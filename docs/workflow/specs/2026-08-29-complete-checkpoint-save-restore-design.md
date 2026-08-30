@@ -59,13 +59,17 @@ contract.
    are owned by the invoking user, canonical, and non-overlapping. Runner state may not be the
    filesystem root, invoking user's home, checkout root, store root, or an ancestor of any of them.
    Restore accepts an absent runner leaf only at the fingerprinted path and only when its existing
-   canonical parent is a non-symlink owner-only directory owned by the invoking user.
+   canonical parent is a non-symlink owner-only directory owned by the invoking user. Every
+   existing descendant must be owned by the invoking user; directories must have owner rwx and may
+   not be links, mount points, or on another filesystem.
 8. The manifest and every artifact are fully validated before restore deletes volumes or runner
    state. Validation covers schema, exact artifact names, byte sizes, SHA-256 checksums, revision,
-   and the fingerprint that binds `.env`, canonical runner target, and stack inputs.
+   the fingerprint that binds `.env`, canonical runner target, and stack inputs, and successful
+   end-to-end parsing of all three tar streams.
 9. Runner-state archive members use normalized relative POSIX paths. Restore rejects absolute
    paths, empty or parent components, backslashes, duplicate members, links, devices, FIFOs,
-   sockets, sparse files, and unknown types before deleting active state.
+   sockets, sparse files, unknown types, and directory modes missing owner rwx before deleting
+   active state.
 10. Docker-volume archive and extraction run in an ephemeral, network-disabled helper container
     based on the existing pinned MariaDB image. Save mounts only the source volume read-only and
     streams tar to stdout. Restore mounts only the fresh destination volume read-write and streams
@@ -119,9 +123,10 @@ without requiring a clean checkout. A mismatch is incompatible; there is no migr
 
 Tar archives are uncompressed. This avoids decompression-bomb behavior and keeps failure/retry
 semantics observable. Docker-volume archives preserve the cold volume's numeric ownership, mode,
-regular files, directories, and links as required by the exact pinned stack. They are consumed only
-inside the isolated helper container. Runner archives preserve directories, regular files, and
-owner permission bits only; links and special files are unsupported.
+regular files, directories, and links as required by the exact pinned stack. They are consumed and
+preflight-parsed only inside the isolated helper container. Runner archives preserve regular-file
+owner permission bits; restored directories are always mode 0700. Links and special files are
+unsupported.
 
 ## Architecture
 
@@ -150,8 +155,8 @@ compatibility obligation because they have never merged or shipped.
 ## Save data flow
 
 1. Parse and validate root, name, store, and canonical runner-state path; ownership; modes;
-   non-overlap; dangerous-root exclusions; and required tools. Require the final checkpoint name
-   to be absent.
+   non-overlap; dangerous-root exclusions; mount/filesystem boundaries; and required tools. Require
+   the final checkpoint name to be absent.
 2. Acquire the existing lifecycle lock. Under the lock, read and validate the owner-only `.env`
    and checkout revision; revalidate the absent final name; remove only the deterministic
    owner-only `.<NAME>.staging` directory from an interrupted prior save; and require the existing
@@ -162,7 +167,9 @@ compatibility obligation because they have never merged or shipped.
 4. Cleanly stop the complete Compose stack without deleting volumes.
 5. Create `.<NAME>.staging` mode 0700. Stream the canonical MariaDB volume and Bugzilla data volume
    to their mode-0600 uncompressed tar files through the isolated helper based on the pinned
-   MariaDB image. Create the runner-state tar with host-side safe traversal.
+   MariaDB image. Create the runner-state tar with host-side safe traversal. Reject runner
+   directories missing owner rwx, links, mount points, filesystem crossings, and foreign-owned
+   descendants. Parse all three complete tar streams before continuing.
 6. Compute sizes/checksums, write mode-0600 canonical `manifest.json`, then re-read and validate the
    complete staging bundle through the same validator restore uses.
 7. Rename the absent staging directory to `NAME`. No overwrite is permitted. This publication
@@ -182,23 +189,25 @@ command or durable recovery record is added.
 ## Restore data flow
 
 1. Parse and validate root, name, store, and canonical runner-state path; ownership; modes;
-   non-overlap; dangerous-root exclusions; and required tools. An existing runner leaf must be an
-   owner-only non-symlink directory owned by the invoking user. An absent leaf is valid only when
-   its fingerprinted canonical path matches and its existing parent satisfies those same checks.
+   non-overlap; dangerous-root exclusions; mount/filesystem boundaries; and required tools. An
+   existing runner leaf and every descendant must be non-symlink, owned by the invoking user, on
+   the runner filesystem, outside mount points, and owner-rwx when a directory. An absent leaf is
+   valid only when its fingerprinted canonical path matches and its existing parent satisfies
+   those checks.
 2. Acquire the lifecycle lock and report the caller's continuous runner-stopped responsibility
    through successful restored-stack health, including any post-return retry interval.
 3. While retaining the lock, read and validate the owner-only `.env`, checkout revision, canonical
    runner-state path, and stack fingerprint, then validate the final bundle's exact files,
-   manifest schema, regular-file sizes, checksums, and all runner archive headers. Finish every
+   manifest schema, regular-file sizes, checksums, and all three complete tar streams. Apply the
+   runner member, ownership, directory-mode, mount, and filesystem-boundary checks. Finish every
    check before destructive work.
 4. Stop the complete Compose stack without relying on its current health.
-5. Remove and recreate the fixed canonical MariaDB and Bugzilla Docker volumes. For runner state,
-   reject links or foreign-owned descendants, temporarily add owner rwx permission to owner-owned
-   directories as needed for bottom-up deletion, then create the exact fingerprinted leaf mode
-   0700 beneath its already validated parent.
+5. Remove and recreate the fixed canonical MariaDB and Bugzilla Docker volumes. Delete the already
+   validated runner tree bottom-up without changing permissions, then create the exact
+   fingerprinted leaf mode 0700 beneath its validated parent.
 6. Stream each volume archive into its fresh destination through the isolated helper based on the
-   pinned MariaDB image. Extract runner state without following links: create directories mode
-   0700, write children, then apply archived owner permission bits from leaves upward.
+   pinned MariaDB image. Extract runner state without following links: create every directory mode
+   0700 and preserve archived owner permission bits only for regular files.
 7. Start the current local stack without building or pulling images and run the existing bounded
    health check. Release the lock and report the restored checkpoint name and revision.
 
@@ -243,9 +252,11 @@ contract.
 
 - Closed checkpoint names and exact manifest schema prevent ambiguous destinations and artifacts.
 - Ownership, mode, canonical non-overlap, and no-overwrite checks govern host paths.
-- SHA-256 and exact size checks reject accidental artifact corruption before deletion.
-- Runner tar validation rejects traversal, links, sparse data, and special files before deletion;
-  extraction creates only beneath a new owner-only root.
+- SHA-256, exact size, and complete tar parsing reject accidental artifact corruption before
+  deletion.
+- Runner validation rejects traversal, links, sparse data, special files, unsafe ownership,
+  restrictive directory modes, mount points, and filesystem crossings before deletion; extraction
+  creates only mode-0700 directories beneath a new owner-only root.
 - The helper container has no network or Docker socket, sees only one source/destination volume, and
   receives archive data through standard I/O.
 - Fixed argv arrays prevent shell interpolation. Error output is bounded and excludes `.env` values.
@@ -266,16 +277,16 @@ Focused tests must prove:
 
 - closed name grammar and immutable no-overwrite behavior;
 - owner-only staging/final files, store/runner non-overlap, canonical runner-path fingerprinting,
-  rejection of filesystem/home/checkout/store roots and their ancestors, and safe absent-leaf
-  recreation from an owner-only non-symlink parent;
-- canonical manifest encoding, revision/fingerprint mismatch, exact file set, size mismatch, and
-  checksum corruption;
+  rejection of dangerous roots, and safe absent-leaf recreation;
+- canonical manifest encoding, revision/fingerprint mismatch, exact file set, size mismatch,
+  checksum corruption, and malformed or truncated Docker-volume tar streams;
 - a recreated `.env` at the same Git revision fails before any volume or runner deletion;
-- runner archive rejection for traversal, duplicates, links, sparse files, and special types;
-- restrictive owner-owned runner directories at modes 0500 and 000 are normalized for deletion,
-  extracted through temporary mode 0700, and receive archived owner bits only after children;
+- runner archive rejection for traversal, duplicates, links, sparse files, special types,
+  restrictive directory modes, mounted descendants, filesystem crossings, and foreign ownership;
+- restored runner directories remain mode 0700, including partial extraction output, so a repeated
+  restore can remove them without permission mutation;
 - save ordering: validate paths, lock, read compatibility inputs, health, fingerprint, stop,
-  archive three domains, validate, publish, start without build/pull, health;
+  archive three domains, parse and validate, publish, start without build/pull, health;
 - save phase errors preserve existing final names and distinguish restart failure after publication;
 - restore acquires the lifecycle lock before reading compatibility inputs and validates every
   bundle/header condition before volume or runner deletion;
