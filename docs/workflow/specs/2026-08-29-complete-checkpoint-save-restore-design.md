@@ -50,29 +50,35 @@ contract.
    it before deleting fixture state. No live or cross-domain snapshot promise exists.
 6. A checkpoint contains exactly `manifest.json`, `mariadb-volume.tar`,
    `bugzilla-volume.tar`, and `runner-state.tar`. It is accepted only by the same checkpoint
-   format, checkout revision, stack-input fingerprint, active `.env` credential generation, and
-   exact local Docker image IDs recorded from the healthy `db` and `bugzilla` services.
+   format, checkout revision, stack-input fingerprint, active `.env` credential generation,
+   canonical runner-state path, and exact local Docker image IDs recorded from the healthy `db`
+   and `bugzilla` services.
 7. Bundle staging and final directories are mode 0700; files are mode 0600. Store and runner roots
-   are owned by the invoking user and do not equal or contain one another.
+   are owned by the invoking user, canonical, and non-overlapping. Runner state may not be the
+   filesystem root, invoking user's home, checkout root, store root, or an ancestor of any of them.
 8. The manifest and every artifact are fully validated before restore deletes volumes or runner
    state. Validation covers schema, exact artifact names, byte sizes, SHA-256 checksums, revision,
-   the fingerprint that binds the active `.env`, and path relationships.
+   and the fingerprint that binds `.env`, canonical runner target, service image IDs, and stack
+   inputs.
 9. Runner-state archive members use normalized relative POSIX paths. Restore rejects absolute
    paths, empty or parent components, backslashes, duplicate members, links, devices, FIFOs,
    sockets, sparse files, and unknown types before deleting active state.
 10. Docker-volume archive and extraction run in an ephemeral, network-disabled helper container
-    based on an existing pinned stack image. Save mounts only the source volume read-only and
-    streams tar to stdout. Restore mounts only the fresh destination volume read-write and streams
-    tar through stdin. The helper receives no Docker socket, credentials, checkout, runner state,
-    or other host path.
+    using the validated `db` image ID. Save mounts only the source volume read-only and streams tar
+    to stdout. Restore mounts only the fresh destination volume read-write and streams tar through
+    stdin. The helper receives no Docker socket, credentials, checkout, runner state, or other host
+    path.
 11. Restore always removes and recreates the fixed canonical MariaDB and Bugzilla volumes and the
     runner-state directory before extraction. It never selects dynamic volume names or modifies
     volume pointers in `.env`.
-12. The staging-to-final rename commits save. Save then restarts and health-checks the unchanged
-    stack. A readiness failure after commit returns nonzero, states that the checkpoint exists,
-    and directs the operator to `scripts/lifecycle up`; it does not delete or overwrite the
-    checkpoint. Restore starts and health-checks the reconstructed stack. Restore health failure
-    returns nonzero with the exact retry command and does not roll back.
+12. The staging-to-final rename commits save. Save then creates services with builds and pulls
+    disabled, verifies each created container's image ID against the values fingerprinted before
+    shutdown, starts the unchanged stack, and health-checks it. An identity or readiness failure
+    after commit returns nonzero, states that the checkpoint exists, and directs the operator to
+    keep runners stopped until the recorded images are restored and `scripts/lifecycle up`
+    succeeds; it does not delete or overwrite the checkpoint. Restore applies the same no-build,
+    no-pull create/verify/start/health sequence. Restore failure returns nonzero with the exact
+    retry command and does not roll back.
 13. Named checkpoints round-trip representative database, Bugzilla mutable-data, and runner-state
     markers. Repeating restore from the same checkpoint succeeds.
 
@@ -103,14 +109,14 @@ extra files, or missing files.
 `checkout_revision` is `git rev-parse HEAD`. `stack_fingerprint` is SHA-256 over a versioned,
 length-delimited sequence of tagged input-name bytes and input-value bytes, sorted by input name.
 File inputs are the owner-only `.env`, `compose.yaml`, every regular file under `containers/`,
-`scripts/lifecycle`, `scripts/checkpoint`, and `src/bzr_live/checkpoint.py`. Runtime inputs are the
-exact local Docker image IDs used by the healthy `db` and `bugzilla` service containers at save
-time. The fingerprint format identifier is also an input. The manifest stores only the resulting
-fingerprint, never `.env` bytes, individual secret hashes, or image IDs. This catches relevant
-dirty working-tree changes, recreated credentials, rebuilt service images, and removed service
-images without requiring a clean checkout. A mismatch or unavailable recorded image is
-incompatible; restore never builds or pulls an image before this gate.
-
+`scripts/lifecycle`, `scripts/checkpoint`, and `src/bzr_live/checkpoint.py`. Other inputs are the
+canonical runner-state path and exact local Docker image IDs used by the healthy `db` and
+`bugzilla` service containers at save time. The fingerprint format identifier is also an input.
+The manifest stores only the resulting fingerprint, never `.env` bytes, individual secret hashes,
+runner paths, or image IDs. This catches relevant dirty working-tree changes, recreated
+credentials, a different runner target, rebuilt service images, and removed service images without
+requiring a clean checkout. A mismatch or unavailable recorded image is incompatible; restore
+never builds or pulls an image before this gate.
 Tar archives are uncompressed. This avoids decompression-bomb behavior and keeps failure/retry
 semantics observable. Docker-volume archives preserve the cold volume's numeric ownership, mode,
 regular files, directories, and links as required by the exact pinned stack. They are consumed only
@@ -126,6 +132,8 @@ owner permission bits only; links and special files are unsupported.
 - manifest encoding, fingerprinting, size checks, and checksums;
 - safe runner-state tar creation, validation, and extraction;
 - fixed Docker/Compose commands for cold stack stop/start/health;
+- no-build/no-pull Compose service creation and created-container image-ID verification before
+  service start;
 - isolated helper-container commands for volume archive and extraction;
 - deterministic staging cleanup and actionable phase errors.
 
@@ -143,57 +151,64 @@ compatibility obligation because they have never merged or shipped.
 
 ## Save data flow
 
-1. Parse and validate root, name, store, runner-state path, ownership, modes, non-overlap, and
-   required tools. Require the final checkpoint name to be absent.
+1. Parse and validate root, name, store, and canonical runner-state path; ownership; modes;
+   non-overlap; dangerous-root exclusions; and required tools. Require the final checkpoint name
+   to be absent.
 2. Acquire the existing lifecycle lock. Under the lock, read and validate the owner-only `.env`
    and checkout revision; revalidate the absent final name; remove only the deterministic
    owner-only `.<NAME>.staging` directory from an interrupted prior save; and require the existing
    fixture health check to pass.
 3. Resolve the exact image IDs used by the healthy `db` and `bugzilla` containers, then compute the
-   stack fingerprint. Report the caller's continuous runner-stopped responsibility through
-   successful health, including any post-return manual restart interval; checkpoint cannot verify
-   it.
+   stack fingerprint including the canonical runner-state path. Report the caller's continuous
+   runner-stopped responsibility through successful health, including any post-return manual
+   restart interval; checkpoint cannot verify it.
 4. Cleanly stop the complete Compose stack without deleting volumes.
 5. Create `.<NAME>.staging` mode 0700. Stream the canonical MariaDB volume and Bugzilla data volume
-   to their mode-0600 uncompressed tar files through the isolated helper container. Create the
-   runner-state tar with host-side safe traversal.
+   to their mode-0600 uncompressed tar files through the isolated helper using the recorded `db`
+   image ID. Create the runner-state tar with host-side safe traversal.
 6. Compute sizes/checksums, write mode-0600 canonical `manifest.json`, then re-read and validate the
    complete staging bundle through the same validator restore uses.
 7. Rename the absent staging directory to `NAME`. No overwrite is permitted. This publication
    prevents ordinary readers from observing a partial checkpoint but makes no crash-durability
    promise.
-8. Restart the unchanged Compose stack and run the existing health check. Release the lifecycle
-   lock. If startup fails after publication, report that the checkpoint exists and fixture startup
-   failed; do not delete the checkpoint.
+8. With builds and pulls disabled, create the Compose services, inspect each created container's
+   image ID, and refuse to start if either differs from the pre-shutdown value. Start the verified
+   services and run the existing health check, then release the lifecycle lock. If identity,
+   startup, or health fails after publication, report that the checkpoint exists and fixture
+   restart failed; do not delete the checkpoint.
 
-On an ordinary pre-publication error, remove staging where practical, restart the unchanged stack,
-and report both the capture phase and restart result. Process or host termination may leave staging
-and a stopped stack. The next save removes only its matching staging directory; the operator may
-also run the existing lifecycle `up` command. No recovery command is added.
+On an ordinary pre-publication error, remove staging where practical, run the same no-build,
+no-pull create/image-verify/start/health sequence, and report both the capture phase and restart
+result. Process or host termination may leave staging and a stopped stack. The next save removes
+only its matching staging directory; after restoring the recorded images, the operator may also
+run the existing lifecycle `up` command. No recovery command is added.
 
 ## Restore data flow
 
-1. Parse and validate root, name, store, runner-state path, ownership, modes, non-overlap, and
-   required tools.
+1. Parse and validate root, name, store, and canonical runner-state path; ownership; modes;
+   non-overlap; dangerous-root exclusions; and required tools.
 2. Acquire the lifecycle lock and report the caller's continuous runner-stopped responsibility
    through successful restored-stack health, including any post-return retry interval.
-3. While retaining the lock, read and validate the owner-only `.env`, checkout revision, required
-   local `db` and `bugzilla` image IDs, and stack fingerprint, then validate the final bundle's
-   exact files, manifest schema, regular-file sizes, checksums, and all runner archive headers.
-   Finish every check before destructive work. Restore does not build or pull images.
+3. While retaining the lock, read and validate the owner-only `.env`, checkout revision, canonical
+   runner-state path, and current Compose image references. Require those references to resolve to
+   the IDs represented by the bundle fingerprint, then validate the final bundle's exact files,
+   manifest schema, regular-file sizes, checksums, and all runner archive headers. Finish every
+   check before destructive work. Restore does not build or pull images.
 4. Stop the complete Compose stack without relying on its current health.
 5. Remove and recreate the fixed canonical MariaDB and Bugzilla Docker volumes. Remove and recreate
-   the runner-state directory mode 0700.
-6. Stream each volume archive into its fresh destination through the isolated helper container.
-   Extract runner state into its fresh directory without following links and apply owner permission
-   bits after writing contents.
-7. Start the complete Compose stack and run the existing bounded health check. Release the lock and
-   report the restored checkpoint name and revision.
+   the exact fingerprinted runner-state directory mode 0700.
+6. Stream each volume archive into its fresh destination through the isolated helper using the
+   validated `db` image ID. Extract runner state into its fresh directory without following links
+   and apply owner permission bits after writing contents.
+7. With builds and pulls disabled, create the Compose services. Inspect each created container's
+   image ID against the preflight values before starting either service. On a match, start the
+   services and run the existing bounded health check. Release the lock and report the restored
+   checkpoint name and revision.
 
-Any failure after step 5 returns nonzero and names the failed phase, unchanged checkpoint path, and
-exact restore command to retry. It makes no attempt to preserve or reconstruct the pre-restore
-fixture. A retry repeats validation and recreates every target before extraction, so partial output
-cannot accumulate across attempts.
+Any failure during or after step 5 returns nonzero and names the failed phase, unchanged checkpoint
+path, and exact restore command to retry. It makes no attempt to preserve or reconstruct the
+pre-restore fixture. A retry repeats validation and recreates every target before extraction, so
+partial output cannot accumulate across attempts.
 
 ## Error behavior
 
@@ -202,9 +217,9 @@ cannot accumulate across attempts.
 - Docker/Compose/helper failures include the operation and bounded stderr, never secret values.
 - Save distinguishes `checkpoint not published`, `checkpoint published but fixture restart failed`,
   and success.
-- Restore distinguishes validation, stop/delete, volume extraction, runner extraction, startup,
-  and health phases. Every post-delete error includes the retry command.
-- Existing final checkpoints are never removed or overwritten by save, restore, or staging cleanup.
+- Restore distinguishes validation, stop/delete, volume extraction, runner extraction, service
+  creation, image identity, startup, and health phases. Every post-delete error includes the retry
+  command.
 - `SIGINT` and `SIGTERM` follow ordinary best-effort cleanup/restart paths, but abrupt process or OS
   termination has no stronger guarantee. If abrupt termination leaves the lifecycle lock stale,
   the operator first verifies no holder remains and removes it through the lifecycle command's
@@ -254,18 +269,23 @@ restore failure, and failures of Docker or storage after reported success are no
 Focused tests must prove:
 
 - closed name grammar and immutable no-overwrite behavior;
-- owner-only staging/final files and store/runner non-overlap;
+- owner-only staging/final files, store/runner non-overlap, canonical runner-path fingerprinting,
+  and rejection of filesystem/home/checkout/store roots and their ancestors;
 - canonical manifest encoding, revision/fingerprint mismatch, exact file set, size mismatch, and
   checksum corruption;
 - a recreated `.env` at the same Git revision fails before any volume or runner deletion;
-- a rebuilt or missing `db` or `bugzilla` image fails before any volume or runner deletion;
+- a rebuilt, retagged, or missing `db` or `bugzilla` image fails before any volume or runner
+  deletion;
+- a tag change after preflight is detected from the created container IDs before either service
+  starts;
 - runner archive rejection for traversal, duplicates, links, sparse files, and special types;
 - save ordering: validate paths, lock, read compatibility inputs, health, resolve service images,
-  fingerprint, stop, archive three domains, validate, publish, restart;
+  fingerprint, stop, archive three domains, validate, publish, create, verify images, start, health;
 - save phase errors preserve existing final names and distinguish restart failure after publication;
 - restore acquires the lifecycle lock before reading compatibility inputs and validates every
   bundle/header condition before volume or runner deletion;
-- restore ordering: lock, validate, stop, recreate all targets, extract all domains, start, health;
+- restore ordering: lock, validate, stop, recreate all targets, extract all domains, create, verify
+  images, start, health;
 - injected failures during and after each destructive phase retain the bundle and print the exact
   retry command;
 - a second restore begins from fresh targets rather than partial prior output;
