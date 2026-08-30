@@ -56,6 +56,8 @@ contract.
 7. Bundle staging and final directories are mode 0700; files are mode 0600. Store and runner roots
    are owned by the invoking user, canonical, and non-overlapping. Runner state may not be the
    filesystem root, invoking user's home, checkout root, store root, or an ancestor of any of them.
+   Restore accepts an absent runner leaf only at the fingerprinted path and only when its existing
+   canonical parent is a non-symlink owner-only directory owned by the invoking user.
 8. The manifest and every artifact are fully validated before restore deletes volumes or runner
    state. Validation covers schema, exact artifact names, byte sizes, SHA-256 checksums, revision,
    and the fingerprint that binds `.env`, canonical runner target, service image IDs, and stack
@@ -74,11 +76,11 @@ contract.
 12. The staging-to-final rename commits save. Save then creates services with builds and pulls
     disabled, verifies each created container's image ID against the values fingerprinted before
     shutdown, starts the unchanged stack, and health-checks it. An identity or readiness failure
-    after commit returns nonzero, states that the checkpoint exists, and directs the operator to
-    keep runners stopped until the recorded images are restored and `scripts/lifecycle up`
-    succeeds; it does not delete or overwrite the checkpoint. Restore applies the same no-build,
-    no-pull create/verify/start/health sequence. Restore failure returns nonzero with the exact
-    retry command and does not roll back.
+    after commit returns nonzero, states that the checkpoint exists, reports both recorded image
+    IDs and exact identity-preserving recovery commands, and prints the exact restore command. It
+    never directs recovery through the rebuilding lifecycle `up` path or deletes the checkpoint.
+    Restore applies the same no-build, no-pull create/verify/start/health sequence. Restore failure
+    returns nonzero with the exact retry command and does not roll back.
 13. Named checkpoints round-trip representative database, Bugzilla mutable-data, and runner-state
     markers. Repeating restore from the same checkpoint succeeds.
 
@@ -158,7 +160,8 @@ compatibility obligation because they have never merged or shipped.
    and checkout revision; revalidate the absent final name; remove only the deterministic
    owner-only `.<NAME>.staging` directory from an interrupted prior save; and require the existing
    fixture health check to pass.
-3. Resolve the exact image IDs used by the healthy `db` and `bugzilla` containers, then compute the
+3. Resolve the exact image IDs used by the healthy `db` and `bugzilla` containers and require the
+   current Compose image references to resolve to those same IDs before shutdown, then compute the
    stack fingerprint including the canonical runner-state path. Report the caller's continuous
    runner-stopped responsibility through successful health, including any post-return manual
    restart interval; checkpoint cannot verify it.
@@ -174,19 +177,24 @@ compatibility obligation because they have never merged or shipped.
 8. With builds and pulls disabled, create the Compose services, inspect each created container's
    image ID, and refuse to start if either differs from the pre-shutdown value. Start the verified
    services and run the existing health check, then release the lifecycle lock. If identity,
-   startup, or health fails after publication, report that the checkpoint exists and fixture
-   restart failed; do not delete the checkpoint.
+   startup, or health fails after publication, report that the checkpoint exists, both recorded
+   IDs, the exact identity-preserving no-build/no-pull create/verify/start/health commands, and the
+   exact checkpoint restore command; do not delete the checkpoint or direct the operator through
+   the rebuilding lifecycle `up` path.
 
 On an ordinary pre-publication error, remove staging where practical, run the same no-build,
 no-pull create/image-verify/start/health sequence, and report both the capture phase and restart
-result. Process or host termination may leave staging and a stopped stack. The next save removes
-only its matching staging directory; after restoring the recorded images, the operator may also
-run the existing lifecycle `up` command. No recovery command is added.
+result. If restart fails, report both recorded IDs and the exact commands that retry the same
+identity-preserving sequence; never direct recovery through lifecycle `up`. Process or host
+termination may leave staging and a stopped stack. The next save removes only its matching staging
+directory. No recovery command or durable recovery record is added.
 
 ## Restore data flow
 
 1. Parse and validate root, name, store, and canonical runner-state path; ownership; modes;
-   non-overlap; dangerous-root exclusions; and required tools.
+   non-overlap; dangerous-root exclusions; and required tools. An existing runner leaf must be an
+   owner-only non-symlink directory owned by the invoking user. An absent leaf is valid only when
+   its fingerprinted canonical path matches and its existing parent satisfies those same checks.
 2. Acquire the lifecycle lock and report the caller's continuous runner-stopped responsibility
    through successful restored-stack health, including any post-return retry interval.
 3. While retaining the lock, read and validate the owner-only `.env`, checkout revision, canonical
@@ -195,8 +203,9 @@ run the existing lifecycle `up` command. No recovery command is added.
    manifest schema, regular-file sizes, checksums, and all runner archive headers. Finish every
    check before destructive work. Restore does not build or pull images.
 4. Stop the complete Compose stack without relying on its current health.
-5. Remove and recreate the fixed canonical MariaDB and Bugzilla Docker volumes. Remove and recreate
-   the exact fingerprinted runner-state directory mode 0700.
+5. Remove and recreate the fixed canonical MariaDB and Bugzilla Docker volumes. Remove an existing
+   validated runner leaf if present, then create the exact fingerprinted leaf mode 0700 beneath its
+   already validated parent.
 6. Stream each volume archive into its fresh destination through the isolated helper using the
    validated `db` image ID. Extract runner state into its fresh directory without following links
    and apply owner permission bits after writing contents.
@@ -270,12 +279,13 @@ Focused tests must prove:
 
 - closed name grammar and immutable no-overwrite behavior;
 - owner-only staging/final files, store/runner non-overlap, canonical runner-path fingerprinting,
-  and rejection of filesystem/home/checkout/store roots and their ancestors;
+  rejection of filesystem/home/checkout/store roots and their ancestors, and safe absent-leaf
+  recreation from an owner-only non-symlink parent;
 - canonical manifest encoding, revision/fingerprint mismatch, exact file set, size mismatch, and
   checksum corruption;
 - a recreated `.env` at the same Git revision fails before any volume or runner deletion;
 - a rebuilt, retagged, or missing `db` or `bugzilla` image fails before any volume or runner
-  deletion;
+  deletion, including a healthy running container whose Compose reference was retagged before save;
 - a tag change after preflight is detected from the created container IDs before either service
   starts;
 - runner archive rejection for traversal, duplicates, links, sparse files, and special types;
