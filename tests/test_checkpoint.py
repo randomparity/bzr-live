@@ -479,6 +479,19 @@ class HostPathTests(unittest.TestCase):
         with self.assertRaises(CheckpointError):
             self._validate()
         linked.unlink()
+        outside = self.base / "outside-runner"
+        outside.write_bytes(b"shared inode")
+        hard_link = self.runner / "hard-linked"
+        os.link(outside, hard_link)
+        archive = self.base / "must-not-exist.tar"
+        with self.assertRaisesRegex(CheckpointError, "hard link"):
+            self._validate()
+        with self.assertRaisesRegex(CheckpointError, "hard link"):
+            create_runner_archive(self.runner, archive)
+        self.assertFalse(archive.exists())
+        hard_link.unlink()
+        outside.unlink()
+
 
         mounted = self.runner / "mounted"
         mounted.mkdir(mode=0o700)

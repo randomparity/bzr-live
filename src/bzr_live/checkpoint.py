@@ -153,7 +153,12 @@ def _validate_runner_tree(source: Path) -> tuple[tuple[Path, os.stat_result], ..
             pending.extend(
                 (child, _inspect_path(child, "runner")) for child in reversed(children)
             )
-        elif not stat.S_ISREG(metadata.st_mode):
+        elif stat.S_ISREG(metadata.st_mode):
+            if metadata.st_nlink != 1:
+                raise CheckpointError(
+                    f"runner: hard links are not supported at {path}"
+                )
+        else:
             raise CheckpointError(f"runner: expected a regular file or directory at {path}")
         entries.append((path, metadata))
     return tuple(entries)
