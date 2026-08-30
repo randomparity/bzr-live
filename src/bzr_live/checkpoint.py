@@ -100,6 +100,13 @@ def _regular_file(path: Path, *, owner_only: bool = False) -> os.stat_result:
     return metadata
 
 
+def _read_fingerprint_bytes(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        raise CheckpointError(f"fingerprint: cannot read {path}: {error}") from error
+
+
 def _fingerprint_fields(root: Path, runner_state: Path) -> list[tuple[bytes, bytes]]:
     fields = [
         (b"format", _FINGERPRINT_FORMAT),
@@ -108,7 +115,7 @@ def _fingerprint_fields(root: Path, runner_state: Path) -> list[tuple[bytes, byt
     for relative in _REQUIRED_STACK_FILES:
         path = root / relative
         _regular_file(path, owner_only=relative == ".env")
-        fields.append((f"file:{relative}".encode(), path.read_bytes()))
+        fields.append((f"file:{relative}".encode(), _read_fingerprint_bytes(path)))
 
     containers = root / "containers"
     try:
@@ -129,7 +136,7 @@ def _fingerprint_fields(root: Path, runner_state: Path) -> list[tuple[bytes, byt
             continue
         if not stat.S_ISREG(metadata.st_mode):
             raise CheckpointError(f"fingerprint: expected a regular file at {path}")
-        fields.append((f"file:{relative}".encode(), path.read_bytes()))
+        fields.append((b"file:" + os.fsencode(relative), _read_fingerprint_bytes(path)))
     return fields
 
 

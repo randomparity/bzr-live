@@ -3,11 +3,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import shlex
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from bzr_live.checkpoint import (
     ARTIFACT_NAMES,
@@ -282,6 +284,50 @@ class BundleContractTests(unittest.TestCase):
                 path.write_bytes(original)
                 if relative == ".env":
                     path.chmod(0o600)
+
+    def test_fingerprint_read_errors_are_actionable(self) -> None:
+        original_read_bytes = Path.read_bytes
+        for relative in ("compose.yaml", "containers/bugzilla/Containerfile"):
+            target = self.root / relative
+
+            def read_bytes(path: Path, target: Path = target) -> bytes:
+                if path == target:
+                    raise OSError("read denied")
+                return original_read_bytes(path)
+
+            with self.subTest(relative=relative):
+                with mock.patch.object(Path, "read_bytes", autospec=True, side_effect=read_bytes):
+                    with self.assertRaises(CheckpointError) as raised:
+                        stack_fingerprint(self.root, self.runner_state)
+                message = str(raised.exception)
+                self.assertTrue(message.startswith("fingerprint:"))
+                self.assertIn(f"cannot read {target}", message)
+                self.assertIn("read denied", message)
+
+    def test_fingerprint_preserves_surrogateescaped_container_path_bytes(self) -> None:
+        baseline = stack_fingerprint(self.root, self.runner_state)
+        raw_name = b"surrogate-\xff"
+        path = self.root / "containers" / os.fsdecode(raw_name)
+        regular_metadata = (self.root / "containers/bugzilla/Containerfile").lstat()
+        original_lstat = Path.lstat
+        original_read_bytes = Path.read_bytes
+
+        def lstat(candidate: Path) -> os.stat_result:
+            return regular_metadata if candidate == path else original_lstat(candidate)
+
+        def read_bytes(candidate: Path) -> bytes:
+            return b"surrogate path content" if candidate == path else original_read_bytes(candidate)
+
+        with (
+            mock.patch.object(Path, "rglob", autospec=True, return_value=[path]),
+            mock.patch.object(Path, "lstat", autospec=True, side_effect=lstat),
+            mock.patch.object(Path, "read_bytes", autospec=True, side_effect=read_bytes),
+        ):
+            changed = stack_fingerprint(self.root, self.runner_state)
+
+        self.assertNotEqual(changed, baseline)
+        relative = path.relative_to(self.root).as_posix()
+        self.assertEqual(os.fsencode(relative), b"containers/" + raw_name)
 
     def test_retry_command_round_trips_spaces_quotes_and_leading_hyphens(self) -> None:
         store = Path("-store with spaces") / "quoted'component"
