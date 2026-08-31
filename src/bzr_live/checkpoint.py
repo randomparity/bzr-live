@@ -908,8 +908,10 @@ def read_manifest(path: Path) -> dict[str, object]:
         value = json.loads(decoded, object_pairs_hook=_object_without_duplicates)
     except CheckpointError:
         raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise CheckpointError(f"manifest: cannot read valid UTF-8 JSON from {path}: {error}") from error
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as error:
+        raise CheckpointError(
+            f"manifest: cannot read valid UTF-8 JSON from {path}: {error}"
+        ) from error
     if not isinstance(value, dict):
         raise CheckpointError("manifest: root must be an object")
     _validate_manifest(value)
@@ -1089,7 +1091,6 @@ def run_child(
     signal_state: SignalState,
     stdin: BinaryIO | None = None,
     stdout: BinaryIO | int | None = None,
-    capture_stderr: bool = True,
     on_started: Callable[[], None] | None = None,
     allow_requested: bool = False,
 ) -> bytes:
@@ -1104,7 +1105,7 @@ def run_child(
             fixed_argv,
             stdin=stdin,
             stdout=subprocess.PIPE if stdout is None else stdout,
-            stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             start_new_session=True,
         )
     except OSError as error:
@@ -1948,8 +1949,10 @@ def _checkout_root() -> Path:
 
 def _wait_timeout() -> int:
     raw = os.environ.get("BZ_WAIT_TIMEOUT", "300")
-    if re.fullmatch(r"[0-9]+", raw) is None or int(raw) < 1:
-        raise CheckpointError("timeout: BZ_WAIT_TIMEOUT must be a positive decimal integer")
+    if re.fullmatch(r"[0-9]{1,6}", raw) is None or int(raw) < 1:
+        raise CheckpointError(
+            "timeout: BZ_WAIT_TIMEOUT must be a decimal integer of seconds from 1 to 999999"
+        )
     return int(raw)
 
 

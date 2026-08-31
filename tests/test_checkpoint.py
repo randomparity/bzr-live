@@ -134,6 +134,17 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertFalse(self.docker_marker.exists())
 
+    def test_wait_timeout_rejects_nonpositive_and_unbounded_values(self) -> None:
+        for raw in ("", "0", "-1", "5.5", "  7", "9" * 5000):
+            with self.subTest(raw=raw):
+                with (
+                    mock.patch.dict(os.environ, {"BZ_WAIT_TIMEOUT": raw}),
+                    self.assertRaisesRegex(CheckpointError, "BZ_WAIT_TIMEOUT"),
+                ):
+                    checkpoint_module._wait_timeout()
+        with mock.patch.dict(os.environ, {"BZ_WAIT_TIMEOUT": "999999"}):
+            self.assertEqual(checkpoint_module._wait_timeout(), 999999)
+
 
 class BundleContractTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -292,6 +303,20 @@ class BundleContractTests(unittest.TestCase):
         duplicate_path.write_text('{"checkpoint_format":1,"checkpoint_format":1}\n', encoding="utf-8")
         with self.assertRaises(CheckpointError):
             read_manifest(duplicate_path)
+
+    def test_manifest_rejects_oversized_integers_and_deep_nesting(self) -> None:
+        oversized = self.root / "oversized-manifest.json"
+        oversized.write_text(
+            '{"checkpoint_format":' + "9" * 5000 + "}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(CheckpointError, "manifest: cannot read valid UTF-8 JSON"):
+            read_manifest(oversized)
+
+        deep = self.root / "deep-manifest.json"
+        deep.write_text("[" * 100000 + "]" * 100000, encoding="utf-8")
+        with self.assertRaisesRegex(CheckpointError, "manifest: cannot read valid UTF-8 JSON"):
+            read_manifest(deep)
 
     def test_manifest_name_must_match_cli_and_directory(self) -> None:
         renamed = self.final.with_name("renamed")
@@ -914,7 +939,6 @@ class ArgvRecorder:
         signal_state,
         stdin=None,
         stdout=None,
-        capture_stderr=True,
         on_started=None,
         allow_requested=False,
     ) -> bytes:
