@@ -64,6 +64,7 @@ _LINUX_AT_FDCWD = -100
 _LINUX_RENAME_NOREPLACE = 1
 _STAGING_FORMAT = 1
 _ASCII_CONTROLS_RE = re.compile(r"[\x00-\x1f\x7f]")
+_ARCHIVE_IO_CHUNK = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,18 @@ class CheckpointContext:
 class SignalState:
     requested: int | None = None
     active_process: subprocess.Popen[bytes] | None = None
+
+
+@dataclass
+class _StagingCreation:
+    path: Path
+    descriptor: int
+    metadata: os.stat_result
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
 
 
 @dataclass
@@ -161,11 +174,84 @@ def _inspect_path(path: Path, phase: str) -> os.stat_result:
         raise CheckpointError(f"{phase}: cannot inspect {path}: {error}") from error
 
 
-def _is_mount(path: Path, phase: str) -> bool:
+def _decode_mountinfo_path(encoded: bytes) -> Path:
+    decoded = bytearray()
+    index = 0
+    while index < len(encoded):
+        if encoded[index] != ord("\\"):
+            decoded.append(encoded[index])
+            index += 1
+            continue
+        escape = encoded[index + 1 : index + 4]
+        if len(escape) != 3 or any(byte not in b"01234567" for byte in escape):
+            raise ValueError(f"invalid mountinfo path escape at byte {index}")
+        decoded.append(int(escape, 8))
+        index += 4
+    return Path(os.fsdecode(bytes(decoded)))
+
+
+def _linux_mount_table(phase: str) -> tuple[tuple[Path, int], ...]:
+    mountinfo = Path("/proc/self/mountinfo")
     try:
-        return path.is_mount()
+        content = mountinfo.read_bytes()
+    except OSError as error:
+        raise CheckpointError(
+            f"{phase}: cannot inspect Linux mount table {mountinfo}: {error}"
+        ) from error
+
+    mounts: list[tuple[Path, int]] = []
+    try:
+        for line_number, line in enumerate(content.splitlines(), start=1):
+            fields = line.split(b" ")
+            if len(fields) < 6:
+                raise ValueError(f"line {line_number} has fewer than six fields")
+            mount_id = int(fields[0])
+            mount_point = _decode_mountinfo_path(fields[4])
+            if not mount_point.is_absolute():
+                raise ValueError(f"line {line_number} has a relative mount point")
+            mounts.append((mount_point, mount_id))
+    except (ValueError, OverflowError) as error:
+        raise CheckpointError(
+            f"{phase}: cannot parse Linux mount table {mountinfo}: {error}"
+        ) from error
+    if not mounts:
+        raise CheckpointError(f"{phase}: Linux mount table {mountinfo} is empty")
+    return tuple(sorted(mounts, key=lambda item: len(item[0].parts), reverse=True))
+
+
+def _mount_table(phase: str) -> tuple[tuple[Path, int], ...] | None:
+    if sys.platform.startswith("linux"):
+        return _linux_mount_table(phase)
+    return None
+
+
+def _mount_identity(
+    path: Path,
+    phase: str,
+    mount_table: tuple[tuple[Path, int], ...],
+) -> int:
+    for mount_point, mount_id in mount_table:
+        if path == mount_point or mount_point in path.parents:
+            return mount_id
+    raise CheckpointError(f"{phase}: cannot resolve Linux mount identity for {path}")
+
+
+def _is_mount(
+    path: Path,
+    phase: str,
+    mount_table: tuple[tuple[Path, int], ...] | None = None,
+) -> bool:
+    if mount_table is None:
+        mount_table = _mount_table(phase)
+    try:
+        native_mount = path.is_mount()
     except OSError as error:
         raise CheckpointError(f"{phase}: cannot inspect mount boundary {path}: {error}") from error
+    if mount_table is None or path == path.parent:
+        return native_mount
+    return native_mount or _mount_identity(
+        path, phase, mount_table
+    ) != _mount_identity(path.parent, phase, mount_table)
 
 
 def _directory_children(path: Path, phase: str) -> tuple[Path, ...]:
@@ -176,6 +262,7 @@ def _directory_children(path: Path, phase: str) -> tuple[Path, ...]:
 
 
 def _validate_runner_tree(source: Path) -> tuple[tuple[Path, os.stat_result], ...]:
+    mount_table = _mount_table("runner")
     root_metadata = _inspect_path(source, "runner")
     if not stat.S_ISDIR(root_metadata.st_mode):
         raise CheckpointError(f"runner: expected a directory at {source}")
@@ -190,7 +277,7 @@ def _validate_runner_tree(source: Path) -> tuple[tuple[Path, os.stat_result], ..
             raise CheckpointError(f"runner: {path} is not owned by the invoking user")
         if metadata.st_dev != root_device:
             raise CheckpointError(f"runner: {path} crosses a filesystem boundary")
-        if _is_mount(path, "runner"):
+        if _is_mount(path, "runner", mount_table):
             raise CheckpointError(f"runner: mount points are not supported at {path}")
         if stat.S_ISDIR(metadata.st_mode):
             if stat.S_IMODE(metadata.st_mode) & 0o700 != 0o700:
@@ -292,29 +379,58 @@ def _require_derived_paths(paths: ValidatedPaths, name: str) -> None:
         raise CheckpointError("staging: validated paths do not match the checkpoint name")
 
 
-def _write_all(file_descriptor: int, content: bytes, phase: str) -> None:
+def _cancellation_point(signal_state: SignalState | None) -> None:
+    if signal_state is not None:
+        _check_signal(signal_state)
+
+
+def _write_all(
+    file_descriptor: int,
+    content: bytes,
+    phase: str,
+    signal_state: SignalState | None = None,
+) -> None:
     offset = 0
+    view = memoryview(content)
     try:
-        while offset < len(content):
-            written = os.write(file_descriptor, content[offset:])
+        while offset < len(view):
+            _cancellation_point(signal_state)
+            bounded = view[offset : offset + _ARCHIVE_IO_CHUNK]
+            written = os.write(file_descriptor, bounded)
             if written == 0:
                 raise OSError("write returned zero bytes")
             offset += written
+        _cancellation_point(signal_state)
     except OSError as error:
         raise CheckpointError(f"{phase}: cannot write file: {error}") from error
 
 
-def _staging_marker(paths: ValidatedPaths, name: str) -> bytes:
+def _staging_marker(
+    paths: ValidatedPaths,
+    name: str,
+    *,
+    root: Path,
+    project: str,
+) -> bytes:
     return canonical_json(
         {
             "checkpoint_name": name,
+            "checkout_root": str(root),
             "final_path": str(paths.final),
+            "operation": "save",
+            "project": project,
             "staging_format": _STAGING_FORMAT,
         }
     )
 
 
-def create_staging(paths: ValidatedPaths, name: str) -> Path:
+def create_staging(
+    paths: ValidatedPaths,
+    name: str,
+    *,
+    root: Path,
+    project: str,
+) -> _StagingCreation:
     _require_derived_paths(paths, name)
     try:
         paths.staging.mkdir(mode=0o700)
@@ -322,35 +438,58 @@ def create_staging(paths: ValidatedPaths, name: str) -> Path:
     except OSError as error:
         raise CheckpointError(f"staging: cannot create {paths.staging}: {error}") from error
 
+    directory_descriptor = -1
+    marker_descriptor = -1
     marker = paths.staging / _STAGING_MARKER
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        file_descriptor = os.open(marker, flags, 0o600)
-    except OSError as error:
-        try:
-            paths.staging.rmdir()
-        except OSError:
-            pass
-        raise CheckpointError(f"staging: cannot create marker {marker}: {error}") from error
-    try:
-        try:
-            os.fchmod(file_descriptor, 0o600)
-            _write_all(file_descriptor, _staging_marker(paths, name), "staging")
-        finally:
-            os.close(file_descriptor)
+        directory_descriptor = os.open(
+            paths.staging,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        expected = os.lstat(paths.staging)
+        opened = os.fstat(directory_descriptor)
+        if (
+            _metadata_identity(expected) != _metadata_identity(opened)
+            or not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o700
+        ):
+            raise CheckpointError(f"staging: {paths.staging} changed during creation")
+        marker_descriptor = os.open(
+            _STAGING_MARKER,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+        os.fchmod(marker_descriptor, 0o600)
+        _write_all(
+            marker_descriptor,
+            _staging_marker(paths, name, root=root, project=project),
+            "staging",
+        )
+        os.close(marker_descriptor)
+        marker_descriptor = -1
+        return _StagingCreation(paths.staging, directory_descriptor, opened)
     except (OSError, CheckpointError) as error:
+        if marker_descriptor >= 0:
+            os.close(marker_descriptor)
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
         try:
             marker.unlink()
             paths.staging.rmdir()
+        except FileNotFoundError:
+            pass
         except OSError as cleanup_error:
             raise CheckpointError(
-                f"staging: marker creation failed and cannot remove partial {paths.staging}: "
+                f"staging: creation failed and cannot remove partial {paths.staging}: "
                 f"{cleanup_error}"
             ) from error
         if isinstance(error, CheckpointError):
             raise
-        raise CheckpointError(f"staging: cannot write marker {marker}: {error}") from error
-    return paths.staging
+        raise CheckpointError(f"staging: cannot create marker {marker}: {error}") from error
 
 
 def _manual_staging_error(path: Path, reason: str) -> CheckpointError:
@@ -388,7 +527,13 @@ def _read_validated_marker(
     return content
 
 
-def cleanup_staging(paths: ValidatedPaths, name: str) -> None:
+def cleanup_staging(
+    paths: ValidatedPaths,
+    name: str,
+    *,
+    root: Path,
+    project: str,
+) -> None:
     _require_derived_paths(paths, name)
     try:
         staging_metadata = os.lstat(paths.staging)
@@ -400,6 +545,7 @@ def cleanup_staging(paths: ValidatedPaths, name: str) -> None:
         ) from error
 
     store_metadata = _inspect_path(paths.store, "staging")
+    mount_table = _mount_table("staging")
     if not stat.S_ISDIR(staging_metadata.st_mode):
         raise _manual_staging_error(paths.staging, "staging root is not a directory")
     if staging_metadata.st_uid != os.getuid():
@@ -410,7 +556,7 @@ def cleanup_staging(paths: ValidatedPaths, name: str) -> None:
         raise _manual_staging_error(
             paths.staging, "staging root crosses a filesystem boundary"
         )
-    if _is_mount(paths.staging, "staging"):
+    if _is_mount(paths.staging, "staging", mount_table):
         raise _manual_staging_error(paths.staging, "staging root is a mount point")
 
     children = _directory_children(paths.staging, "staging")
@@ -428,7 +574,7 @@ def cleanup_staging(paths: ValidatedPaths, name: str) -> None:
             raise _manual_staging_error(child, "staging child must have mode 0600")
         if metadata.st_dev != staging_metadata.st_dev:
             raise _manual_staging_error(child, "staging child crosses a filesystem boundary")
-        if _is_mount(child, "staging"):
+        if _is_mount(child, "staging", mount_table):
             raise _manual_staging_error(child, "staging child is a mount point")
         metadata_by_path[child] = metadata
 
@@ -436,7 +582,12 @@ def cleanup_staging(paths: ValidatedPaths, name: str) -> None:
     marker_metadata = metadata_by_path.get(marker)
     if marker_metadata is None:
         raise _manual_staging_error(paths.staging, "matching staging marker is missing")
-    expected_marker = _staging_marker(paths, name)
+    expected_marker = _staging_marker(
+        paths,
+        name,
+        root=root,
+        project=project,
+    )
     if _read_validated_marker(marker, marker_metadata, expected_marker) != expected_marker:
         raise _manual_staging_error(marker, "marker does not match this invocation")
 
@@ -495,7 +646,24 @@ def _open_verified_regular(path: Path, expected: os.stat_result):
         raise
 
 
-def create_runner_archive(source: Path, destination: Path) -> None:
+class _SignalAwareReader:
+    def __init__(self, source: BinaryIO, signal_state: SignalState):
+        self._source = source
+        self._signal_state = signal_state
+
+    def read(self, size: int = -1) -> bytes:
+        _check_signal(self._signal_state)
+        bounded = _ARCHIVE_IO_CHUNK if size < 0 else min(size, _ARCHIVE_IO_CHUNK)
+        content = self._source.read(bounded)
+        _check_signal(self._signal_state)
+        return content
+
+
+def create_runner_archive(
+    source: Path,
+    destination: Path,
+    signal_state: SignalState | None = None,
+) -> None:
     entries = _validate_runner_tree(source)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -508,6 +676,7 @@ def create_runner_archive(source: Path, destination: Path) -> None:
             file_descriptor = -1
             with tarfile.open(fileobj=output, mode="w", format=tarfile.PAX_FORMAT) as archive:
                 for path, metadata in entries[1:]:
+                    _cancellation_point(signal_state)
                     member_name = path.relative_to(source).as_posix()
                     if stat.S_ISDIR(metadata.st_mode):
                         member = _archive_info(
@@ -517,17 +686,24 @@ def create_runner_archive(source: Path, destination: Path) -> None:
                             stat.S_IMODE(metadata.st_mode),
                         )
                         archive.addfile(member)
-                    else:
-                        member = _archive_info(
-                            member_name,
-                            metadata,
-                            tarfile.REGTYPE,
-                            stat.S_IMODE(metadata.st_mode) & 0o700,
+                        continue
+
+                    member = _archive_info(
+                        member_name,
+                        metadata,
+                        tarfile.REGTYPE,
+                        stat.S_IMODE(metadata.st_mode) & 0o700,
+                    )
+                    member.size = metadata.st_size
+                    with _open_verified_regular(path, metadata) as content:
+                        archive.addfile(
+                            member,
+                            _SignalAwareReader(content, signal_state)
+                            if signal_state is not None
+                            else content,
                         )
-                        member.size = metadata.st_size
-                        with _open_verified_regular(path, metadata) as content:
-                            archive.addfile(member, content)
-    except (OSError, tarfile.TarError, CheckpointError) as error:
+                _cancellation_point(signal_state)
+    except (OSError, tarfile.TarError, CheckpointError, _HandledSignal) as error:
         if file_descriptor >= 0:
             os.close(file_descriptor)
         try:
@@ -539,7 +715,7 @@ def create_runner_archive(source: Path, destination: Path) -> None:
                 f"runner archive: creation failed and cannot remove partial {destination}: "
                 f"{cleanup_error}"
             ) from error
-        if isinstance(error, CheckpointError):
+        if isinstance(error, (CheckpointError, _HandledSignal)):
             raise
         raise CheckpointError(f"runner archive: cannot create {destination}: {error}") from error
 
@@ -614,12 +790,25 @@ def _validate_archive_topology(members: tuple[tarfile.TarInfo, ...]) -> None:
         leaf.kind = kind
 
 
-def validate_runner_archive(source: Path) -> tuple[tarfile.TarInfo, ...]:
+def _rewind_archive(source: BinaryIO, label: str) -> None:
     try:
-        with tarfile.open(source, mode="r:") as archive:
+        source.seek(0)
+    except (OSError, ValueError) as error:
+        raise CheckpointError(f"runner archive: cannot rewind {label}: {error}") from error
+
+
+def _validate_runner_archive_file(
+    source: BinaryIO,
+    label: str,
+    signal_state: SignalState | None,
+) -> tuple[tarfile.TarInfo, ...]:
+    _rewind_archive(source, label)
+    try:
+        with tarfile.open(fileobj=source, mode="r:") as archive:
             members = tuple(archive.getmembers())
             _validate_archive_topology(members)
             for member in members:
+                _cancellation_point(signal_state)
                 if not member.isreg():
                     continue
                 content = archive.extractfile(member)
@@ -627,19 +816,35 @@ def validate_runner_archive(source: Path) -> tuple[tarfile.TarInfo, ...]:
                     raise CheckpointError(
                         f"runner archive: cannot read regular member {member.name!r}"
                     )
-                remaining = member.size
-                while remaining:
-                    chunk = content.read(min(1024 * 1024, remaining))
-                    if not chunk:
-                        raise CheckpointError(
-                            f"runner archive: truncated member {member.name!r}"
-                        )
-                    remaining -= len(chunk)
+                try:
+                    remaining = member.size
+                    while remaining:
+                        _cancellation_point(signal_state)
+                        chunk = content.read(min(_ARCHIVE_IO_CHUNK, remaining))
+                        _cancellation_point(signal_state)
+                        if not chunk:
+                            raise CheckpointError(
+                                f"runner archive: truncated member {member.name!r}"
+                            )
+                        remaining -= len(chunk)
+                finally:
+                    content.close()
             return members
     except CheckpointError:
         raise
     except (OSError, EOFError, tarfile.TarError) as error:
-        raise CheckpointError(f"runner archive: cannot validate {source}: {error}") from error
+        raise CheckpointError(f"runner archive: cannot validate {label}: {error}") from error
+    finally:
+        _rewind_archive(source, label)
+
+
+def validate_runner_archive(
+    source: Path,
+    signal_state: SignalState | None = None,
+) -> tuple[tarfile.TarInfo, ...]:
+    metadata = _inspect_path(source, "runner archive")
+    with _open_verified_regular(source, metadata) as archive:
+        return _validate_runner_archive_file(archive, str(source), signal_state)
 
 
 def _ensure_extraction_directory(root: Path, parts: tuple[str, ...]) -> Path:
@@ -672,8 +877,15 @@ def _ensure_extraction_directory(root: Path, parts: tuple[str, ...]) -> Path:
     return current
 
 
-def extract_runner_archive(source: Path, destination: Path) -> None:
-    members = validate_runner_archive(source)
+def _extract_runner_archive_file(
+    source: BinaryIO,
+    label: str,
+    destination: Path,
+    members: tuple[tarfile.TarInfo, ...],
+    signal_state: SignalState | None,
+) -> None:
+    _cancellation_point(signal_state)
+    mount_table = _mount_table("runner archive")
     try:
         destination.mkdir(mode=0o700)
         destination.chmod(0o700)
@@ -683,7 +895,7 @@ def extract_runner_archive(source: Path, destination: Path) -> None:
             not stat.S_ISDIR(metadata.st_mode)
             or metadata.st_uid != os.getuid()
             or stat.S_IMODE(metadata.st_mode) != 0o700
-            or _is_mount(destination, "runner archive")
+            or _is_mount(destination, "runner archive", mount_table)
             or _directory_children(destination, "runner archive")
         ):
             raise CheckpointError(
@@ -701,9 +913,11 @@ def extract_runner_archive(source: Path, destination: Path) -> None:
             f"runner archive: cannot canonicalize destination {destination}: {error}"
         ) from error
 
+    _rewind_archive(source, label)
     try:
-        with tarfile.open(source, mode="r:") as archive:
+        with tarfile.open(fileobj=source, mode="r:") as archive:
             for member in members:
+                _cancellation_point(signal_state)
                 parts = _validated_member_parts(member)
                 parent = _ensure_extraction_directory(canonical_destination, parts[:-1])
                 target = parent / parts[-1]
@@ -724,29 +938,56 @@ def extract_runner_archive(source: Path, destination: Path) -> None:
                 try:
                     file_descriptor = os.open(target, flags, 0o600)
                 except OSError as error:
+                    content.close()
                     raise CheckpointError(
                         f"runner archive: cannot create regular file {target}: {error}"
                     ) from error
                 try:
                     remaining = member.size
                     while remaining:
-                        chunk = content.read(min(1024 * 1024, remaining))
+                        _cancellation_point(signal_state)
+                        chunk = content.read(min(_ARCHIVE_IO_CHUNK, remaining))
+                        _cancellation_point(signal_state)
                         if not chunk:
                             raise CheckpointError(
                                 f"runner archive: truncated member {member.name!r}"
                             )
-                        _write_all(file_descriptor, chunk, "runner archive")
+                        _write_all(
+                            file_descriptor,
+                            chunk,
+                            "runner archive",
+                            signal_state,
+                        )
                         remaining -= len(chunk)
                     os.fchmod(file_descriptor, member.mode & 0o700)
                 finally:
+                    content.close()
                     os.close(file_descriptor)
     except CheckpointError:
         raise
     except (OSError, EOFError, tarfile.TarError) as error:
         raise CheckpointError(
-            f"runner archive: cannot extract {source} to {destination}: {error}"
+            f"runner archive: cannot extract {label} to {destination}: {error}"
         ) from error
+    finally:
+        _rewind_archive(source, label)
 
+
+def extract_runner_archive(
+    source: Path,
+    destination: Path,
+    signal_state: SignalState | None = None,
+) -> None:
+    metadata = _inspect_path(source, "runner archive")
+    with _open_verified_regular(source, metadata) as archive:
+        members = _validate_runner_archive_file(archive, str(source), signal_state)
+        _extract_runner_archive_file(
+            archive,
+            str(source),
+            destination,
+            members,
+            signal_state,
+        )
 
 def checkout_revision(root: Path) -> str:
     try:
@@ -901,14 +1142,13 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
             )
 
 
-def read_manifest(path: Path) -> dict[str, object]:
+def _parse_manifest(encoded: bytes, path: Path) -> dict[str, object]:
     try:
-        encoded = path.read_bytes()
         decoded = encoded.decode("utf-8")
         value = json.loads(decoded, object_pairs_hook=_object_without_duplicates)
     except CheckpointError:
         raise
-    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as error:
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
         raise CheckpointError(
             f"manifest: cannot read valid UTF-8 JSON from {path}: {error}"
         ) from error
@@ -920,27 +1160,291 @@ def read_manifest(path: Path) -> dict[str, object]:
     return value
 
 
-def _final_regular_file(path: Path) -> os.stat_result:
+def _metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_exact_stream(source: BinaryIO, expected_size: int, label: str) -> bytes:
     try:
-        metadata = path.lstat()
-    except OSError as error:
-        raise CheckpointError(f"bundle: cannot inspect {path}: {error}") from error
+        source.seek(0)
+        content = source.read(expected_size + 1)
+        source.seek(0)
+    except (OSError, ValueError) as error:
+        raise CheckpointError(f"bundle: cannot read {label}: {error}") from error
+    if len(content) != expected_size:
+        raise CheckpointError(f"bundle: {label} changed during validation")
+    return content
+
+
+def read_manifest(path: Path) -> dict[str, object]:
+    metadata = _inspect_path(path, "manifest")
     if not stat.S_ISREG(metadata.st_mode):
-        raise CheckpointError(f"bundle: expected a regular file at {path}")
-    if stat.S_IMODE(metadata.st_mode) != 0o600:
-        raise CheckpointError(f"bundle: {path} must have mode 0600")
-    return metadata
+        raise CheckpointError(f"manifest: expected a regular file at {path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise CheckpointError(f"manifest: cannot open {path}: {error}") from error
+    try:
+        opened = os.fstat(descriptor)
+        if _metadata_identity(opened) != _metadata_identity(metadata):
+            raise CheckpointError(f"manifest: {path} changed during validation")
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = -1
+            encoded = _read_exact_stream(source, metadata.st_size, str(path))
+    except OSError as error:
+        raise CheckpointError(f"manifest: cannot read {path}: {error}") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return _parse_manifest(encoded, path)
+
+
+def _sha256_stream(
+    source: BinaryIO,
+    label: str,
+    signal_state: SignalState | None = None,
+) -> str:
+    digest = hashlib.sha256()
+    try:
+        source.seek(0)
+        while True:
+            _cancellation_point(signal_state)
+            chunk = source.read(_ARCHIVE_IO_CHUNK)
+            _cancellation_point(signal_state)
+            if not chunk:
+                break
+            digest.update(chunk)
+        source.seek(0)
+    except (OSError, ValueError) as error:
+        raise CheckpointError(f"bundle: cannot read {label}: {error}") from error
+    return digest.hexdigest()
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
+    metadata = _inspect_path(path, "bundle")
+    with _open_verified_regular(path, metadata) as source:
+        return _sha256_stream(source, str(path))
+
+
+@dataclass
+class _OpenedBundle:
+    path: Path
+    root_descriptor: int
+    root_metadata: os.stat_result
+    file_metadata: dict[str, os.stat_result]
+    files: dict[str, BinaryIO]
+    manifest_bytes: bytes
+    manifest: dict[str, object]
+
+
+def _require_bundle_root(
+    path: Path,
+    metadata: os.stat_result,
+    mount_table: tuple[tuple[Path, int], ...] | None,
+) -> None:
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise CheckpointError(f"bundle: expected a directory at {path}")
+    if metadata.st_uid != os.getuid():
+        raise CheckpointError(f"bundle: {path} is not owned by the invoking user")
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise CheckpointError(f"bundle: {path} must have mode 0700")
+    if _is_mount(path, "bundle", mount_table):
+        raise CheckpointError(f"bundle: mount points are not supported at {path}")
+
+
+def _require_bundle_file(
+    path: Path,
+    metadata: os.stat_result,
+    root_metadata: os.stat_result,
+    mount_table: tuple[tuple[Path, int], ...] | None,
+) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise CheckpointError(f"bundle: expected a regular file at {path}")
+    if metadata.st_uid != os.getuid():
+        raise CheckpointError(f"bundle: {path} is not owned by the invoking user")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise CheckpointError(f"bundle: {path} must have mode 0600")
+    if metadata.st_nlink != 1:
+        raise CheckpointError(f"bundle: hard links are not supported at {path}")
+    if metadata.st_dev != root_metadata.st_dev:
+        raise CheckpointError(f"bundle: {path} crosses a filesystem boundary")
+    if _is_mount(path, "bundle", mount_table):
+        raise CheckpointError(f"bundle: mount points are not supported at {path}")
+
+
+def _bundle_file_set(names: frozenset[str]) -> None:
+    if names == FINAL_NAMES:
+        return
+    missing = sorted(FINAL_NAMES - names)
+    unknown = sorted(names - FINAL_NAMES)
+    details = []
+    if missing:
+        details.append(f"missing {', '.join(missing)}")
+    if unknown:
+        details.append(f"unknown {', '.join(unknown)}")
+    raise CheckpointError(f"bundle: final file set has {'; '.join(details)}")
+
+
+def _verify_opened_bundle(bundle: _OpenedBundle) -> None:
+    mount_table = _mount_table("bundle")
+    path_metadata = _inspect_path(bundle.path, "bundle")
+    opened_root = os.fstat(bundle.root_descriptor)
+    _require_bundle_root(bundle.path, path_metadata, mount_table)
+    if (
+        _metadata_identity(path_metadata) != _metadata_identity(opened_root)
+        or _metadata_identity(opened_root) != _metadata_identity(bundle.root_metadata)
+    ):
+        raise CheckpointError(f"bundle: {bundle.path} changed during validation")
     try:
-        with path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(chunk)
+        _bundle_file_set(frozenset(os.listdir(bundle.root_descriptor)))
     except OSError as error:
-        raise CheckpointError(f"bundle: cannot read {path}: {error}") from error
-    return digest.hexdigest()
+        raise CheckpointError(f"bundle: cannot list {bundle.path}: {error}") from error
+
+    for name, source in bundle.files.items():
+        path = bundle.path / name
+        try:
+            path_metadata = os.stat(
+                name,
+                dir_fd=bundle.root_descriptor,
+                follow_symlinks=False,
+            )
+            opened = os.fstat(source.fileno())
+        except OSError as error:
+            raise CheckpointError(f"bundle: cannot inspect {path}: {error}") from error
+        _require_bundle_file(path, path_metadata, opened_root, mount_table)
+        if (
+            _metadata_identity(path_metadata) != _metadata_identity(opened)
+            or _metadata_identity(opened)
+            != _metadata_identity(bundle.file_metadata[name])
+        ):
+            raise CheckpointError(f"bundle: {path} changed during validation")
+
+
+@contextmanager
+def _open_validated_bundle(
+    bundle: Path,
+    *,
+    name: str,
+    directory_name: str,
+    revision: str,
+    fingerprint: str,
+    signal_state: SignalState | None = None,
+) -> Iterator[_OpenedBundle]:
+    validated_name = validate_name(name)
+    mount_table = _mount_table("bundle")
+    root_metadata = _inspect_path(bundle, "bundle")
+    _require_bundle_root(bundle, root_metadata, mount_table)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        root_descriptor = os.open(bundle, flags)
+    except OSError as error:
+        raise CheckpointError(f"bundle: cannot open {bundle}: {error}") from error
+
+    files: dict[str, BinaryIO] = {}
+    try:
+        opened_root = os.fstat(root_descriptor)
+        if _metadata_identity(opened_root) != _metadata_identity(root_metadata):
+            raise CheckpointError(f"bundle: {bundle} changed during validation")
+        try:
+            names = frozenset(os.listdir(root_descriptor))
+        except OSError as error:
+            raise CheckpointError(f"bundle: cannot list {bundle}: {error}") from error
+        _bundle_file_set(names)
+
+        file_metadata: dict[str, os.stat_result] = {}
+        for entry_name in sorted(FINAL_NAMES):
+            path = bundle / entry_name
+            try:
+                expected = os.stat(
+                    entry_name,
+                    dir_fd=root_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise CheckpointError(f"bundle: cannot inspect {path}: {error}") from error
+            _require_bundle_file(path, expected, opened_root, mount_table)
+            try:
+                descriptor = os.open(
+                    entry_name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=root_descriptor,
+                )
+            except OSError as error:
+                raise CheckpointError(f"bundle: cannot open {path}: {error}") from error
+            try:
+                opened = os.fstat(descriptor)
+                if _metadata_identity(opened) != _metadata_identity(expected):
+                    raise CheckpointError(f"bundle: {path} changed during validation")
+                files[entry_name] = os.fdopen(descriptor, "rb")
+                descriptor = -1
+                file_metadata[entry_name] = opened
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+
+        manifest_bytes = _read_exact_stream(
+            files["manifest.json"],
+            file_metadata["manifest.json"].st_size,
+            str(bundle / "manifest.json"),
+        )
+        manifest = _parse_manifest(manifest_bytes, bundle / "manifest.json")
+        manifest_name = manifest["checkpoint_name"]
+        if manifest_name != validated_name or manifest_name != directory_name:
+            raise CheckpointError(
+                "bundle: checkpoint name does not match CLI name and final directory"
+            )
+        if manifest["checkout_revision"] != revision:
+            raise CheckpointError("bundle: checkout revision is incompatible")
+        if manifest["stack_fingerprint"] != fingerprint:
+            raise CheckpointError("bundle: stack fingerprint is incompatible")
+
+        artifacts = manifest["artifacts"]
+        assert isinstance(artifacts, dict)
+        for artifact_name in ARTIFACT_NAMES:
+            record = artifacts[artifact_name]
+            assert isinstance(record, dict)
+            if file_metadata[artifact_name].st_size != record["size"]:
+                raise CheckpointError(
+                    f"bundle: {artifact_name} size does not match manifest"
+                )
+            if (
+                _sha256_stream(
+                    files[artifact_name],
+                    str(bundle / artifact_name),
+                    signal_state,
+                )
+                != record["sha256"]
+            ):
+                raise CheckpointError(
+                    f"bundle: {artifact_name} checksum does not match manifest"
+                )
+
+        opened_bundle = _OpenedBundle(
+            path=bundle,
+            root_descriptor=root_descriptor,
+            root_metadata=opened_root,
+            file_metadata=file_metadata,
+            files=files,
+            manifest_bytes=manifest_bytes,
+            manifest=manifest,
+        )
+        _verify_opened_bundle(opened_bundle)
+        yield opened_bundle
+    finally:
+        for source in files.values():
+            source.close()
+        os.close(root_descriptor)
 
 
 def _validate_bundle_at(
@@ -951,47 +1455,14 @@ def _validate_bundle_at(
     revision: str,
     fingerprint: str,
 ) -> dict[str, object]:
-    validated_name = validate_name(name)
-    try:
-        bundle_metadata = bundle.lstat()
-    except OSError as error:
-        raise CheckpointError(f"bundle: cannot inspect {bundle}: {error}") from error
-    if not stat.S_ISDIR(bundle_metadata.st_mode):
-        raise CheckpointError(f"bundle: expected a directory at {bundle}")
-    try:
-        entries = {entry.name: entry for entry in bundle.iterdir()}
-    except OSError as error:
-        raise CheckpointError(f"bundle: cannot list {bundle}: {error}") from error
-    if frozenset(entries) != FINAL_NAMES:
-        missing = sorted(FINAL_NAMES - entries.keys())
-        unknown = sorted(entries.keys() - FINAL_NAMES)
-        details = []
-        if missing:
-            details.append(f"missing {', '.join(missing)}")
-        if unknown:
-            details.append(f"unknown {', '.join(unknown)}")
-        raise CheckpointError(f"bundle: final file set has {'; '.join(details)}")
-
-    metadata = {entry_name: _final_regular_file(path) for entry_name, path in entries.items()}
-    manifest = read_manifest(entries["manifest.json"])
-    manifest_name = manifest["checkpoint_name"]
-    if manifest_name != validated_name or manifest_name != directory_name:
-        raise CheckpointError("bundle: checkpoint name does not match CLI name and final directory")
-    if manifest["checkout_revision"] != revision:
-        raise CheckpointError("bundle: checkout revision is incompatible")
-    if manifest["stack_fingerprint"] != fingerprint:
-        raise CheckpointError("bundle: stack fingerprint is incompatible")
-
-    artifacts = manifest["artifacts"]
-    assert isinstance(artifacts, dict)
-    for artifact_name in ARTIFACT_NAMES:
-        record = artifacts[artifact_name]
-        assert isinstance(record, dict)
-        if metadata[artifact_name].st_size != record["size"]:
-            raise CheckpointError(f"bundle: {artifact_name} size does not match manifest")
-        if _sha256_file(entries[artifact_name]) != record["sha256"]:
-            raise CheckpointError(f"bundle: {artifact_name} checksum does not match manifest")
-    return manifest
+    with _open_validated_bundle(
+        bundle,
+        name=name,
+        directory_name=directory_name,
+        revision=revision,
+        fingerprint=fingerprint,
+    ) as opened:
+        return opened.manifest
 
 
 def validate_bundle(
@@ -1438,17 +1909,28 @@ def _archive_volume(
         raise CheckpointError(f"checkpoint: cannot finish {destination}: {error}") from error
 
 
-def _validate_volume_archive(path: Path, signal_state: SignalState) -> None:
+def _validate_volume_archive(
+    source: BinaryIO,
+    label: str,
+    signal_state: SignalState,
+) -> None:
     try:
-        with path.open("rb") as source:
-            _run_normal(
-                _tar_list_argv(),
-                signal_state=signal_state,
-                stdin=source,
-                stdout=subprocess.DEVNULL,
-            )
+        source.seek(0)
+        _run_normal(
+            _tar_list_argv(),
+            signal_state=signal_state,
+            stdin=source,
+            stdout=subprocess.DEVNULL,
+        )
+        source.seek(0)
     except OSError as error:
-        raise CheckpointError(f"volume archive: cannot read {path}: {error}") from error
+        raise CheckpointError(f"volume archive: cannot read {label}: {error}") from error
+
+
+def _validate_volume_archive_path(path: Path, signal_state: SignalState) -> None:
+    metadata = _inspect_path(path, "volume archive")
+    with _open_verified_regular(path, metadata) as source:
+        _validate_volume_archive(source, str(path), signal_state)
 
 
 def _write_private_bytes(path: Path, content: bytes) -> None:
@@ -1495,16 +1977,98 @@ def _require_absent_final(context: CheckpointContext) -> None:
     raise CheckpointError(f"save: final checkpoint already exists at {context.paths.final}")
 
 
-def _restore_marker_for_cleanup(context: CheckpointContext) -> None:
+def _restore_marker_for_cleanup(
+    context: CheckpointContext,
+    creation: _StagingCreation,
+) -> None:
     marker = context.paths.staging / _STAGING_MARKER
-    if not context.paths.staging.exists() or marker.exists():
+    try:
+        current = os.lstat(context.paths.staging)
+        opened = os.fstat(creation.descriptor)
+    except OSError as error:
+        raise _manual_staging_error(
+            context.paths.staging,
+            f"cannot verify staging creation: {error}",
+        ) from error
+    if (
+        (
+            current.st_dev,
+            current.st_ino,
+            current.st_uid,
+            stat.S_IMODE(current.st_mode),
+        )
+        != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_uid,
+            stat.S_IMODE(opened.st_mode),
+        )
+        or (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_uid,
+            stat.S_IMODE(opened.st_mode),
+        )
+        != (
+            creation.metadata.st_dev,
+            creation.metadata.st_ino,
+            creation.metadata.st_uid,
+            stat.S_IMODE(creation.metadata.st_mode),
+        )
+    ):
+        raise _manual_staging_error(
+            context.paths.staging,
+            "staging root is not the directory created by this invocation",
+        )
+    try:
+        os.stat(
+            _STAGING_MARKER,
+            dir_fd=creation.descriptor,
+            follow_symlinks=False,
+        )
         return
-    _write_private_bytes(marker, _staging_marker(context.paths, context.name))
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise _manual_staging_error(marker, f"cannot inspect marker: {error}") from error
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(
+            _STAGING_MARKER,
+            flags,
+            0o600,
+            dir_fd=creation.descriptor,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            _write_all(
+                descriptor,
+                _staging_marker(
+                    context.paths,
+                    context.name,
+                    root=context.root,
+                    project=context.project,
+                ),
+                "staging",
+            )
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise _manual_staging_error(marker, f"cannot restore marker: {error}") from error
 
 
-def _cleanup_save_staging(context: CheckpointContext) -> None:
-    _restore_marker_for_cleanup(context)
-    cleanup_staging(context.paths, context.name)
+def _cleanup_save_staging(
+    context: CheckpointContext,
+    creation: _StagingCreation,
+) -> None:
+    _restore_marker_for_cleanup(context, creation)
+    cleanup_staging(
+        context.paths,
+        context.name,
+        root=context.root,
+        project=context.project,
+    )
 
 
 def _rename_directory_no_replace(source: Path, destination: Path) -> None:
@@ -1581,11 +2145,12 @@ def _save_failure(
     *,
     phase: str,
     published: bool,
+    staging_creation: _StagingCreation | None,
 ) -> CheckpointError:
     cleanup_error: CheckpointError | None = None
-    if not published:
+    if not published and staging_creation is not None:
         try:
-            _cleanup_save_staging(context)
+            _cleanup_save_staging(context, staging_creation)
         except CheckpointError as failure:
             cleanup_error = failure
     restart_error: CheckpointError | None = None
@@ -1618,7 +2183,12 @@ def save_checkpoint(context: CheckpointContext, signal_state: SignalState) -> No
         raise CheckpointError("save: checkpoint context operation is not save")
     _require_absent_final(context)
     _check_signal(signal_state)
-    cleanup_staging(context.paths, context.name)
+    cleanup_staging(
+        context.paths,
+        context.name,
+        root=context.root,
+        project=context.project,
+    )
     _check_signal(signal_state)
     health_check(context, signal_state)
     print("Keep runners stopped until checkpoint save and fixture health complete.")
@@ -1626,6 +2196,7 @@ def save_checkpoint(context: CheckpointContext, signal_state: SignalState) -> No
     shutdown_started = False
     published = False
     phase = "stack shutdown"
+    staging_creation: _StagingCreation | None = None
     try:
         shutdown_started = True
         _run_normal(
@@ -1633,7 +2204,12 @@ def save_checkpoint(context: CheckpointContext, signal_state: SignalState) -> No
             signal_state=signal_state,
         )
         phase = "staging creation"
-        create_staging(context.paths, context.name)
+        staging_creation = create_staging(
+            context.paths,
+            context.name,
+            root=context.root,
+            project=context.project,
+        )
         for compose_name, artifact_name in _VOLUME_ARTIFACTS:
             phase = f"{compose_name} archive"
             _archive_volume(
@@ -1644,13 +2220,20 @@ def save_checkpoint(context: CheckpointContext, signal_state: SignalState) -> No
             )
         phase = "runner archive"
         runner_archive = context.paths.staging / "runner-state.tar"
-        create_runner_archive(context.paths.runner_state, runner_archive)
+        create_runner_archive(
+            context.paths.runner_state,
+            runner_archive,
+            signal_state,
+        )
         _check_signal(signal_state)
         for _compose_name, artifact_name in _VOLUME_ARTIFACTS:
             phase = f"{artifact_name} validation"
-            _validate_volume_archive(context.paths.staging / artifact_name, signal_state)
+            _validate_volume_archive_path(
+                context.paths.staging / artifact_name,
+                signal_state,
+            )
         phase = "runner archive validation"
-        validate_runner_archive(runner_archive)
+        validate_runner_archive(runner_archive, signal_state)
         _check_signal(signal_state)
         phase = "manifest creation"
         manifest = canonical_json(_manifest_for(context))
@@ -1689,6 +2272,7 @@ def save_checkpoint(context: CheckpointContext, signal_state: SignalState) -> No
                 error,
                 published=published,
                 phase=phase,
+                staging_creation=staging_creation,
             )
             print(failure, file=sys.stderr)
         raise
@@ -1701,7 +2285,11 @@ def save_checkpoint(context: CheckpointContext, signal_state: SignalState) -> No
             error,
             published=published,
             phase=phase,
+            staging_creation=staging_creation,
         ) from error
+    finally:
+        if staging_creation is not None:
+            staging_creation.close()
     print(f"Saved checkpoint {context.name} at {context.paths.final}.")
 
 
@@ -1779,17 +2367,25 @@ def _extract_volume_archive(
     context: CheckpointContext,
     signal_state: SignalState,
     compose_name: str,
-    source: Path,
+    source: BinaryIO,
+    label: str,
 ) -> None:
     try:
-        with source.open("rb") as archive:
-            _run_normal(
-                _extract_argv(_volume_name(context, compose_name)),
-                signal_state=signal_state,
-                stdin=archive,
-            )
+        source.seek(0)
+        _run_normal(
+            _extract_argv(_volume_name(context, compose_name)),
+            signal_state=signal_state,
+            stdin=source,
+        )
     except OSError as error:
-        raise CheckpointError(f"volume extraction: cannot read {source}: {error}") from error
+        raise CheckpointError(f"volume extraction: cannot read {label}: {error}") from error
+    finally:
+        try:
+            source.seek(0)
+        except OSError as error:
+            raise CheckpointError(
+                f"volume extraction: cannot rewind {label}: {error}"
+            ) from error
 
 
 def _restore_retry_message(
@@ -1843,24 +2439,30 @@ def _best_effort_signal_shutdown(
         pass
 
 
-def restore_checkpoint(context: CheckpointContext, signal_state: SignalState) -> None:
-    if context.operation != "restore":
-        raise CheckpointError("restore: checkpoint context operation is not restore")
-    validate_bundle(
-        context.paths.final,
-        name=context.name,
-        revision=context.revision,
-        fingerprint=context.fingerprint,
-    )
+def _restore_opened_bundle(
+    context: CheckpointContext,
+    signal_state: SignalState,
+    bundle: _OpenedBundle,
+) -> None:
     for _compose_name, artifact_name in _VOLUME_ARTIFACTS:
-        _validate_volume_archive(context.paths.final / artifact_name, signal_state)
-    validate_runner_archive(context.paths.final / "runner-state.tar")
+        _validate_volume_archive(
+            bundle.files[artifact_name],
+            str(context.paths.final / artifact_name),
+            signal_state,
+        )
+    runner_name = "runner-state.tar"
+    runner_members = _validate_runner_archive_file(
+        bundle.files[runner_name],
+        str(context.paths.final / runner_name),
+        signal_state,
+    )
     _check_signal(signal_state)
     runner_entries = _validated_runner_entries(context.paths.runner_state)
     _run_normal(
         (*context.compose, "config", "--quiet"),
         signal_state=signal_state,
     )
+    _verify_opened_bundle(bundle)
     print("Keep runners stopped until checkpoint restore and fixture health complete.")
 
     shutdown_started = False
@@ -1873,6 +2475,9 @@ def restore_checkpoint(context: CheckpointContext, signal_state: SignalState) ->
             (*context.compose, "down", "--remove-orphans"),
             signal_state=signal_state,
         )
+        _check_signal(signal_state)
+        phase = "bundle final validation"
+        _verify_opened_bundle(bundle)
         _check_signal(signal_state)
         phase = "target deletion and recreation"
 
@@ -1892,12 +2497,16 @@ def restore_checkpoint(context: CheckpointContext, signal_state: SignalState) ->
                 context,
                 signal_state,
                 compose_name,
-                context.paths.final / artifact_name,
+                bundle.files[artifact_name],
+                str(context.paths.final / artifact_name),
             )
         phase = "runner extraction"
-        extract_runner_archive(
-            context.paths.final / "runner-state.tar",
+        _extract_runner_archive_file(
+            bundle.files[runner_name],
+            str(context.paths.final / runner_name),
             context.paths.runner_state,
+            runner_members,
+            signal_state,
         )
         _check_signal(signal_state)
         phase = "fixture startup"
@@ -1929,6 +2538,20 @@ def restore_checkpoint(context: CheckpointContext, signal_state: SignalState) ->
                 error,
             ) from error
         raise
+
+
+def restore_checkpoint(context: CheckpointContext, signal_state: SignalState) -> None:
+    if context.operation != "restore":
+        raise CheckpointError("restore: checkpoint context operation is not restore")
+    with _open_validated_bundle(
+        context.paths.final,
+        name=context.name,
+        directory_name=context.paths.final.name,
+        revision=context.revision,
+        fingerprint=context.fingerprint,
+        signal_state=signal_state,
+    ) as bundle:
+        _restore_opened_bundle(context, signal_state, bundle)
     print(f"Restored checkpoint {context.name} at revision {context.revision}.")
 
 

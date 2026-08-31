@@ -205,6 +205,7 @@ class BundleContractTests(unittest.TestCase):
             else:
                 self.final.unlink()
         self.final.mkdir(parents=True)
+        self.final.chmod(0o700)
         contents = {
             "bugzilla-volume.tar": b"bugzilla tar bytes",
             "mariadb-volume.tar": b"mariadb tar bytes",
@@ -368,6 +369,99 @@ class BundleContractTests(unittest.TestCase):
                         fingerprint=self.fingerprint,
                     )
 
+    def test_bundle_rejects_unauthorized_roots_and_linked_or_mounted_files(self) -> None:
+        artifact = self.final / ARTIFACT_NAMES[0]
+        outside = self.root / "outside-artifact"
+        outside.write_bytes(b"bugzilla tar bytes")
+        outside.chmod(0o600)
+
+        def symlink_root() -> None:
+            target = self.root / "real-final"
+            self.final.rename(target)
+            self.final.symlink_to(target, target_is_directory=True)
+
+        def symlink_artifact() -> None:
+            artifact.unlink()
+            artifact.symlink_to(outside)
+
+        def hard_link_artifact() -> None:
+            artifact.unlink()
+            os.link(outside, artifact)
+
+        cases = (
+            ("root mode", lambda: self.final.chmod(0o755), nullcontext()),
+            ("root symlink", symlink_root, nullcontext()),
+            ("artifact symlink", symlink_artifact, nullcontext()),
+            ("artifact hard link", hard_link_artifact, nullcontext()),
+            (
+                "artifact mount",
+                lambda: None,
+                mock.patch.object(
+                    Path,
+                    "is_mount",
+                    autospec=True,
+                    side_effect=lambda path: path == artifact,
+                ),
+            ),
+            (
+                "root mount",
+                lambda: None,
+                mock.patch.object(
+                    Path,
+                    "is_mount",
+                    autospec=True,
+                    side_effect=lambda path: path == self.final,
+                ),
+            ),
+            (
+                "foreign root owner",
+                lambda: None,
+                mock.patch.object(
+                    checkpoint_module.os,
+                    "getuid",
+                    return_value=os.getuid() + 1,
+                ),
+            ),
+        )
+        for reason, mutate, patcher in cases:
+            with self.subTest(reason=reason):
+                self._write_bundle()
+                mutate()
+                with patcher, self.assertRaises(CheckpointError):
+                    validate_bundle(
+                        self.final,
+                        name="pristine",
+                        revision=REVISION,
+                        fingerprint=self.fingerprint,
+                    )
+
+    def test_bundle_rejects_foreign_artifact_owner(self) -> None:
+        artifact_name = ARTIFACT_NAMES[0]
+        original_stat = os.stat
+
+        def foreign_artifact(path, *args, **kwargs):
+            metadata = original_stat(path, *args, **kwargs)
+            if path != artifact_name or kwargs.get("dir_fd") is None:
+                return metadata
+            values = list(metadata)
+            values[4] = os.getuid() + 1
+            return os.stat_result(values)
+
+        with (
+            mock.patch.object(
+                checkpoint_module.os,
+                "stat",
+                side_effect=foreign_artifact,
+            ),
+            self.assertRaisesRegex(CheckpointError, "not owned by the invoking user"),
+        ):
+            validate_bundle(
+                self.final,
+                name="pristine",
+                revision=REVISION,
+                fingerprint=self.fingerprint,
+            )
+
     def test_bundle_rejects_size_checksum_revision_and_fingerprint_mismatch(self) -> None:
         wrong_size = copy.deepcopy(self.manifest)
         wrong_size["artifacts"][ARTIFACT_NAMES[0]]["size"] = 999  # type: ignore[index]
@@ -491,6 +585,7 @@ class HostPathTests(unittest.TestCase):
         for path in (self.root, self.store, self.runner_parent, self.runner):
             path.mkdir(mode=0o700)
         self.name = "pristine"
+        self.project = "bzr-live-path-tests"
 
     def _validate(
         self,
@@ -511,9 +606,30 @@ class HostPathTests(unittest.TestCase):
         return canonical_json(
             {
                 "checkpoint_name": self.name,
+                "checkout_root": str(self.root),
                 "final_path": str(paths.final),
+                "operation": "save",
+                "project": self.project,
                 "staging_format": 1,
             }
+        )
+
+    def _create_staging(self, paths) -> Path:
+        creation = create_staging(
+            paths,
+            self.name,
+            root=self.root,
+            project=self.project,
+        )
+        self.addCleanup(creation.close)
+        return creation.path
+
+    def _cleanup_staging(self, paths) -> None:
+        cleanup_staging(
+            paths,
+            self.name,
+            root=self.root,
+            project=self.project,
         )
 
     def test_directory_arguments_reject_ascii_controls(self) -> None:
@@ -653,6 +769,73 @@ class HostPathTests(unittest.TestCase):
         ):
             self._validate()
 
+    def test_linux_mount_ids_reject_same_device_bind_before_descendant_inspection(self) -> None:
+        mounted = self.runner / "mounted path"
+        mounted.mkdir(mode=0o700)
+        secret = mounted / "must-not-inspect"
+        secret.write_bytes(b"outside authority")
+        original_lstat = os.lstat
+        original_read_bytes = Path.read_bytes
+
+        def mountinfo_path(path: Path) -> bytes:
+            encoded = os.fsencode(path).replace(b"\\", b"\\134")
+            return (
+                encoded.replace(b" ", b"\\040")
+                .replace(b"\t", b"\\011")
+                .replace(b"\n", b"\\012")
+            )
+
+        mountinfo = (
+            b"1 0 0:1 / / rw - test root rw\n"
+            + b"2 1 0:1 /source "
+            + mountinfo_path(mounted)
+            + b" rw - test source rw\n"
+        )
+
+        def read_bytes(path: Path) -> bytes:
+            if path == Path("/proc/self/mountinfo"):
+                return mountinfo
+            return original_read_bytes(path)
+
+        def reject_descendant(path, *args, **kwargs):
+            if Path(path) == secret:
+                raise AssertionError("bind-mount descendant was inspected")
+            return original_lstat(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(checkpoint_module.sys, "platform", "linux"),
+            mock.patch.object(Path, "read_bytes", autospec=True, side_effect=read_bytes),
+            mock.patch.object(Path, "is_mount", autospec=True, return_value=False),
+            mock.patch.object(
+                checkpoint_module.os,
+                "lstat",
+                side_effect=reject_descendant,
+            ),
+            self.assertRaisesRegex(CheckpointError, "mount"),
+        ):
+            self._validate()
+
+        self.assertEqual(secret.read_bytes(), b"outside authority")
+
+    def test_linux_runner_validation_fails_closed_when_mountinfo_is_unreadable(self) -> None:
+        original_read_bytes = Path.read_bytes
+
+        def read_bytes(path: Path) -> bytes:
+            if path == Path("/proc/self/mountinfo"):
+                raise OSError("permission denied")
+            return original_read_bytes(path)
+
+        with (
+            mock.patch.object(checkpoint_module.sys, "platform", "linux"),
+            mock.patch.object(Path, "read_bytes", autospec=True, side_effect=read_bytes),
+            self.assertRaisesRegex(
+                CheckpointError,
+                "runner: cannot inspect Linux mount table.*permission denied",
+            ),
+        ):
+            self._validate()
+
+
     def test_runner_rejects_directories_without_owner_rwx(self) -> None:
         child = self.runner / "restricted"
         child.mkdir(mode=0o700)
@@ -699,7 +882,7 @@ class HostPathTests(unittest.TestCase):
                 marker_path.write_bytes(marker)
                 marker_path.chmod(0o600)
                 with self.assertRaisesRegex(CheckpointError, "inspect.*remove.*manually"):
-                    cleanup_staging(paths, self.name)
+                    self._cleanup_staging(paths)
                 marker_path.unlink()
                 paths.staging.rmdir()
 
@@ -718,7 +901,7 @@ class HostPathTests(unittest.TestCase):
         unknown.write_bytes(b"x")
         unknown.chmod(0o600)
         with self.assertRaises(CheckpointError):
-            cleanup_staging(paths, self.name)
+            self._cleanup_staging(paths)
         unknown.unlink()
         marker.unlink()
         paths.staging.rmdir()
@@ -727,7 +910,7 @@ class HostPathTests(unittest.TestCase):
         nested = paths.staging / "manifest.json"
         nested.mkdir(mode=0o700)
         with self.assertRaises(CheckpointError):
-            cleanup_staging(paths, self.name)
+            self._cleanup_staging(paths)
         nested.rmdir()
         marker.unlink()
         paths.staging.rmdir()
@@ -736,7 +919,7 @@ class HostPathTests(unittest.TestCase):
         linked = paths.staging / "manifest.json"
         linked.symlink_to(self.root)
         with self.assertRaises(CheckpointError):
-            cleanup_staging(paths, self.name)
+            self._cleanup_staging(paths)
         linked.unlink()
         marker.unlink()
         paths.staging.rmdir()
@@ -752,14 +935,14 @@ class HostPathTests(unittest.TestCase):
             autospec=True,
             side_effect=lambda path: path == mounted or original_is_mount(path),
         ), self.assertRaises(CheckpointError):
-            cleanup_staging(paths, self.name)
+            self._cleanup_staging(paths)
         mounted.unlink()
         marker.unlink()
         paths.staging.rmdir()
 
     def test_staging_cleanup_unlinks_valid_children_then_removes_directory(self) -> None:
         paths = self._validate()
-        created = create_staging(paths, self.name)
+        created = self._create_staging(paths)
         self.assertEqual(created, paths.staging)
         self.assertEqual(stat.S_IMODE(paths.staging.lstat().st_mode), 0o700)
         marker = paths.staging / ".checkpoint-staging.json"
@@ -770,8 +953,26 @@ class HostPathTests(unittest.TestCase):
             child.write_bytes(filename.encode())
             child.chmod(0o600)
 
-        cleanup_staging(paths, self.name)
+        self._cleanup_staging(paths)
         self.assertFalse(paths.staging.exists())
+
+    def test_staging_marker_refuses_cleanup_from_another_checkout(self) -> None:
+        paths = self._validate()
+        self._create_staging(paths)
+        artifact = paths.staging / ARTIFACT_NAMES[0]
+        artifact.write_bytes(b"active save")
+        artifact.chmod(0o600)
+
+        with self.assertRaisesRegex(CheckpointError, "inspect.*remove.*manually"):
+            cleanup_staging(
+                paths,
+                self.name,
+                root=self.base / "other checkout",
+                project=self.project,
+            )
+
+        self.assertEqual(artifact.read_bytes(), b"active save")
+        self._cleanup_staging(paths)
 
 
 class RunnerArchiveTests(unittest.TestCase):
@@ -1055,12 +1256,19 @@ class OrchestrationTests(unittest.TestCase):
     def _save_patches(self, recorder: ArgvRecorder, events: list[str] | None = None):
         observed = events if events is not None else []
 
-        def create_runner(source: Path, destination: Path) -> None:
+        def create_runner(
+            source: Path,
+            destination: Path,
+            _signal_state: SignalState | None = None,
+        ) -> None:
             observed.append("create runner archive")
             destination.write_bytes(b"runner tar")
             destination.chmod(0o600)
 
-        def validate_runner(source: Path):
+        def validate_runner(
+            source: Path,
+            _signal_state: SignalState | None = None,
+        ):
             observed.append("validate runner archive")
             return ()
 
@@ -1309,16 +1517,43 @@ class OrchestrationTests(unittest.TestCase):
         self.assertFalse(self.paths.staging.exists())
         self.assertIn(self._start, recorder.calls)
 
+    def test_save_create_staging_collision_never_mints_cleanup_authority(self) -> None:
+        recorder = ArgvRecorder()
+        real_create_staging = checkpoint_module.create_staging
+        raced_artifact = self.paths.staging / ARTIFACT_NAMES[0]
+
+        def create_collision(paths, name, *args, **kwargs):
+            paths.staging.mkdir(mode=0o700)
+            raced_artifact.write_bytes(b"other checkout active save")
+            raced_artifact.chmod(0o600)
+            return real_create_staging(paths, name, *args, **kwargs)
+
+        self.addCleanup(shutil.rmtree, self.paths.staging, ignore_errors=True)
+        with (
+            mock.patch.object(
+                checkpoint_module,
+                "create_staging",
+                side_effect=create_collision,
+            ),
+            self.assertRaisesRegex(CheckpointError, "not published.*staging creation"),
+        ):
+            self._run_save(recorder)
+
+        self.assertEqual(raced_artifact.read_bytes(), b"other checkout active save")
+        self.assertFalse((self.paths.staging / ".checkpoint-staging.json").exists())
+
     def test_restore_validates_every_input_before_down_or_delete(self) -> None:
         self._write_bundle()
         recorder = ArgvRecorder()
         validated: list[str] = []
-        real_validate_bundle = checkpoint_module.validate_bundle
-        real_validate_runner = checkpoint_module.validate_runner_archive
+        real_open_bundle = checkpoint_module._open_validated_bundle
+        real_validate_runner = checkpoint_module._validate_runner_archive_file
 
+        @contextmanager
         def validate_bundle_first(*args, **kwargs):
             validated.append("manifest")
-            return real_validate_bundle(*args, **kwargs)
+            with real_open_bundle(*args, **kwargs) as bundle:
+                yield bundle
 
         def validate_runner_first(*args, **kwargs):
             validated.append("runner tar")
@@ -1336,16 +1571,68 @@ class OrchestrationTests(unittest.TestCase):
         with (
             mock.patch.object(
                 checkpoint_module,
-                "validate_bundle",
+                "_open_validated_bundle",
                 side_effect=validate_bundle_first,
             ),
             mock.patch.object(
                 checkpoint_module,
-                "validate_runner_archive",
+                "_validate_runner_archive_file",
                 side_effect=validate_runner_first,
             ),
         ):
             self._run_restore(recorder)
+
+    def test_restore_rejects_artifact_identity_change_after_preflight_before_deletion(self) -> None:
+        self._write_bundle()
+        recorder = ArgvRecorder()
+        artifact = self.paths.final / "mariadb-volume.tar"
+        original = self.base / "validated-mariadb-volume.tar"
+        volume_validations = 0
+
+        def replace_after_preflight(_number, argv, _state):
+            nonlocal volume_validations
+            if argv != self._tar_list():
+                return
+            volume_validations += 1
+            if volume_validations == 2:
+                artifact.rename(original)
+                artifact.write_bytes(b"replacement")
+                artifact.chmod(0o600)
+
+        recorder.on_call = replace_after_preflight
+        with self.assertRaisesRegex(CheckpointError, "changed during validation"):
+            self._run_restore(recorder)
+
+        self.assertFalse(
+            any(argv == self.compose + ("down", "--remove-orphans") for argv in recorder.calls)
+        )
+        self.assertTrue((self.runner / "state").exists())
+
+    def test_restore_uses_validated_descriptor_after_artifact_path_replacement(self) -> None:
+        self._write_bundle()
+        recorder = ArgvRecorder()
+        artifact = self.paths.final / "mariadb-volume.tar"
+        validated_bytes = artifact.read_bytes()
+        replacement = b"unchecked replacement"
+        replaced = False
+
+        def replace_after_final_validation(_number, argv, _state):
+            nonlocal replaced
+            if argv[:3] == ("docker", "volume", "rm") and not replaced:
+                artifact.rename(self.base / "validated-mariadb-volume.tar")
+                artifact.write_bytes(replacement)
+                artifact.chmod(0o600)
+                replaced = True
+
+        recorder.on_call = replace_after_final_validation
+        self._run_restore(recorder)
+
+        extraction = self._extract(f"{self.project}_mariadb-data")
+        extracted_bytes = recorder.stdin_bytes[recorder.calls.index(extraction)]
+        self.assertTrue(replaced)
+        self.assertEqual(extracted_bytes, validated_bytes)
+        self.assertNotEqual(extracted_bytes, replacement)
+
 
     def test_restore_uses_down_remove_orphans_not_stop_or_volumes(self) -> None:
         self._write_bundle()
@@ -1445,7 +1732,7 @@ class OrchestrationTests(unittest.TestCase):
                 elif target == "runner extraction":
                     patcher = mock.patch.object(
                         checkpoint_module,
-                        "extract_runner_archive",
+                        "_extract_runner_archive_file",
                         side_effect=CheckpointError("injected runner extraction failure"),
                     )
                 stderr = io.StringIO()
@@ -1637,6 +1924,59 @@ class SignalTests(unittest.TestCase):
         for command in self._health:
             self.assertIn(command, recorder.calls)
 
+    def test_signal_during_runner_archive_creation_stops_at_bounded_read_and_recovers(self) -> None:
+        payload = b"x" * (2 * 1024 * 1024)
+        (self.runner / "state").write_bytes(payload)
+        recorder = ArgvRecorder()
+        real_open = checkpoint_module._open_verified_regular
+        bytes_read = 0
+        signal_state = self.signal_state
+
+        class InterruptingContent:
+            def __init__(self, raw):
+                self.raw = raw
+                self.interrupted = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.raw.close()
+
+            def read(self, size=-1):
+                nonlocal bytes_read
+                chunk = self.raw.read(size)
+                bytes_read += len(chunk)
+                if chunk and not self.interrupted:
+                    self.interrupted = True
+                    with mock.patch.object(checkpoint_module.signal, "signal"):
+                        checkpoint_module._handle_signal(
+                            signal.SIGTERM,
+                            None,
+                            signal_state,
+                        )
+                return chunk
+
+        def open_interrupting(path, expected):
+            return InterruptingContent(real_open(path, expected))
+
+        with (
+            mock.patch.object(checkpoint_module, "run_child", side_effect=recorder),
+            mock.patch.object(
+                checkpoint_module,
+                "_open_verified_regular",
+                side_effect=open_interrupting,
+            ),
+            self.assertRaises(checkpoint_module._HandledSignal),
+        ):
+            save_checkpoint(self.context, self.signal_state)
+
+        self.assertLess(bytes_read, len(payload))
+        self.assertFalse(self.paths.staging.exists())
+        self.assertFalse(self.paths.final.exists())
+        self.assertIn(self._start, recorder.calls)
+        self.assertNotIn(self._tar_list(), recorder.calls)
+
     def test_pre_delete_restore_signal_restarts_unchanged_fixture(self) -> None:
         self._write_bundle()
         recorder = ArgvRecorder()
@@ -1773,37 +2113,66 @@ class SignalTests(unittest.TestCase):
                         1,
                     )
 
-    def test_runner_extraction_signal_has_no_child_and_launches_no_later_phase(self) -> None:
+    def test_runner_extraction_signal_stops_at_bounded_read_and_reports_retry(self) -> None:
+        payload = b"x" * (2 * 1024 * 1024)
+        (self.runner / "state").write_bytes(payload)
         self._write_bundle()
         recorder = ArgvRecorder()
-        events: list[str] = []
-        real_extract = checkpoint_module.extract_runner_archive
+        signal_state = self.signal_state
+        real_extractfile = tarfile.TarFile.extractfile
+        bytes_read = 0
 
-        def interrupted_extract(source: Path, destination: Path) -> None:
-            real_extract(source, destination)
-            events.append("runner extraction completed")
-            with mock.patch.object(checkpoint_module.signal, "signal"):
-                checkpoint_module._handle_signal(
-                    signal.SIGTERM,
-                    None,
-                    self.signal_state,
-                )
+        class InterruptingContent:
+            def __init__(self, raw):
+                self.raw = raw
+                self.interrupted = False
+
+            def close(self):
+                self.raw.close()
+
+            def read(self, size=-1):
+                nonlocal bytes_read
+                chunk = self.raw.read(size)
+                bytes_read += len(chunk)
+                if chunk and not self.interrupted:
+                    self.interrupted = True
+                    with mock.patch.object(checkpoint_module.signal, "signal"):
+                        checkpoint_module._handle_signal(
+                            signal.SIGTERM,
+                            None,
+                            signal_state,
+                        )
+                return chunk
+
+        def extractfile(archive, member):
+            content = real_extractfile(archive, member)
+            if (
+                content is not None
+                and member.isreg()
+                and self.runner.is_dir()
+                and not any(self.runner.iterdir())
+            ):
+                return InterruptingContent(content)
+            return content
 
         stderr = io.StringIO()
         with (
             mock.patch.object(
-                checkpoint_module,
-                "extract_runner_archive",
-                side_effect=interrupted_extract,
+                tarfile.TarFile,
+                "extractfile",
+                autospec=True,
+                side_effect=extractfile,
             ),
             redirect_stderr(stderr),
             self.assertRaises(checkpoint_module._HandledSignal),
         ):
             self._run_restore(recorder)
-        self.assertEqual(events, ["runner extraction completed"])
+
+        restored = self.runner / "state"
+        self.assertLess(bytes_read, len(payload))
+        if restored.exists():
+            self.assertLess(restored.stat().st_size, len(payload))
         self.assertNotIn(self._start, recorder.calls)
-        self.assertNotIn("forward", events)
-        self.assertNotIn("reap", events)
         self.assertIn(
             render_retry_command(self.name, self.store, self.runner),
             stderr.getvalue(),

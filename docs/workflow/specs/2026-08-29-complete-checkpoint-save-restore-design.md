@@ -68,9 +68,12 @@ contract.
    invoking user. Every existing descendant must be owned by the invoking user; directories must
    have owner rwx and may not be links, mount points, or on another filesystem.
 8. The manifest and every artifact are fully validated before restore deletes volumes or runner
-   state. Validation covers schema, exact artifact names, byte sizes, SHA-256 checksums, revision,
-   the fingerprint that binds `.env`, canonical runner target, and stack inputs, and successful
-   end-to-end parsing of all three tar streams.
+   state. The owner-owned mode-0700 final root and owner-owned mode-0600 single-link regular files
+   must stay on one filesystem, outside mount points, and retain their opened identities.
+   Validation covers schema, exact artifact names, byte sizes, SHA-256 checksums, revision, the
+   fingerprint that binds `.env`, canonical runner target, and stack inputs, and successful
+   end-to-end parsing of all three tar streams. Restore retains and rewinds those exact opened
+   objects through destructive replacement and extraction rather than reopening pathnames.
 9. Runner-state archive members use normalized relative POSIX paths. Restore rejects absolute
    paths, empty or parent components, backslashes, duplicate members, links, devices, FIFOs,
    sockets, sparse files, unknown types, and directory modes missing owner rwx before deleting
@@ -181,9 +184,10 @@ compatibility obligation because they have never merged or shipped.
 3. If `.<NAME>.staging` exists, remove it only when it is an owner-owned mode-0700 directory on the
    store filesystem, is not a link or mount point, has only owner-owned mode-0600 regular direct
    children from the staging marker and final bundle filename set, and contains canonical
-   mode-0600 `.checkpoint-staging.json` whose version, checkpoint name, and canonical final path
-   match this invocation. Unlink validated direct children, then remove the directory. Otherwise
-   fail with the exact path and an instruction to inspect and remove it manually.
+   mode-0600 `.checkpoint-staging.json` whose version, checkpoint name, canonical final path,
+   checkout root, project, and save operation match this checkout and invocation. Unlink validated
+   direct children, then remove the directory. Otherwise fail with the exact path and an
+   instruction to inspect and remove it manually.
 4. Compute the stack fingerprint including the canonical runner-state path. Report the caller's
    continuous runner-stopped responsibility through successful health, including any post-return
    manual restart interval; checkpoint cannot verify it.
@@ -194,7 +198,9 @@ compatibility obligation because they have never merged or shipped.
    to their mode-0600 uncompressed tar files through the isolated helper based on the pinned
    MariaDB image. Create the runner-state tar with host-side safe traversal. Reject runner
    directories missing owner rwx, links, mount points, filesystem crossings, and foreign-owned
-   descendants. Parse all three complete tar streams and validate runner topology before
+   descendants. On Linux, mount identities from the decoded process mount table must reject
+   same-filesystem bind mounts before descendant inspection; inability to inspect that source is
+   an actionable failure. Parse all three complete tar streams and validate runner topology before
    continuing.
 7. Compute sizes/checksums, write mode-0600 canonical `manifest.json`, remove the staging marker,
    then re-read and validate the exact final bundle file set through the same validator restore
@@ -208,10 +214,12 @@ compatibility obligation because they have never merged or shipped.
    the checkpoint.
 
 On an ordinary pre-publication error, remove staging only through the same validated direct-child
-cleanup, restart the current local stack without building or pulling images, and report both the
-capture phase and restart result. Process or host termination may leave staging, a stopped stack,
-and a stale lock. The next save applies only the marker-bound cleanup above. If restart fails, the
-operator keeps runners stopped, restores the expected local images if necessary, clears only a
+cleanup and only when this invocation retained proof that it created the exact directory. Never
+create marker authority after a staging-creation collision. Restart the current local stack without
+building or pulling images, and report both the capture phase and restart result. Process or host
+termination may leave staging, a stopped stack, and a stale lock. The next save applies only the
+checkout-bound marker cleanup above. If restart fails, the operator keeps runners stopped, restores
+the expected local images if necessary, clears only a
 verified-stale lock through the existing manual procedure, and runs `scripts/lifecycle up`. No
 recovery command or durable recovery record is added.
 
@@ -229,17 +237,20 @@ recovery command or durable recovery record is added.
    parent satisfies those checks.
 4. While retaining the lock, validate the checkpoint name against the manifest and directory,
    canonical runner-state path, stack fingerprint, exact final file set, manifest schema,
-   regular-file sizes, checksums, and all three complete tar streams. Apply the runner member,
-   topology, ownership, directory-mode, mount, and filesystem-boundary checks. Finish every check
+   root/file ownership and private modes, regular single-link file identity, sizes, checksums, and
+   all three complete tar streams. Apply the runner member, topology, ownership, directory-mode,
+   mount, and filesystem-boundary checks. Keep the verified root and file descriptors open, repeat
+   their authority and identity checks immediately before destructive work, and finish every check
    before stack shutdown or destructive work.
 5. Run lifecycle-equivalent `docker compose down --remove-orphans` semantics without `--volumes`
    and without relying on current health, while retaining the shared lock.
 6. Remove and recreate the fixed canonical MariaDB and Bugzilla Docker volumes. Delete the already
    validated runner tree bottom-up without changing permissions, then create the exact
    fingerprinted leaf mode 0700 beneath its validated parent.
-7. Stream each volume archive into its fresh destination through the isolated helper based on the
-   pinned MariaDB image. Extract runner state without following links: create every directory mode
-   0700 and preserve archived owner permission bits only for regular files.
+7. Rewind and stream the same validated volume-archive descriptors into their fresh destinations
+   through the isolated helper based on the pinned MariaDB image. Rewind and extract runner state
+   from its validated descriptor without following links: create every directory mode 0700 and
+   preserve archived owner permission bits only for regular files.
 8. Start the current local stack with Compose `up --detach --no-build --pull never` semantics and
    run the existing bounded health check. Release the lock and report the restored checkpoint name
    and revision.
@@ -320,13 +331,16 @@ restore failure, and failures of Docker or storage after reported success are no
 Focused tests must prove:
 
 - closed name grammar, manifest-name/directory/CLI equality, and immutable no-overwrite behavior;
-- owner-only staging/final files, store/runner non-overlap, canonical runner-path fingerprinting,
-  rejection of dangerous roots and control characters, and safe absent-leaf recreation;
-- stale staging cleanup accepts only the matching canonical provenance marker and allowed regular
-  direct children, while unrelated, unmarked, linked, mounted, cross-filesystem, or unknown content
-  fails with manual-inspection guidance;
+- owner-only staging/final roots and files, store/runner non-overlap, canonical runner-path
+  fingerprinting, rejection of dangerous roots and control characters, and safe absent-leaf
+  recreation;
+- stale staging cleanup accepts only the matching checkout/project/operation provenance marker and
+  allowed regular direct children, while create collisions, cross-checkout markers, unrelated,
+  unmarked, linked, mounted, cross-filesystem, or unknown content fail without gaining deletion
+  authority and with manual-inspection guidance;
 - canonical manifest encoding, revision/fingerprint mismatch, exact file set, size mismatch,
-  checksum corruption, and malformed or truncated Docker-volume tar streams;
+  checksum corruption, root/file owner-mode-link-mount violations, opened-identity replacement,
+  and malformed or truncated Docker-volume tar streams;
 - a recreated `.env` at the same Git revision fails before stack shutdown or any target deletion;
 - runner archive rejection for traversal, duplicates, links, sparse files, special types,
   restrictive directory modes, mounted descendants, filesystem crossings, foreign ownership, and
@@ -346,8 +360,9 @@ Focused tests must prove:
   retry command;
 - retry rendering round-trips canonical paths containing spaces, single quotes, and leading
   hyphens through POSIX shell parsing;
-- injected first signals during shutdown, pre-delete restore, each extraction domain, startup, and
-  health prove the active child is reaped before cleanup/restart or retry reporting;
+- injected first signals during shutdown, pre-delete restore, bounded host runner archive
+  creation/extraction, each container extraction domain, startup, and health prove that normal
+  archive work stops and any active child is reaped before cleanup/restart or retry reporting;
 - a second restore begins from fresh targets rather than partial prior output;
 - Docker/helper commands use fixed argv, disabled networking, minimal mounts, and no shell;
 - checkpoint and existing lifecycle commands contend on the same fixed lock when launched from

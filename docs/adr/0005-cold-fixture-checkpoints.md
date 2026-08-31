@@ -103,9 +103,15 @@ directory owned by the invoking user and owner-only before the exact leaf is rec
 An existing leaf and every descendant must be non-symlink and owned by the invoking user. Every
 directory must already have owner read, write, and execute permissions; restrictive directory
 modes are rejected before save publication and before destructive restore. Validation also rejects
-mount points and descendants on another filesystem. Extraction creates every directory mode 0700
-and preserves owner permission bits only for regular files, so a partial restore always remains
-traversable and removable on retry.
+mount points and descendants on another filesystem. On Linux, decoded process mount identities
+reject same-filesystem bind mounts before traversal even when device IDs match; unreadable mount
+information fails closed. Extraction creates every directory mode 0700 and preserves owner
+permission bits only for regular files, so a partial restore always remains traversable and
+removable on retry.
+The validated bundle root and single-link regular artifacts remain open through restore. Their
+owner, private mode, mount status, filesystem, and opened identity are rechecked immediately before
+deletion, and the exact validated descriptors are rewound for extraction rather than reopening
+artifact pathnames.
 The design trusts the invoking account, reviewed checkout, Docker daemon, existing stack images,
 and locally produced bundle. It does not add HMAC keys, encryption, multi-user isolation, or a
 hostile-bundle promise.
