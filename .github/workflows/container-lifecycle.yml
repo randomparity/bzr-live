@@ -10,8 +10,14 @@ on:
       - README.md
       - compose.yaml
       - containers/**
+      - docs/adr/0005-cold-fixture-checkpoints.md
+      - docs/workflow/specs/2026-08-29-complete-checkpoint-save-restore-design.md
       - scripts/lifecycle
+      - scripts/checkpoint
+      - src/bzr_live/checkpoint.py
       - tests/lifecycle_test.sh
+      - tests/checkpoint_smoke.sh
+      - tests/test_checkpoint.py
   push:
     branches: [main]
     paths:
@@ -22,8 +28,14 @@ on:
       - README.md
       - compose.yaml
       - containers/**
+      - docs/adr/0005-cold-fixture-checkpoints.md
+      - docs/workflow/specs/2026-08-29-complete-checkpoint-save-restore-design.md
       - scripts/lifecycle
+      - scripts/checkpoint
+      - src/bzr_live/checkpoint.py
       - tests/lifecycle_test.sh
+      - tests/checkpoint_smoke.sh
+      - tests/test_checkpoint.py
 
 permissions:
   contents: read
@@ -35,6 +47,22 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify checked out commit
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.7"
+          python-version: "3.11"
+          enable-cache: false
+          checksum: "788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21"
 
       - name: Verify native architecture
         run: test "$(uname -m)" = x86_64
@@ -44,13 +72,8 @@ jobs:
           make test
           make check
 
-      - name: Exercise live lifecycle
-        run: |
-          make up
-          make doctor
-          make down
-          make up
-          CONFIRM_RESET=1 make reset
+      - name: Exercise checkpoint round trip
+        run: make checkpoint-smoke
 
       - name: Clean project resources
         if: always()
