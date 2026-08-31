@@ -38,6 +38,10 @@ make_stubs() {
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"$STUB_LOG"
+if [[ -n ${STUB_HOLD_READY_FILE:-} && " $* " == *" --project-name "* ]]; then
+  printf 'ready\n' >"$STUB_HOLD_READY_FILE"
+  while [[ ! -e $STUB_HOLD_RELEASE_FILE ]]; do sleep 0.01; done
+fi
 if [[ ${1:-} == compose && ${2:-} == version ]]; then
   printf '2.40.0\n'
   exit 0
@@ -201,7 +205,7 @@ assert_contains "$STUB_LOG" 'down --volumes --remove-orphans --rmi local'
 root=$(new_root lock)
 canonical_root=$(cd "$root" && pwd -P)
 project_hash=$(printf '%s' "$canonical_root" | "$REAL_OPENSSL" dgst -sha256 -r | sed 's/ .*//')
-lock_path="${TMPDIR:-/tmp}/bzr-live-${project_hash:0:12}.lifecycle.lock"
+lock_path="/tmp/bzr-live-${project_hash:0:12}.lifecycle.lock"
 mkdir "$lock_path"
 if run_lifecycle "$root" init "$TEST_TMP/lock.out"; then
   fail 'init reclaimed an ownerless lock'
@@ -209,6 +213,138 @@ fi
 assert_contains "$TEST_TMP/lock.out" "$lock_path"
 assert_contains "$TEST_TMP/lock.out" 'verify no lifecycle process is running'
 rmdir "$lock_path"
+
+root=$(new_root lock-identity)
+canonical_root=$(cd "$root" && pwd -P)
+project_hash=$(printf '%s' "$canonical_root" | "$REAL_OPENSSL" dgst -sha256 -r | sed 's/ .*//')
+fixed_lock_path="/tmp/bzr-live-${project_hash:0:12}.lifecycle.lock"
+identity_cwd_a="$TEST_TMP/identity-cwd-a"
+identity_cwd_b="$TEST_TMP/identity-cwd-b"
+identity_tmp_a="$TEST_TMP/identity-tmp-a"
+identity_tmp_b="$TEST_TMP/identity-tmp-b"
+mkdir -p "$fixed_lock_path" "$identity_cwd_a" "$identity_cwd_b" "$identity_tmp_a" "$identity_tmp_b"
+for identity_case in a b; do
+  identity_cwd_var="identity_cwd_$identity_case"
+  identity_tmp_var="identity_tmp_$identity_case"
+  identity_out="$TEST_TMP/lock-identity-$identity_case.out"
+  if (
+    cd "${!identity_cwd_var}"
+    run_lifecycle "$root" init "$identity_out" TMPDIR="${!identity_tmp_var}"
+  ); then
+    rmdir "$fixed_lock_path"
+    fail "lifecycle ignored the fixed lock for identity case $identity_case"
+  fi
+done
+rmdir "$fixed_lock_path"
+for identity_case in a b; do
+  identity_out="$TEST_TMP/lock-identity-$identity_case.out"
+  assert_contains "$identity_out" "lifecycle lock is held"
+  assert_contains "$identity_out" "at $fixed_lock_path"
+done
+
+root=$(new_root checkpoint-holds-lock)
+canonical_root=$(cd "$root" && pwd -P)
+project_hash=$(printf '%s' "$canonical_root" | "$REAL_OPENSSL" dgst -sha256 -r | sed 's/ .*//')
+fixed_lock_path="/tmp/bzr-live-${project_hash:0:12}.lifecycle.lock"
+different_tmp="$TEST_TMP/checkpoint-contention-tmp"
+checkpoint_ready_file="$TEST_TMP/checkpoint-ready"
+checkpoint_release_file="$TEST_TMP/checkpoint-release"
+checkpoint_git_bin="$TEST_TMP/checkpoint-git-bin"
+checkpoint_store="$TEST_TMP/checkpoint-store"
+checkpoint_runner="$TEST_TMP/checkpoint-runner"
+mkdir "$different_tmp" "$checkpoint_git_bin" "$checkpoint_store" "$checkpoint_runner"
+chmod 700 "$checkpoint_store" "$checkpoint_runner"
+checkpoint_store=$(cd "$checkpoint_store" && pwd -P)
+checkpoint_runner=$(cd "$checkpoint_runner" && pwd -P)
+cat >"$checkpoint_git_bin/git" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ready\n' >"$CHECKPOINT_READY_FILE"
+while [[ ! -e $CHECKPOINT_RELEASE_FILE ]]; do sleep 0.01; done
+printf 'forced checkpoint holder failure\n' >&2
+exit 71
+STUB
+chmod +x "$checkpoint_git_bin/git"
+env \
+  PATH="$checkpoint_git_bin:$STUB_BIN:$PATH" \
+  BZ_LIVE_ROOT="$root" \
+  CHECKPOINT_READY_FILE="$checkpoint_ready_file" \
+  CHECKPOINT_RELEASE_FILE="$checkpoint_release_file" \
+  "$REPO_ROOT/scripts/checkpoint" save lock-test \
+    --store "$checkpoint_store" \
+    --runner-state "$checkpoint_runner" \
+    >"$TEST_TMP/checkpoint-holder.out" 2>&1 &
+checkpoint_holder_pid=$!
+for ((attempt = 0; attempt < 1000; attempt++)); do
+  [[ -e $checkpoint_ready_file ]] && break
+  kill -0 "$checkpoint_holder_pid" 2>/dev/null || break
+  sleep 0.01
+done
+if [[ ! -e $checkpoint_ready_file ]]; then
+  cat "$TEST_TMP/checkpoint-holder.out" >&2
+  fail 'checkpoint exited before holding the lifecycle lock'
+fi
+if run_lifecycle \
+  "$root" init "$TEST_TMP/checkpoint-blocks-lifecycle.out" TMPDIR="$different_tmp"; then
+  checkpoint_blocks_lifecycle_status=0
+else
+  checkpoint_blocks_lifecycle_status=$?
+fi
+: >"$checkpoint_release_file"
+if wait "$checkpoint_holder_pid"; then
+  fail 'checkpoint holder unexpectedly completed against the stub checkout'
+fi
+[[ $checkpoint_blocks_lifecycle_status != 0 ]] ||
+  fail 'lifecycle did not contend with the checkpoint lock'
+assert_contains "$TEST_TMP/checkpoint-blocks-lifecycle.out" "at $fixed_lock_path"
+assert_contains "$TEST_TMP/checkpoint-blocks-lifecycle.out" \
+  "verify no lifecycle process is running, then remove $fixed_lock_path manually"
+
+root=$(new_root lifecycle-holds-lock)
+canonical_root=$(cd "$root" && pwd -P)
+project_hash=$(printf '%s' "$canonical_root" | "$REAL_OPENSSL" dgst -sha256 -r | sed 's/ .*//')
+fixed_lock_path="/tmp/bzr-live-${project_hash:0:12}.lifecycle.lock"
+different_tmp="$TEST_TMP/lifecycle-contention-tmp"
+lifecycle_ready_file="$TEST_TMP/lifecycle-ready"
+lifecycle_release_file="$TEST_TMP/lifecycle-release"
+mkdir "$different_tmp"
+run_lifecycle \
+  "$root" down "$TEST_TMP/lifecycle-holder.out" \
+  TMPDIR="$different_tmp" \
+  STUB_HOLD_READY_FILE="$lifecycle_ready_file" \
+  STUB_HOLD_RELEASE_FILE="$lifecycle_release_file" &
+lifecycle_holder_pid=$!
+for ((attempt = 0; attempt < 1000; attempt++)); do
+  [[ -e $lifecycle_ready_file ]] && break
+  kill -0 "$lifecycle_holder_pid" 2>/dev/null || break
+  sleep 0.01
+done
+if [[ ! -e $lifecycle_ready_file ]]; then
+  kill "$lifecycle_holder_pid" 2>/dev/null || true
+  wait "$lifecycle_holder_pid" 2>/dev/null || true
+  cat "$TEST_TMP/lifecycle-holder.out" >&2
+  fail 'lifecycle exited before holding its lock'
+fi
+if env \
+  PATH="$STUB_BIN:$PATH" \
+  BZ_LIVE_ROOT="$root" \
+  "$REPO_ROOT/scripts/checkpoint" save lock-test \
+    --store "$TEST_TMP/store" \
+    --runner-state "$TEST_TMP/runner" \
+    >"$TEST_TMP/lifecycle-blocks-checkpoint.out" 2>&1; then
+  lifecycle_blocks_checkpoint_status=0
+else
+  lifecycle_blocks_checkpoint_status=$?
+fi
+: >"$lifecycle_release_file"
+wait "$lifecycle_holder_pid"
+[[ $lifecycle_blocks_checkpoint_status != 0 ]] ||
+  fail 'checkpoint did not contend with the lifecycle lock'
+assert_contains "$TEST_TMP/lifecycle-blocks-checkpoint.out" \
+  "save: lifecycle lock is held (live PID "
+assert_contains "$TEST_TMP/lifecycle-blocks-checkpoint.out" "at $fixed_lock_path"
+assert_contains "$TEST_TMP/lifecycle-blocks-checkpoint.out" \
+  "verify no lifecycle process is running, then remove $fixed_lock_path manually"
 
 root_a=$(new_root project-a)
 root_b=$(new_root project-b)

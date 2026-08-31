@@ -2010,7 +2010,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             prelock = _parse_prelock_context(argv)
         except SystemExit as error:
-            return int(error.code)
+            return os.EX_USAGE if error.code == 2 else int(error.code)
         _check_signal(signal_state)
         with lifecycle_lock(prelock.lock_dir, prelock.operation):
             _check_signal(signal_state)

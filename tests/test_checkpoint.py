@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shlex
+import subprocess
 import signal
 import stat
 import shutil
@@ -14,7 +15,7 @@ import tarfile
 import tempfile
 import time
 import unittest
-from contextlib import contextmanager, nullcontext, redirect_stderr
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -52,6 +53,86 @@ from bzr_live.checkpoint import (
 VALID_NAMES = ("a", "pristine", "named-state_2", "z" * 64)
 INVALID_NAMES = ("", "A", "-bad", "bad.name", "z" * 65)
 REVISION = "a" * 40
+
+CHECKPOINT_USAGE = (
+    "usage: scripts/checkpoint [-h] --store STORE --runner-state RUNNER_STATE\n"
+    "                          {save,restore} name\n"
+)
+CHECKPOINT_INVALID_USAGE = (
+    CHECKPOINT_USAGE
+    + "scripts/checkpoint: error: the following arguments are required: "
+    "operation, name, --store, --runner-state\n"
+)
+
+
+class CommandLineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.base = Path(self._temporary.name)
+        self.docker_marker = self.base / "docker-called"
+        stub_bin = self.base / "bin"
+        stub_bin.mkdir()
+        docker = stub_bin / "docker"
+        docker.write_text(
+            f"#!/bin/sh\ntouch {shlex.quote(str(self.docker_marker))}\n",
+            encoding="utf-8",
+        )
+        docker.chmod(0o700)
+        self.environment = os.environ.copy()
+        self.environment["PATH"] = f"{stub_bin}{os.pathsep}{self.environment['PATH']}"
+        self.script = Path(__file__).parents[1] / "scripts" / "checkpoint"
+
+    def _run_script(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(self.script), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.environment,
+        )
+
+    def test_main_invalid_usage_returns_ex_usage_without_docker(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, self.environment, clear=True),
+            redirect_stderr(stderr),
+        ):
+            status = main([])
+
+        self.assertEqual(status, os.EX_USAGE)
+        self.assertEqual(stderr.getvalue(), CHECKPOINT_INVALID_USAGE)
+        self.assertFalse(self.docker_marker.exists())
+
+    def test_main_help_returns_success(self) -> None:
+        stdout = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, self.environment, clear=True),
+            redirect_stdout(stdout),
+        ):
+            status = main(["--help"])
+
+        self.assertEqual(status, 0)
+        self.assertTrue(stdout.getvalue().startswith(CHECKPOINT_USAGE))
+        self.assertFalse(self.docker_marker.exists())
+
+    def test_executable_invalid_usage_returns_ex_usage_without_docker(self) -> None:
+        self.assertTrue(os.access(self.script, os.X_OK))
+
+        result = self._run_script()
+
+        self.assertEqual(result.returncode, os.EX_USAGE)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, CHECKPOINT_INVALID_USAGE)
+        self.assertFalse(self.docker_marker.exists())
+
+    def test_executable_help_returns_success_without_docker(self) -> None:
+        result = self._run_script("--help")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.startswith(CHECKPOINT_USAGE))
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(self.docker_marker.exists())
 
 
 class BundleContractTests(unittest.TestCase):
