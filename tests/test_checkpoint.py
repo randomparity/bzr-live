@@ -1924,6 +1924,120 @@ class SignalTests(unittest.TestCase):
         for command in self._health:
             self.assertIn(command, recorder.calls)
 
+    def test_signal_during_runner_tree_walk_stops_before_descendant_inspection(self) -> None:
+        nested = self.runner / "nested"
+        nested.mkdir()
+        (nested / "state").write_bytes(b"nested state")
+        destination = self.base / "runner.tar"
+        state = SignalState()
+        real_children = checkpoint_module._directory_children
+        real_inspect = checkpoint_module._inspect_path
+
+        def interrupting_children(path, phase):
+            children = real_children(path, phase)
+            if path == self.runner:
+                with mock.patch.object(checkpoint_module.signal, "signal"):
+                    checkpoint_module._handle_signal(signal.SIGTERM, None, state)
+            return children
+
+        def guarded_inspect(path, phase):
+            if state.requested is not None and path != self.runner:
+                raise AssertionError("runner descendant inspected after signal")
+            return real_inspect(path, phase)
+
+        with (
+            mock.patch.object(
+                checkpoint_module,
+                "_directory_children",
+                side_effect=interrupting_children,
+            ),
+            mock.patch.object(
+                checkpoint_module,
+                "_inspect_path",
+                side_effect=guarded_inspect,
+            ),
+            self.assertRaises(checkpoint_module._HandledSignal),
+        ):
+            create_runner_archive(self.runner, destination, state)
+
+        self.assertFalse(destination.exists())
+
+    def test_signal_during_runner_archive_headers_stops_before_next_header(self) -> None:
+        archive_path = self.base / "headers.tar"
+        with tarfile.open(archive_path, "w") as archive:
+            for name in ("first", "second"):
+                archive.addfile(tarfile.TarInfo(name))
+
+        state = SignalState()
+        visited: list[str] = []
+        real_validate = checkpoint_module._validated_member_parts
+
+        def interrupting_validate(member):
+            visited.append(member.name)
+            if len(visited) == 1:
+                with mock.patch.object(checkpoint_module.signal, "signal"):
+                    checkpoint_module._handle_signal(signal.SIGTERM, None, state)
+            return real_validate(member)
+
+        with (
+            mock.patch.object(
+                checkpoint_module,
+                "_validated_member_parts",
+                side_effect=interrupting_validate,
+            ),
+            self.assertRaises(checkpoint_module._HandledSignal),
+        ):
+            validate_runner_archive(archive_path, state)
+
+        self.assertEqual(visited, ["first"])
+
+    def test_signal_during_manifest_checksum_stops_before_next_read(self) -> None:
+        self.paths.staging.mkdir(mode=0o700)
+        for name in ARTIFACT_NAMES:
+            artifact = self.paths.staging / name
+            artifact.write_bytes(b"x" * (2 * 1024 * 1024))
+            artifact.chmod(0o600)
+
+        state = SignalState()
+        real_open = checkpoint_module._open_verified_regular
+
+        class InterruptingContent:
+            def __init__(self, raw):
+                self.raw = raw
+                self.interrupted = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.raw.close()
+
+            def seek(self, offset, whence=0):
+                return self.raw.seek(offset, whence)
+
+            def read(self, size=-1):
+                if state.requested is not None:
+                    raise AssertionError("checksum read continued after signal")
+                chunk = self.raw.read(size)
+                if chunk and not self.interrupted:
+                    self.interrupted = True
+                    with mock.patch.object(checkpoint_module.signal, "signal"):
+                        checkpoint_module._handle_signal(signal.SIGTERM, None, state)
+                return chunk
+
+        def open_interrupting(path, expected):
+            return InterruptingContent(real_open(path, expected))
+
+        with (
+            mock.patch.object(
+                checkpoint_module,
+                "_open_verified_regular",
+                side_effect=open_interrupting,
+            ),
+            self.assertRaises(checkpoint_module._HandledSignal),
+        ):
+            checkpoint_module._manifest_for(self.context, state)
+
     def test_signal_during_runner_archive_creation_stops_at_bounded_read_and_recovers(self) -> None:
         payload = b"x" * (2 * 1024 * 1024)
         (self.runner / "state").write_bytes(payload)

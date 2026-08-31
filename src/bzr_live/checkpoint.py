@@ -261,7 +261,10 @@ def _directory_children(path: Path, phase: str) -> tuple[Path, ...]:
         raise CheckpointError(f"{phase}: cannot list {path}: {error}") from error
 
 
-def _validate_runner_tree(source: Path) -> tuple[tuple[Path, os.stat_result], ...]:
+def _validate_runner_tree(
+    source: Path,
+    signal_state: SignalState | None = None,
+) -> tuple[tuple[Path, os.stat_result], ...]:
     mount_table = _mount_table("runner")
     root_metadata = _inspect_path(source, "runner")
     if not stat.S_ISDIR(root_metadata.st_mode):
@@ -272,6 +275,7 @@ def _validate_runner_tree(source: Path) -> tuple[tuple[Path, os.stat_result], ..
     pending = [(source, root_metadata)]
     entries: list[tuple[Path, os.stat_result]] = []
     while pending:
+        _cancellation_point(signal_state)
         path, metadata = pending.pop()
         if metadata.st_uid != invoking_uid:
             raise CheckpointError(f"runner: {path} is not owned by the invoking user")
@@ -283,6 +287,7 @@ def _validate_runner_tree(source: Path) -> tuple[tuple[Path, os.stat_result], ..
             if stat.S_IMODE(metadata.st_mode) & 0o700 != 0o700:
                 raise CheckpointError(f"runner: directory {path} must grant owner rwx")
             children = _directory_children(path, "runner")
+            _cancellation_point(signal_state)
             pending.extend(
                 (child, _inspect_path(child, "runner")) for child in reversed(children)
             )
@@ -664,7 +669,7 @@ def create_runner_archive(
     destination: Path,
     signal_state: SignalState | None = None,
 ) -> None:
-    entries = _validate_runner_tree(source)
+    entries = _validate_runner_tree(source, signal_state)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
         file_descriptor = os.open(destination, flags, 0o600)
@@ -743,11 +748,16 @@ def _member_is_sparse(member: tarfile.TarInfo) -> bool:
     return False
 
 
-def _validate_archive_topology(members: tuple[tarfile.TarInfo, ...]) -> None:
+def _validate_archive_topology(
+    members: tuple[tarfile.TarInfo, ...],
+    signal_state: SignalState | None = None,
+) -> None:
     root = _ArchiveNode()
     seen: set[tuple[str, ...]] = set()
     for member in members:
+        _cancellation_point(signal_state)
         parts = _validated_member_parts(member)
+        _cancellation_point(signal_state)
         if parts in seen:
             raise CheckpointError(f"runner archive: duplicate member {member.name!r}")
         seen.add(parts)
@@ -805,8 +815,13 @@ def _validate_runner_archive_file(
     _rewind_archive(source, label)
     try:
         with tarfile.open(fileobj=source, mode="r:") as archive:
-            members = tuple(archive.getmembers())
-            _validate_archive_topology(members)
+            member_list: list[tarfile.TarInfo] = []
+            for member in archive:
+                _cancellation_point(signal_state)
+                member_list.append(member)
+                _cancellation_point(signal_state)
+            members = tuple(member_list)
+            _validate_archive_topology(members, signal_state)
             for member in members:
                 _cancellation_point(signal_state)
                 if not member.isreg():
@@ -1231,10 +1246,13 @@ def _sha256_stream(
     return digest.hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(
+    path: Path,
+    signal_state: SignalState | None = None,
+) -> str:
     metadata = _inspect_path(path, "bundle")
     with _open_verified_regular(path, metadata) as source:
-        return _sha256_stream(source, str(path))
+        return _sha256_stream(source, str(path), signal_state)
 
 
 @dataclass
@@ -1454,6 +1472,7 @@ def _validate_bundle_at(
     directory_name: str,
     revision: str,
     fingerprint: str,
+    signal_state: SignalState | None = None,
 ) -> dict[str, object]:
     with _open_validated_bundle(
         bundle,
@@ -1461,6 +1480,7 @@ def _validate_bundle_at(
         directory_name=directory_name,
         revision=revision,
         fingerprint=fingerprint,
+        signal_state=signal_state,
     ) as opened:
         return opened.manifest
 
@@ -1942,7 +1962,10 @@ def _write_private_bytes(path: Path, content: bytes) -> None:
         raise CheckpointError(f"checkpoint: cannot write {path}: {error}") from error
 
 
-def _manifest_for(context: CheckpointContext) -> dict[str, object]:
+def _manifest_for(
+    context: CheckpointContext,
+    signal_state: SignalState | None = None,
+) -> dict[str, object]:
     artifacts = {}
     for artifact_name in ARTIFACT_NAMES:
         artifact = context.paths.staging / artifact_name
@@ -1951,7 +1974,7 @@ def _manifest_for(context: CheckpointContext) -> dict[str, object]:
         except OSError as error:
             raise CheckpointError(f"manifest: cannot inspect {artifact}: {error}") from error
         artifacts[artifact_name] = {
-            "sha256": _sha256_file(artifact),
+            "sha256": _sha256_file(artifact, signal_state),
             "size": size,
         }
     created_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -2236,7 +2259,7 @@ def save_checkpoint(context: CheckpointContext, signal_state: SignalState) -> No
         validate_runner_archive(runner_archive, signal_state)
         _check_signal(signal_state)
         phase = "manifest creation"
-        manifest = canonical_json(_manifest_for(context))
+        manifest = canonical_json(_manifest_for(context, signal_state))
         _check_signal(signal_state)
         _write_private_bytes(
             context.paths.staging / "manifest.json",
@@ -2255,6 +2278,7 @@ def save_checkpoint(context: CheckpointContext, signal_state: SignalState) -> No
             directory_name=context.name,
             revision=context.revision,
             fingerprint=context.fingerprint,
+            signal_state=signal_state,
         )
         _check_signal(signal_state)
         phase = "checkpoint publication"
@@ -2310,14 +2334,17 @@ def _create_volume_argv(
     )
 
 
-def _validated_runner_entries(path: Path) -> tuple[tuple[Path, os.stat_result], ...]:
+def _validated_runner_entries(
+    path: Path,
+    signal_state: SignalState | None = None,
+) -> tuple[tuple[Path, os.stat_result], ...]:
     try:
         path.lstat()
     except FileNotFoundError:
         return ()
     except OSError as error:
         raise CheckpointError(f"runner: cannot inspect {path}: {error}") from error
-    return _validate_runner_tree(path)
+    return _validate_runner_tree(path, signal_state)
 
 
 def _replace_runner_target(
@@ -2457,7 +2484,10 @@ def _restore_opened_bundle(
         signal_state,
     )
     _check_signal(signal_state)
-    runner_entries = _validated_runner_entries(context.paths.runner_state)
+    runner_entries = _validated_runner_entries(
+        context.paths.runner_state,
+        signal_state,
+    )
     _run_normal(
         (*context.compose, "config", "--quiet"),
         signal_state=signal_state,
