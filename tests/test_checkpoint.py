@@ -9,8 +9,10 @@ import shlex
 import signal
 import stat
 import shutil
+import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager, nullcontext, redirect_stderr
 from pathlib import Path
@@ -821,6 +823,7 @@ class ArgvRecorder:
         self.calls: list[tuple[str, ...]] = []
         self.stdin_bytes: list[bytes | None] = []
         self.on_call = None
+        self.on_spawn = None
         self.fail_when = None
 
     def __call__(
@@ -838,6 +841,8 @@ class ArgvRecorder:
         self.calls.append(fixed)
         self.stdin_bytes.append(stdin.read() if stdin is not None else None)
         invocation = len(self.calls)
+        if self.on_spawn is not None:
+            self.on_spawn(invocation, fixed, signal_state)
         if on_started is not None:
             on_started()
         if self.on_call is not None:
@@ -1594,6 +1599,28 @@ class SignalTests(unittest.TestCase):
             stderr.getvalue(),
         )
 
+    def test_signal_during_first_delete_spawn_reports_retry(self) -> None:
+        self._write_bundle()
+        recorder = ArgvRecorder()
+        events: list[str] = []
+
+        def interrupt_spawn(_number, argv, state):
+            if argv[:3] == ("docker", "volume", "rm") and state.requested is None:
+                events.append("request pending")
+                with mock.patch.object(checkpoint_module.signal, "signal"):
+                    checkpoint_module._handle_signal(signal.SIGTERM, None, state)
+
+        recorder.on_spawn = interrupt_spawn
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(checkpoint_module._HandledSignal):
+            self._run_restore(recorder)
+        self.assertEqual(events, ["request pending"])
+        self.assertNotIn(self._start, recorder.calls)
+        self.assertIn(
+            render_retry_command(self.name, self.store, self.runner),
+            stderr.getvalue(),
+        )
+
     def test_each_post_delete_subprocess_signal_leaves_down_and_reports_retry(self) -> None:
         phases = ("mariadb extraction", "bugzilla extraction", "startup", "health")
         for phase in phases:
@@ -1727,7 +1754,7 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(events, ["forward", "reap"])
         self.assertIsNone(state.active_process)
 
-    def test_spawn_registration_blocks_signal_window(self) -> None:
+    def test_spawn_registration_forwards_pending_signal(self) -> None:
         events: list[str] = []
         state = SignalState()
 
@@ -1736,6 +1763,7 @@ class SignalTests(unittest.TestCase):
                 self.pid = 4242
                 self.returncode = 0
                 events.append("spawn")
+                checkpoint_module._handle_signal(signal.SIGTERM, None, state)
 
             def communicate(self):
                 return b"", b""
@@ -1744,32 +1772,62 @@ class SignalTests(unittest.TestCase):
                 events.append("reap")
                 return self.returncode
 
-        def pthread_sigmask(how, mask):
-            if how == signal.SIG_BLOCK:
-                events.append("block")
-                return set()
-            self.assertEqual(how, signal.SIG_SETMASK)
-            self.assertIsNotNone(state.active_process)
-            events.append("unblock")
-            checkpoint_module._handle_signal(signal.SIGTERM, None, state)
-            return set()
-
         def killpg(pid: int, requested_signal: int) -> None:
             self.assertEqual((pid, requested_signal), (4242, signal.SIGTERM))
             events.append("forward")
 
         with (
             mock.patch.object(checkpoint_module.subprocess, "Popen", Popen),
-            mock.patch.object(
-                checkpoint_module.signal,
-                "pthread_sigmask",
-                side_effect=pthread_sigmask,
-            ),
             mock.patch.object(checkpoint_module.signal, "signal"),
             mock.patch.object(checkpoint_module.os, "killpg", side_effect=killpg),
             self.assertRaises(checkpoint_module._HandledSignal),
         ):
             run_child(("fixed", "argv"), signal_state=state)
-        self.assertEqual(events, ["block", "spawn", "unblock", "forward", "reap"])
+        self.assertEqual(events, ["spawn", "forward", "reap"])
+        self.assertIsNone(state.active_process)
+
+    def test_forwarded_sigterm_terminates_real_child(self) -> None:
+        ready = self.base / "child-ready"
+        terminated = self.base / "child-terminated"
+        child_program = (
+            "import pathlib, signal, sys\n"
+            "ready = pathlib.Path(sys.argv[1])\n"
+            "terminated = pathlib.Path(sys.argv[2])\n"
+            "def stop(requested, _frame):\n"
+            "    terminated.write_text(str(requested), encoding='ascii')\n"
+            "    raise SystemExit(0)\n"
+            "signal.signal(signal.SIGTERM, stop)\n"
+            "signal.alarm(2)\n"
+            "ready.write_text('ready', encoding='ascii')\n"
+            "signal.pause()\n"
+        )
+        state = SignalState()
+
+        def request_after_ready() -> None:
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                if time.monotonic() >= deadline:
+                    self.fail("real child did not report signal readiness")
+                time.sleep(0.01)
+            checkpoint_module._handle_signal(signal.SIGTERM, None, state)
+
+        with (
+            mock.patch.object(checkpoint_module.signal, "signal"),
+            self.assertRaises(checkpoint_module._HandledSignal),
+        ):
+            run_child(
+                (
+                    sys.executable,
+                    "-c",
+                    child_program,
+                    str(ready),
+                    str(terminated),
+                ),
+                signal_state=state,
+                on_started=request_after_ready,
+            )
+        self.assertEqual(terminated.read_text(encoding="ascii"), str(signal.SIGTERM))
+        self.assertIsNone(state.active_process)
+
 if __name__ == "__main__":
     unittest.main()

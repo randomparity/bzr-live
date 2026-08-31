@@ -1039,6 +1039,21 @@ class _ReportedCheckpointError(CheckpointError):
     pass
 
 
+def _forward_and_reap(
+    process: subprocess.Popen[bytes],
+    requested_signal: int,
+    signal_state: SignalState,
+) -> None:
+    try:
+        os.killpg(process.pid, requested_signal)
+    except OSError:
+        pass
+    finally:
+        process.wait()
+        if signal_state.active_process is process:
+            signal_state.active_process = None
+
+
 def _handle_signal(
     requested_signal: int,
     _frame: object,
@@ -1052,14 +1067,7 @@ def _handle_signal(
     process = signal_state.active_process
     if process is None:
         return
-    try:
-        os.killpg(process.pid, requested_signal)
-    except OSError:
-        pass
-    finally:
-        process.wait()
-        if signal_state.active_process is process:
-            signal_state.active_process = None
+    _forward_and_reap(process, requested_signal, signal_state)
 
 
 def _check_signal(signal_state: SignalState) -> None:
@@ -1089,31 +1097,29 @@ def run_child(
         raise CheckpointError("command: argv must be a nonempty fixed sequence of strings")
     fixed_argv = tuple(argv)
     requested_before = signal_state.requested
-    handled_signals = {signal.SIGINT, signal.SIGTERM}
+    if requested_before is not None and not allow_requested:
+        raise _HandledSignal(requested_before)
     try:
-        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals)
-    except (AttributeError, OSError) as error:
-        raise CheckpointError(
-            f"command: cannot block handled signals before starting {fixed_argv[0]}: {error}"
-        ) from error
-    try:
-        if signal_state.requested is not None and not allow_requested:
-            raise _HandledSignal(signal_state.requested)
-        try:
-            process = subprocess.Popen(
-                fixed_argv,
-                stdin=stdin,
-                stdout=subprocess.PIPE if stdout is None else stdout,
-                stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError as error:
-            raise CheckpointError(f"command: cannot start {fixed_argv[0]}: {error}") from error
-        signal_state.active_process = process
-        if on_started is not None:
-            on_started()
-    finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        process = subprocess.Popen(
+            fixed_argv,
+            stdin=stdin,
+            stdout=subprocess.PIPE if stdout is None else stdout,
+            stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as error:
+        if signal_state.requested is not None and requested_before is None:
+            raise _HandledSignal(signal_state.requested) from error
+        raise CheckpointError(f"command: cannot start {fixed_argv[0]}: {error}") from error
+    if on_started is not None:
+        on_started()
+    signal_state.active_process = process
+    if (
+        requested_before is None
+        and signal_state.requested is not None
+        and signal_state.active_process is process
+    ):
+        _forward_and_reap(process, signal_state.requested, signal_state)
 
     try:
         captured_stdout, captured_stderr = process.communicate()
