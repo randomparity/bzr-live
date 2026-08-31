@@ -69,7 +69,7 @@ ROOT_HASH=${ROOT_HASH%% *}
 [[ $ROOT_HASH =~ ^[0-9a-fA-F]{64}$ ]] ||
   die "$COMMAND" 'repair OpenSSL and retry' 'checkout hash was malformed'
 PROJECT="bzr-live-${ROOT_HASH:0:12}"
-LOCK_DIR="${TMPDIR:-/tmp}/${PROJECT}.lifecycle.lock"
+LOCK_DIR="/tmp/${PROJECT}.lifecycle.lock"
 COMPOSE=(docker compose --project-name "$PROJECT" --project-directory "$ROOT" --file "$ROOT/compose.yaml")
 
 acquire_lock() {

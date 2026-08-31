@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import sys
+
+
+def _main() -> int:
+    root = Path(__file__).resolve().parent.parent
+    source_module = root / "src" / "bzr_live" / "checkpoint.py"
+    if source_module.is_file():
+        sys.path.insert(0, str(root / "src"))
+
+    from bzr_live.checkpoint import main
+
+    return main()
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
