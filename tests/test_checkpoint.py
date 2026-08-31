@@ -134,7 +134,7 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertFalse(self.docker_marker.exists())
 
-    def test_wait_timeout_rejects_nonpositive_and_unbounded_values(self) -> None:
+    def test_wait_timeout_accepts_positive_decimals_and_normalizes_invalid_values(self) -> None:
         for raw in ("", "0", "-1", "5.5", "  7", "9" * 5000):
             with self.subTest(raw=raw):
                 with (
@@ -142,8 +142,9 @@ class CommandLineTests(unittest.TestCase):
                     self.assertRaisesRegex(CheckpointError, "BZ_WAIT_TIMEOUT"),
                 ):
                     checkpoint_module._wait_timeout()
-        with mock.patch.dict(os.environ, {"BZ_WAIT_TIMEOUT": "999999"}):
-            self.assertEqual(checkpoint_module._wait_timeout(), 999999)
+        for raw, expected in (("999999", 999999), ("1000000", 1000000)):
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {"BZ_WAIT_TIMEOUT": raw}):
+                self.assertEqual(checkpoint_module._wait_timeout(), expected)
 
 
 class BundleContractTests(unittest.TestCase):

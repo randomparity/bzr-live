@@ -1949,11 +1949,16 @@ def _checkout_root() -> Path:
 
 def _wait_timeout() -> int:
     raw = os.environ.get("BZ_WAIT_TIMEOUT", "300")
-    if re.fullmatch(r"[0-9]{1,6}", raw) is None or int(raw) < 1:
-        raise CheckpointError(
-            "timeout: BZ_WAIT_TIMEOUT must be a decimal integer of seconds from 1 to 999999"
-        )
-    return int(raw)
+    error_message = "timeout: BZ_WAIT_TIMEOUT must be a positive decimal integer of seconds"
+    if re.fullmatch(r"[0-9]+", raw) is None:
+        raise CheckpointError(error_message)
+    try:
+        timeout = int(raw)
+    except ValueError as error:
+        raise CheckpointError(error_message) from error
+    if timeout < 1:
+        raise CheckpointError(error_message)
+    return timeout
 
 
 def _parse_prelock_context(argv: Sequence[str] | None) -> PreLockContext:
