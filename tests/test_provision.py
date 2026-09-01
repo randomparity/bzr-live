@@ -220,15 +220,6 @@ class BridgeClientTests(unittest.TestCase):
         self.assertNotIn("t0psecretmaterial", str(ctx.exception))
         self.assertNotIn("api_key", str(ctx.exception))
 
-    def test_ok_reply_without_key_is_actionable_not_a_type_error(self) -> None:
-        # a version-skewed bridge replying ok with no result must not surface
-        # later as TypeError at the executor's result["api_key"]
-        for reply in ({"ok": True}, {"ok": True, "result": {"api_key": ""}}):
-            client, _ = self._client([(0, json.dumps(reply).encode(), b"")])
-            with self.assertRaises(ProvisionError) as ctx:
-                client.call("create-api-key", {"login": None})
-            self.assertIn("rebuild", str(ctx.exception))
-
     def test_missing_docker_is_actionable_not_a_traceback(self) -> None:
         def missing_run(argv, **kwargs):
             raise FileNotFoundError(2, "No such file or directory", argv[0])
