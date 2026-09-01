@@ -16,9 +16,9 @@ CLI.
 **Tech stack.** Python 3.11+, standard library only, run through `uv`. Tests are
 `unittest`, discovered by `python -m unittest discover -s tests`.
 
-Expected implementation size: 1250–1650 changed lines (L) — summed from the file map below,
-counting new module and test bodies plus the fixture, the `adapters.py` change, and wiring
-edits, excluding these design documents.
+Expected implementation size: 1350–1750 changed lines (L) — summed from the file map below,
+counting new module and test bodies plus the fixture, the operator-run smoke script, the
+`adapters.py` change, and wiring edits, excluding these design documents.
 
 ## Global Constraints
 
@@ -64,7 +64,8 @@ Transcribed from
 | `tests/test_replay.py` | new | unit suite over mocked `subprocess.run` and URL opener |
 | `tests/fixtures/replay-scenario/` | new | scenario exercising all eight actions (built in Task 1; every later task's tests load it) |
 | `src/bzr_live/provision/adapters.py` | changed | `BzrClient.read` gains keyword-only `absent_codes`; new `BUG_ABSENT_CODES` |
-| `Makefile` | changed | widen the `compileall` target from two named test files to `tests` |
+| `tests/replay_smoke.sh` | new | operator-run live proof: the create succeeds and its alias round-trips |
+| `Makefile` | changed | widen `compileall` from two named test files to `tests`; add `tests/replay_smoke.sh` to the shell checks and a `replay-smoke` target |
 | `.github/workflows/scenario-contract.yml` | changed | add the new ADR, spec and plan to both `paths` lists |
 | `README.md` | changed | document `replay` and `resume` |
 
@@ -146,16 +147,30 @@ Create `tests/test_replay.py`:
 ```python
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
+import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from bzr_live.provision import KeyStore, ProvisionError
+from bzr_live.provision.adapters import BUG_ABSENT_CODES, BzrClient
 from bzr_live.replay import ReplayContext, ReplayError
-from bzr_live.scenario import Reference, load_scenario
+from bzr_live.scenario import (
+    CompletedRecord,
+    InFlightRecord,
+    Reference,
+    load_scenario,
+)
+
+# Anchored to this file, not the CWD, matching tests/test_scenario_resources.py:13 and
+# tests/test_provision.py:29; the relative form only works from the repo root.
+FIXTURE = Path(__file__).parent / "fixtures" / "replay-scenario"
 
 
 def _state_root(stack: unittest.TestCase) -> Path:
@@ -173,7 +188,7 @@ class ContextTest(unittest.TestCase):
         workspace = tempfile.TemporaryDirectory()
         self.addCleanup(workspace.cleanup)
         self.workspace = workspace.name
-        self.scenario = load_scenario("tests/fixtures/replay-scenario")
+        self.scenario = load_scenario(FIXTURE)
 
     def _context(self, **kwargs) -> ReplayContext:
         return ReplayContext(
@@ -524,6 +539,30 @@ class SupportedPayloadTest(unittest.TestCase):
         self.assertIn("estimated_hours", str(caught.exception))
         self.assertIn("bug.update", str(caught.exception))
 
+    def test_create_rejects_remaining_hours(self) -> None:
+        event = self._event("bug.create", version="1.0", remaining_hours="1.0")
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.create"].check_supported(event)
+        self.assertIn("remaining_hours", str(caught.exception))
+
+    def test_update_rejects_version(self) -> None:
+        event = self._event("bug.update", version=object())
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.update"].check_supported(event)
+        self.assertIn("version", str(caught.exception))
+
+    def test_update_rejects_a_null_milestone(self) -> None:
+        event = self._event("bug.update", milestone=None)
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.update"].check_supported(event)
+        self.assertIn("milestone", str(caught.exception))
+
+    def test_flag_rejects_a_hyphenated_flag_type_name(self) -> None:
+        event = self._event("bug.flag", flag_type=Reference("flag-type", "needs-info"))
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.flag"].check_supported(event)
+        self.assertIn("needs-info", str(caught.exception))
+
     def test_create_rejects_a_null_version(self) -> None:
         event = self._event("bug.create", version=None)
         with self.assertRaises(ReplayError) as caught:
@@ -605,6 +644,9 @@ from .context import ReplayError
 # 255-BYTE column, so the check measures encoded bytes and not code points.
 ATTACHMENT_SUMMARY_BYTE_LIMIT = 255
 
+# Grounds for the refusals below, at bzr b80303b7: create_json.rs:150 defaults an omitted
+# version to "unspecified"; update.rs:85 and :92 both carry conflicts_with = "dupe_of".
+# Kept here rather than in the operator-facing messages, which outlive any line number.
 _CREATE_UNSUPPORTED = {
     "custom_fields": "move it to a follow-up bug.custom-field-set event",
     "estimated_hours": "move it to a follow-up bug.update event",
@@ -661,9 +703,8 @@ class BugCreateHandler(ActionHandler):
         if values.get("version") is None:
             raise _unsupported(
                 event, "version",
-                "declare a version; bzr defaults an omitted one to 'unspecified' "
-                "(src/commands/bug/create_json.rs:143), which this scenario's product "
-                "does not declare")
+                "declare a version; bzr defaults an omitted one to 'unspecified', "
+                "which this scenario's product does not declare")
 
 
 class BugUpdateHandler(ActionHandler):
@@ -720,6 +761,18 @@ class BugCustomFieldHandler(ActionHandler):
 class BugFlagHandler(ActionHandler):
     action = "bug.flag"
 
+    @staticmethod
+    def check_supported(event: PlannedEvent) -> None:
+        # bzr's parse_single_flag takes the FIRST of + - ? X as the status character, so a
+        # hyphenated slug like `needs-info` renders `--flag=needs-info?` and parses as name
+        # `needs`. Uppercase X cannot occur in a slug, so the hyphen is the live hazard.
+        name = event.expected_postcondition["values"]["flag_type"].name
+        if any(character in name for character in "+-?X"):
+            raise _unsupported(
+                event, "flag_type",
+                f"the flag type name {name!r} contains a character bzr reads as a flag "
+                "status; rename the flag type without a hyphen")
+
 
 class AttachmentUpdateHandler(ActionHandler):
     action = "attachment.update"
@@ -751,7 +804,7 @@ __all__ = ["HANDLERS", "ActionHandler", "ReplayContext", "ReplayError"]
 uv run --python 3.11 python -m unittest tests.test_replay -v
 ```
 
-Expect `OK`, twenty tests.
+Expect `OK`, twenty-four tests.
 
 ### Step 2.5 — commit
 
@@ -939,6 +992,11 @@ def _bug_object(payload) -> dict | None:
             "summary": values["summary"],
             "description": values["description"],
             "version": values["version"].name,
+            # bzr documents both as "required by some Bugzilla installations"
+            # (src/cli/bug/create.rs:138,141) and this fixture sets no defaultplatform or
+            # defaultopsys; the contract has no slot for them, so they are fixed here.
+            "op_sys": "Linux",
+            "rep_platform": "PC",
         }
         if values["milestone"] is not None:
             document["target_milestone"] = values["milestone"].name
@@ -1112,7 +1170,7 @@ Export `Invocation` from `__init__.py` alongside `HANDLERS`.
 uv run --python 3.11 python -m unittest tests.test_replay -v
 ```
 
-Expect `OK`, twenty-six tests.
+Expect `OK`, thirty tests.
 
 ### Step 3.5 — commit
 
@@ -1278,7 +1336,10 @@ def _entries(payload, key: str) -> list:
 - `BugCustomFieldHandler.reconcile` calls `context.read_bug` and compares each
   `custom_field_name(slug)` key.
 - `BugFlagHandler.reconcile` calls `context.read_bug` and searches `flags` for an entry whose
-  `name` equals the flag type and whose `status` equals the declared status.
+  `name` equals the flag type and whose `status` equals the declared status. Status `X` is the
+  exception: it clears the flag, so no entry with that status can ever exist. Its declared
+  postcondition is the *absence* of an entry with that type name, and absence is what yields
+  `advance`; comparing for an `X` entry would make a flag-clear unable to reconcile at all.
 - `AttachmentUpdateHandler.reconcile` reads `["attachment", "view"]` with the resolved
   attachment id as its positional and compares `is_obsolete` and, where declared, `summary`
   off that single object. It cannot list the bug's attachments: the loader normalizes this
@@ -1295,7 +1356,7 @@ Every set-class `reconcile` returns only `advance` or `retry`, never `stop`.
 uv run --python 3.11 python -m unittest tests.test_replay -v
 ```
 
-Expect `OK`, thirty-six tests.
+Expect `OK`, forty-one tests.
 
 ### Step 4.5 — commit
 
@@ -1352,6 +1413,17 @@ class EngineTest(unittest.TestCase):
     def test_no_journal_record_contains_an_api_key(self) -> None: ...
     def test_replay_refuses_a_record_for_an_event_the_scenario_dropped(self) -> None: ...
     def test_pristine_sweep_refuses_a_bug_the_actor_cannot_see(self) -> None: ...
+    def test_resume_refuses_a_pre_existing_alias_for_an_unjournalled_event(self) -> None: ...
+
+    def test_a_failing_reconciliation_read_leaves_the_in_flight_record(self) -> None:
+        """ADR 0006: no completed record is written over a read that failed."""
+        # Queue a failing mutation, then a reconciliation read that also fails.
+        ...
+        with self.assertRaises(ProvisionError):
+            engine.replay()
+        record = store.read("create-checkout-race")
+        self.assertIsInstance(record, InFlightRecord)
+        self.assertNotIsInstance(record, CompletedRecord)
 ```
 
 `test_resume_refuses_a_recorded_stop_without_querying` asserts the fake `run` recorded zero
@@ -1430,19 +1502,22 @@ class ReplayEngine:
             latest[event.name] = record
         return latest
 
+    def _require_absent(self, event) -> None:
+        """Refuse if this event's bug already exists. No-op for non-create events."""
+        if event.action != "bug.create":
+            return
+        alias = event.expected_postcondition["values"]["server_alias"]
+        # read_bug lets api_code 100/101 mean absent; 102 (access denied) still raises,
+        # so an invisible pre-existing bug refuses instead of passing.
+        if self._context.read_bug(event.actor, [alias]) is not None:
+            raise ReplayError(
+                f"bug alias {alias} (event {event.name!r}) already exists in the "
+                "fixture; replay requires the pristine baseline — run "
+                "scripts/checkpoint restore pristine, then replay")
+
     def _sweep_pristine(self) -> None:
         for event in self._scenario.events:
-            if event.action != "bug.create":
-                continue
-            alias = event.expected_postcondition["values"]["server_alias"]
-            # read_bug lets api_code 100/101 mean absent; 102 (access denied) still
-            # raises, so an invisible pre-existing bug refuses instead of passing.
-            payload = self._context.read_bug(event.actor, [alias])
-            if payload is not None:
-                raise ReplayError(
-                    f"bug alias {alias} (event {event.name!r}) already exists in the "
-                    "fixture; replay requires the pristine baseline — run "
-                    "scripts/checkpoint restore pristine, then replay")
+            self._require_absent(event)
 
     # --- the loop ----------------------------------------------------------
 
@@ -1458,6 +1533,10 @@ class ReplayEngine:
 
     def _advance(self, event, record) -> str:
         if record is None:
+            # No journal record means no proof this run attempted the event, under either
+            # subcommand — so adoption is not available to it and a present alias refuses.
+            # replay's up-front sweep is the same check in fail-fast form.
+            self._require_absent(event)
             return self._execute(event, 1)
         if isinstance(record, CompletedRecord):
             if record.next_safe_action == "advance":
@@ -1560,7 +1639,7 @@ here. The refusal wording exists once, in `actions.py`.
 uv run --python 3.11 python -m unittest tests.test_replay -v
 ```
 
-Expect `OK`, forty-eight tests.
+Expect `OK`, fifty-five tests.
 
 ### Step 5.5 — commit
 
@@ -1579,7 +1658,7 @@ querying the server. An in-flight record reconciles to adoption or a fresh attem
 
 ## Task 6 — CLI, fixture, and wiring
 
-Creates `src/bzr_live/replay/__main__.py`; changes `Makefile`,
+Creates `src/bzr_live/replay/__main__.py` and `tests/replay_smoke.sh`; changes `Makefile`,
 `.github/workflows/scenario-contract.yml`, `README.md`.
 
 **Where this fits.** Last task: the operator-facing surface and the gate coverage.
@@ -1643,9 +1722,69 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
+### Step 6.1a — test `main()`
+
+The repository already tests a package `__main__` directly — `tests/test_provision.py:645-690`
+imports `bzr_live.provision.__main__` and calls `cli.main([...])`. Copy that shape rather than
+relying on the manual command in Step 6.3:
+
+```python
+class MainTest(unittest.TestCase):
+    def test_missing_actor_key_exits_one_with_a_replay_failed_message(self) -> None:
+        from bzr_live.replay import __main__ as cli
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            code = cli.main([
+                "replay", str(FIXTURE), "--state-root", str(root / "state")])
+        self.assertEqual(code, 1)
+        self.assertTrue(errors.getvalue().startswith("replay failed:"))
+        self.assertIn("no API key for actor", errors.getvalue())
+
+    def test_the_journal_lands_under_the_scenario_name(self) -> None:
+        from bzr_live.replay import __main__ as cli
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        with contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["replay", str(FIXTURE), "--state-root", str(root / "state")])
+        self.assertTrue((root / "state" / "journal" / "replay-demo").is_dir())
+```
+
+`contextlib`, `io` and `shutil` are already in Step 1.1's import block; no new imports.
+
+### Step 6.1b — write the operator-run live smoke
+
+`tests/replay_smoke.sh`, modelled on `tests/provision_smoke.sh` (same `BZR_LIVE_BZR`
+requirement, same `.env` port and admin-email fallbacks, same `mktemp -d` state root under a
+cleanup trap). It provisions the replay fixture, replays it, and then asserts the two facts
+the unit suite cannot reach:
+
+1. the first `bug.create` succeeded — proving a create carrying this design's fixed
+   `op_sys`/`rep_platform` pair is accepted by this fixture; and
+2. `bzr --json bug view <server_alias>` resolves to the id that create returned — proving the
+   `alias` key round-trips here rather than silently no-opping as it does on bzr's
+   alias-disabled containers.
+
+Read the expected `server_alias` out of the loaded scenario rather than recomputing the hash:
+
+```
+uv run --python 3.11 python -c "
+from bzr_live.scenario import load_scenario
+s = load_scenario('tests/fixtures/replay-scenario')
+print(next(e.expected_postcondition['values']['server_alias']
+           for e in s.events if e.action == 'bug.create'))"
+```
+
+If either assertion fails, ADR 0006's "Considered & rejected" already names the fallback —
+reconcile creates by a namespaced marker in the description — and taking it is a design
+change, not an implementation fix.
+
 ### Step 6.2 — widen the guardrail and gate the docs
 
-In `Makefile`, change the `compileall` line from
+In `Makefile`, add `tests/replay_smoke.sh` to both the `bash -n` and the `shellcheck` file
+lists, add a `replay-smoke` target beside `checkpoint-smoke`, add it to `.PHONY`, and change
+the `compileall` line from
 
 ```
 	@uv run --python 3.11 python -m compileall -q src tests/test_checkpoint.py tests/test_provision.py
@@ -1686,13 +1825,15 @@ make test
 
 `--help` lists `replay` and `resume` and the four options. The replay run exits 1 with
 `replay failed: no API key for actor ...` on stderr, proving the precondition path reaches
-the operator. `make check` and `make test` both exit 0; `make test` reports 48 more tests
-than the 154-test baseline, i.e. 202.
+the operator. `make check` and `make test` both exit 0; `make test` reports 57 more tests
+than the 154-test baseline, i.e. 211. `make replay-smoke` is operator-run against a healthy
+`make up` and is not part of either guardrail.
 
 ### Step 6.4 — commit
 
 ```
-git add src/bzr_live/replay Makefile .github/workflows/scenario-contract.yml README.md
+git add src/bzr_live/replay tests/replay_smoke.sh tests/test_replay.py Makefile \
+    .github/workflows/scenario-contract.yml README.md
 git commit -m "feat(replay): add the replay and resume commands"
 ```
 
@@ -1723,6 +1864,11 @@ plan gate the `scenario-contract` workflow.
 | Recorded `stop` refuses on a later resume | 5 |
 | Secrets absent from journal records and argv | 1, 3, 5 |
 | CLI, exit codes, journal location | 6 |
+| Fixed `op_sys` / `rep_platform` on create | 3, 6 |
+| Flag-type name refusal, and flag-clear reconciling by absence | 2, 4 |
+| Pristine check binds any first execution, not just `replay` | 5 |
+| Failing reconciliation read leaves the in-flight record | 5 |
+| Live proof of the create and the alias round-trip | 6 |
 | Gate coverage for the new module, tests, and docs | 6 |
 
 ## Deferrals carried into this plan

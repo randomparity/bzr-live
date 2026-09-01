@@ -55,6 +55,7 @@ scenario dir ──load_scenario──▶ ValidatedScenario ──┐
 | `src/bzr_live/replay/__main__.py` | argument parsing and error-to-exit-code mapping |
 | `tests/test_replay.py` | unit suite over mocked `subprocess.run` and URL opener |
 | `tests/fixtures/replay-scenario/` | a scenario exercising all eight actions |
+| `tests/replay_smoke.sh` | operator-run live proof: create succeeds and its alias round-trips |
 | `src/bzr_live/provision/adapters.py` | *changed*: `BzrClient.read` gains keyword-only `absent_codes` (see **Reading absence**) |
 
 Every unit is testable in isolation: `ReplayContext` needs only a `ValidatedScenario` and a
@@ -90,18 +91,28 @@ offending item and the fix.
 2. **Payload support.** Every event is checked against the per-action supported-payload
    table below. Applies to both commands, so a scenario that cannot be replayed says so
    before it half-runs.
-3. **`replay` only — empty journal.** The journal directory is listed once and must hold no
+3. **Any first execution — pristine alias check.** Before executing an event that has no
+   journal record, under *either* subcommand, that event's server alias is read and its
+   presence refuses. Adoption of a server-side result requires a journal record proving this
+   run attempted the event; an unjournalled event has no such proof whichever command reached
+   it. Without this, `resume` against an empty journal performs a first-time replay with no
+   baseline proof — and if the alias already exists, the create fails on the duplicate, the
+   failure sends the event into reconciliation, and reconciliation adopts the pre-existing bug
+   as this event's result. Every later event in the scenario would then mutate a bug the run
+   did not create: a silent wrong-target write, not a refusal.
+4. **`replay` only — empty journal.** The journal directory is listed once and must hold no
    file matching `<event>.<attempt>.json`, whatever the event name. Scanning only the current
    scenario's event names would let a journal whose events were since renamed read as empty,
    and the digest check cannot fire on a record no event name reaches. The message names the
    stray record: "this scenario has already been replayed under <state-root> (found
    <name>); use `resume`, or reset the fixture and remove the journal directory".
-4. **`replay` only — pristine sweep.** For each `bug.create` event, `bzr bug view
-   <server_alias>` under that event's own actor credential must report absent. A present
-   alias refuses: "<alias> already exists in the fixture; replay requires the pristine
-   baseline (`scripts/checkpoint restore pristine`)".
+5. **`replay` only — pristine sweep.** The fail-fast form of check 3: every `bug.create`
+   event's alias is read up front, before any mutation, rather than one event at a time as
+   the run reaches it. A present alias refuses: "<alias> already exists in the fixture; replay
+   requires the pristine baseline (`scripts/checkpoint restore pristine`)".
 
-Preconditions 1–3 are local and run first; 4 is the only one that touches the network.
+Preconditions 1, 2 and 4 are local and run first; 3 and 5 touch the network, and 3 is the
+only one that runs during the loop rather than ahead of it.
 
 ### Reading absence
 
@@ -135,14 +146,29 @@ as refused is supported.
 
 | Action | Sent as | Refused, with the message's suggested fix |
 |---|---|---|
-| `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on` | non-empty `custom_fields` → "move to a follow-up `bug.custom-field-set` event"; non-null `estimated_hours` / `remaining_hours` / `duplicate_of` → "move to a follow-up `bug.update` event"; null `version` → "declare a version; bzr defaults an omitted one to `unspecified`, which this scenario's product does not declare" |
+| `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on`, plus a fixed `op_sys: "Linux"` and `rep_platform: "PC"` | non-empty `custom_fields` → "move to a follow-up `bug.custom-field-set` event"; non-null `estimated_hours` / `remaining_hours` / `duplicate_of` → "move to a follow-up `bug.update` event"; null `version` → "declare a version; bzr defaults an omitted one to `unspecified`, which this scenario's product does not declare" |
 | `bug.update` | `bzr bug update <id>` with `--summary`, `--status`, `--resolution`, `--assignee` or `--reset-assigned-to`, `--dupe-of`, `--target-milestone`, `--estimated-time`, `--remaining-time`, and `--cc-add/-remove`, `--keywords-add/-remove`, `--blocks-add/-remove`, `--depends-on-add/-remove` computed as deltas against `bzr bug view` | `groups` → "set groups in the `bug.create` event"; `version` → "bzr `bug update` has no version field"; null `resolution` → "set `status` to an open status; Bugzilla clears the resolution"; null `milestone` → "bzr `bug update` cannot clear a milestone"; null `duplicate_of` → "bzr `bug update` cannot clear a duplicate; set `status` to an open status"; `duplicate_of` together with `status` **or** `resolution` → "bzr rejects `--dupe-of` with `--status` and with `--resolution`; use separate events" |
 | `bug.comment` | `bzr comment add <id> --body-file=<tmpfile> [--private]` | — |
 | `bug.attach` | `bzr attachment upload <id> <file> --summary=<description + marker + checksum> --content-type=<type> [--private]` | rendered summary longer than 255 **bytes** when UTF-8 encoded → "shorten the attachment description" |
 | `bug.worktime` | `bzr bug update <id> --work-time=<hours> --comment-file=<tmpfile>` | — |
 | `bug.custom-field-set` | `assign_bug_custom_fields(base_url, actor_key, id, {cf_<slug>: value})` | — |
-| `bug.flag` | `bzr bug update <id> --flag=<name><status>[(<requestee email>)]` | — |
+| `bug.flag` | `bzr bug update <id> --flag=<name><status>[(<requestee email>)]` | flag-type name containing `+`, `-`, `?` or `X` → "rename the flag type without a hyphen; bzr reads the first of `+-?X` as the flag status" |
 | `attachment.update` | `bzr attachment update <id> --obsolete` / `--no-obsolete`, plus `--summary=<description>` when declared | — |
+
+`op_sys` and `rep_platform` are sent as a fixed pair because bzr documents both as "required
+by some Bugzilla installations" (`src/cli/bug/create.rs:138,141`) and passes them on every
+functional create, while this fixture's `checksetup_answers.txt` declares no `defaultplatform`
+or `defaultopsys`. The scenario contract has no slot for either, so there is nothing to vary
+and no scenario edit that could supply them; `Linux`/`PC` are the values bzr's own fixtures
+use against stock Bugzilla. `tests/replay_smoke.sh` is what proves the create succeeds.
+
+The `bug.flag` refusal exists because resource names are slugs (`[a-z][a-z0-9-]{0,62}`) and
+`Provisioner._create_flag_type` registers the slug verbatim, while bzr's `parse_single_flag`
+locates the status as the **first** of `+ - ? X` anywhere in the string. A flag type
+`needs-info` therefore renders `--flag=needs-info?`, which bzr reads as name `needs`, status
+"deny", trailing `info?`, and rejects with exit 7. Uppercase `X` cannot appear in a slug, so
+the hyphen is the only reachable hazard — but the failure would otherwise arrive mid-run, and
+the only fix is renaming the flag type, which changes the digest and forces a full reset.
 
 The attachment ceiling is `attachments.description`, declared `TINYTEXT` in Bugzilla 5.2's
 `Bugzilla/DB/Schema.pm` — a MySQL 255-**byte** column. The check therefore measures
@@ -240,7 +266,9 @@ idempotent, so the cost is one extra invocation.
 
 For `bug.custom-field-set` the comparison reads `cf_<slug>` from the same `bzr bug view`
 payload; for `bug.flag` it reads the `flags` array, matching on flag type name and status
-(and requestee where declared); for `attachment.update` it reads `bzr attachment view
+(and requestee where declared) — except for status `X`, which clears the flag, so the
+declared postcondition is the *absence* of any `flags` entry with that type name and absence
+is what advances it; for `attachment.update` it reads `bzr attachment view
 <attachment id>` and compares `is_obsolete` and, where declared, `summary`.
 
 `attachment.update` reads by attachment ID rather than by listing a bug's attachments,
@@ -303,15 +331,24 @@ binary, and the local fixture's replies.
 
 **Out of scope.** Concurrent mutators of the same fixture (single local operator, and the
 journal's exclusive lock already prevents two runs sharing a state root). Crash consistency
-beyond the journal's existing atomic write and rename. A pre-existing bug hidden from the
-sweeping actor by a group: the create then fails on the duplicate alias and reconciles to
-ambiguous, so the outcome is a refusal, not a duplicate. Bugzilla's own authorization —
-an actor lacking, say, `timetrackinggroup` gets a boundary error, which is correct.
+beyond the journal's existing atomic write and rename. Bugzilla's own authorization — an
+actor lacking, say, `timetrackinggroup` gets a boundary error, which is correct.
+
+A pre-existing bug the sweeping actor cannot see is **not** out of scope and does not
+reconcile: `api_code` 102 is outside `absent_codes`, so the read raises and the run refuses
+with the boundary's own message before mutating anything. The refusal comes from the read
+failing, not from any reconciliation outcome — `unique-create` has no ambiguous arm.
 
 ## Testing
 
-Unit tests only, mocking `subprocess.run` and the URL opener exactly as `tests/test_provision.py`
-does. The live proof is the operator-run Docker path, consistent with ADR 0004.
+Unit tests mock `subprocess.run` and the URL opener exactly as `tests/test_provision.py` does.
+Two facts are out of their reach because they are properties of the fixture rather than of
+this code — that a create omitting `op_sys`/`rep_platform` would be rejected, and that the
+`alias` key round-trips rather than silently no-opping — so `tests/replay_smoke.sh` carries
+them: an operator-run live proof beside `tests/provision_smoke.sh`, the same split ADR 0004
+chose. It replays the fixture scenario against a healthy `make up` and asserts that
+`bzr bug view <server_alias>` resolves to the id the create returned. CI runs the unit suite;
+the smoke is operator-run by decision.
 
 Each of these is a case:
 
@@ -326,8 +363,12 @@ Each of these is a case:
 - digest mismatch on `resume` → refused;
 - `replay` with a non-empty journal → refused;
 - pristine sweep finds an existing alias → refused before any mutation;
-- every refused row of the supported-payload table, including both `duplicate_of` conflicts
-  and the null `duplicate_of`;
+- every refused row of the supported-payload table — every `bug.create` row, every
+  `bug.update` row including both `duplicate_of` conflicts and the null `duplicate_of`, and
+  the `bug.flag` hyphenated-name row;
+- a create document carries `op_sys` and `rep_platform`;
+- a `bug.flag` clear (`X`) reconciles to `advance` when no entry with that type name is
+  present;
 - attachment description whose rendered summary exceeds 255 bytes → refused, with a
   non-ASCII case so the byte-versus-character unit is pinned by a test;
 - `BzrClient.read` with `absent_codes={100, 101}`: exit 4 with `api_code` 100 or 101 returns
@@ -336,6 +377,10 @@ Each of these is a case:
   treating the bug as absent;
 - a journal holding a record for an event the scenario no longer names → `replay` refuses;
 - asset checksum mismatch → refused;
+- a reconciliation read that itself fails writes no completed record and leaves the in-flight
+  record readable for a later `resume`;
+- `main()` maps a missing actor key to exit 1 with a `replay failed:` message on stderr, and
+  puts the journal at `<state-root>/journal/<scenario name>/`;
 - an actor key never appears in any journal record or in any argv.
 
 ## Guardrails

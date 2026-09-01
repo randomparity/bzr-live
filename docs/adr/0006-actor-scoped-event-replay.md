@@ -25,6 +25,17 @@ Three facts about the boundary constrain the answer, each read from bzr at `b803
   cannot be read back.
 - `bug view` accepts aliases as well as numeric IDs, so a scenario-namespaced server alias
   is a server-enforced unique handle a create can be reconciled against.
+- bzr documents `op_sys` and `rep_platform` as "required by some Bugzilla installations"
+  (`src/cli/bug/create.rs:138,141`) and passes both on every functional create, and this
+  fixture's `containers/bugzilla/checksetup_answers.txt` sets no `defaultplatform` or
+  `defaultopsys` answer. The scenario contract has no slot for either — the loader's
+  `bug.create` postcondition key set (`src/bzr_live/scenario/journal.py:227-234`) does not
+  carry them — so a scenario cannot supply them even if it wanted to.
+- Bug aliases are enabled on this fixture: `checksetup_answers.txt` sets
+  `$answer{'usebugaliases'} = 1`. That matters because bzr's own functional containers run
+  with them off — `tests/functional/phases/08c-bugs-create-fields.sh:8-9` says "bug aliases
+  are disabled on these default-config containers, so the field silently no-ops" — so the
+  parameter, not the client, is what makes the alias round-trip available here.
 - A `bug view` of a bug that is absent, or that the caller may not see, exits **4**, not 2.
   bzr's functional suite asserts exit 4 with `api_code` 101 for a missing numeric ID and
   exit 4 with `api_code` 102 for a group-restricted bug, both against a live Bugzilla
@@ -61,13 +72,23 @@ because re-applying the whole declared set converges. Fields the read surface do
 expose cannot confirm a match, so they resolve to `retry` and are re-applied; that is one
 extra idempotent invocation, never a duplicate.
 
-**Adopting a server-side result requires a journal record proving this run attempted it.**
-`resume` has that proof. `replay` does not, so before its first mutation it reads every
-`bug.create` event's server alias with that event's own actor credential and refuses if any
-is already present, and it refuses outright if the journal directory holds any record. That
-sweep is what "replay begins from the keyed pristine baseline" means operationally.
-`replay` verifies the precondition; restoring the baseline stays the operator's
-`scripts/checkpoint restore pristine`.
+**Adopting a server-side result requires a journal record proving this run attempted it, and
+the check binds every first execution rather than every `replay`.** An event with no journal
+record has no such proof under *either* subcommand, so its server alias is read and its
+presence refuses, wherever that event is reached from. `replay` additionally sweeps every
+`bug.create` alias up front, before any mutation, and refuses outright if the journal
+directory holds any record at all — the same check in its fail-fast form. Binding it to the
+command instead of to the event would let `resume` against an empty journal perform a
+first-time replay with no baseline proof, and, worse, adopt a pre-existing bug as its own
+create the moment the duplicate alias sent it into reconciliation. That sweep is what
+"replay begins from the keyed pristine baseline" means operationally; restoring the baseline
+stays the operator's `scripts/checkpoint restore pristine`.
+
+**Every create sends a fixed `op_sys` and `rep_platform`.** The contract has no slot for
+them and the fixture declares no defaults, so replay sends `Linux` and `PC` — the pair bzr's
+own functional fixtures use against stock Bugzilla — rather than omitting fields the
+installation may require. Scenarios cannot vary them; nothing in the contract could express
+the variation anyway.
 
 **Markers are rendered only for append-class events.** A comment body gains a trailing
 `[<marker>]` line; a work-time update carries the same marker in the comment posted in the
@@ -116,6 +137,12 @@ attachment ceiling is `attachments.description`, which Bugzilla 5.2 declares `TI
   is reached by the read failing rather than by any reconciliation: the run stops with the
   boundary's own message rather than treating an invisible bug as an absent one.
 
+- Two of this record's boundary facts are inferred from the fixture's configuration rather
+  than observed against it: that a create omitting `op_sys`/`rep_platform` would be rejected,
+  and that the `alias` key round-trips. The unit suite mocks the subprocess boundary and
+  cannot reach either, so `tests/replay_smoke.sh` — an operator-run live proof beside
+  `tests/provision_smoke.sh`, the split ADR 0004 already chose — is what discharges them.
+  Until it has run, both are stated as inferences here rather than as verified grounds.
 - Widening `BzrClient.read` is a change to a boundary client issue #4 owns. The new argument
   is keyword-only with today's set as its default, so no provisioning call site changes, but
   the two issues now share one not-found contract rather than one code set.
@@ -138,9 +165,19 @@ attachment ceiling is `attachments.description`, which Bugzilla 5.2 declares `TI
   in-flight record — so an event completed as `reconcile` can neither be retried nor
   rewritten.
 - **Reconcile creates by searching for the declared summary instead of a server alias.**
-  verified: summaries are not unique and Bugzilla does not enforce them; the alias column is
-  unique and `bzr bug view` resolves it, per `src/cli/bug/view.rs:59-62` ("Bug ID(s) or
-  alias(es)") at bzr `b80303b7`.
+  verified: `bzr bug view` resolves an alias, per `src/cli/bug/view.rs:59-62` ("Bug ID(s) or
+  alias(es)") at bzr `b80303b7`, and this fixture enables aliases
+  (`checksetup_answers.txt`, `usebugaliases = 1`). judgment: summaries are neither unique nor
+  enforced, so a summary search cannot answer "did *this* create commit". The remaining leg —
+  that the `alias` key in `bug create --from-json` lands on this server rather than silently
+  no-opping as it does on bzr's alias-disabled containers — is asserted, not observed here;
+  `tests/replay_smoke.sh` is what proves it, and until that smoke has run this decision rests
+  on the parameter above.
+- **Reconcile creates by a namespaced marker in the bug's description or whiteboard.**
+  judgment: the one alternative that survives the alias silently no-opping, and it is the
+  fallback if the smoke shows that happening — rejected for now because it turns a
+  server-enforced unique identity into a text search with the append class's ambiguity
+  problem, on the one recovery class that currently has none.
 - **Let replay restore the pristine checkpoint itself.** judgment: operator decision on this
   issue, taken to keep the engine free of Docker orchestration; `AGENTS.md` scopes this
   repository to a disposable fixture whose recovery is rerun/reset.
