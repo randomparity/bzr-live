@@ -1,0 +1,1570 @@
+# Implementation plan — replay actor-scoped bzr events with safe resume
+
+**Goal.** Add a `bzr_live.replay` package that executes a validated scenario's ordered,
+actor-scoped events against the local Bugzilla fixture and resumes an interrupted run to
+exactly one semantic result per event or refuses with an actionable message.
+
+**Architecture.** A `ReplayContext` owns credentials, the symbolic-reference → server-ID
+table, and a temporary workspace. One `ActionHandler` per action owns everything about that
+action: whether its payload is expressible in one mutation (`check_supported`), how to build
+the invocation (`build`), how to read IDs out of a reply (`resolved_ids`), and how to
+reconcile it against the server (`reconcile`). A `ReplayEngine` walks
+`ValidatedScenario.events` in order, consults `JournalStore` for each event's latest record,
+and writes the in-flight and completed records around every invocation. `__main__` wires the
+CLI.
+
+**Tech stack.** Python 3.11+, standard library only, run through `uv`. Tests are
+`unittest`, discovered by `python -m unittest discover -s tests`.
+
+Expected implementation size: 1200–1600 changed lines (L) — summed from the file map below,
+counting new module and test bodies plus the fixture and wiring edits, excluding these design
+documents.
+
+## Global Constraints
+
+Transcribed from
+[the design spec](../specs/2026-09-01-replay-actor-scoped-events-design.md) and
+[ADR 0006](../../adr/0006-actor-scoped-event-replay.md):
+
+- **Python 3.11+**, no runtime dependencies. The package under `src/bzr_live/` imports only
+  the standard library and its own siblings.
+- **Guardrails**: `make check` (`bash -n`, `shellcheck`, `compileall`, `docker compose
+  config`) and `make test` (`tests/lifecycle_test.sh` plus `unittest discover -s tests`).
+  Both must exit 0 before every commit. Baseline before this work: 154 tests, `make test`
+  ≈1.2 s, `make check` ≈0.3 s.
+- **Style**: match the surrounding code — `from __future__ import annotations`, module-level
+  private helpers prefixed `_`, one actionable exception class per package whose `str(exc)`
+  is the operator-facing message, comments only for non-obvious invariants. Lines ≤100
+  characters.
+- **Mutation boundaries** are fixed by ADR 0004 and may not grow: `bzr` subprocess
+  invocations through `bzr_live.provision.adapters.BzrClient`, and
+  `bzr_live.provision.adapters.assign_bug_custom_fields` for per-bug custom fields. No new
+  REST route, no raw SQL, no bridge call from the replay path.
+- **Secrets**: an API key reaches `bzr` only through the `BZR_LIVE_API_KEY` environment
+  variable (`BzrClient` already does this) and reaches REST only in the JSON body. Every
+  journal write passes `known_secrets` so redaction applies. No key in argv, in a message,
+  or in ordinary output.
+- **Journal contract** is ADR 0002's and is not modified: `next_safe_action` written by this
+  code is only `advance`, `retry`, or `stop`; a reconciliation-derived record carries
+  `exit_status = -1`.
+- **Refusals are preconditions.** Every check that can run before a mutation runs before the
+  first mutation.
+- **Scenario name and event names** are loader-validated slugs matching
+  `[a-z][a-z0-9-]{0,62}`, so they are safe path components.
+
+## File map
+
+| File | New/changed | Responsibility |
+|---|---|---|
+| `src/bzr_live/replay/__init__.py` | new | package exports |
+| `src/bzr_live/replay/context.py` | new | `ReplayError`, `ReplayContext` — credentials, ID table, workspace |
+| `src/bzr_live/replay/actions.py` | new | `Invocation`, `Reconciliation`, `ActionHandler` and the eight handlers, `HANDLERS` |
+| `src/bzr_live/replay/engine.py` | new | `ReplayEngine` — preconditions, ordered loop, journal, resume decisions |
+| `src/bzr_live/replay/__main__.py` | new | CLI and exit codes |
+| `tests/test_replay.py` | new | unit suite over mocked `subprocess.run` and URL opener |
+| `tests/fixtures/replay-scenario/` | new | scenario exercising all eight actions |
+| `Makefile` | changed | widen the `compileall` target from two named test files to `tests` |
+| `.github/workflows/scenario-contract.yml` | changed | add the new ADR, spec and plan to both `paths` lists |
+| `README.md` | changed | document `replay` and `resume` |
+
+## Task 1 — `ReplayContext`
+
+Creates `src/bzr_live/replay/__init__.py`, `src/bzr_live/replay/context.py`.
+Tests in `tests/test_replay.py`.
+
+**Where this fits.** Everything else consumes `ReplayContext`. It is the only unit that
+touches the key store, the temporary workspace, and the ID table.
+
+**Interfaces produced** (later tasks rely on these exact signatures):
+
+```python
+class ReplayError(Exception): ...
+
+class ReplayContext:
+    def __init__(self, scenario: ValidatedScenario, keys: KeyStore, *, bzr_path: str,
+                 base_url: str, workspace: str | Path, run=subprocess.run,
+                 opener=urllib.request.urlopen) -> None
+    def actor_email(self, actor: Reference) -> str
+    def client(self, actor: Reference) -> BzrClient
+    def actor_key(self, actor: Reference) -> str
+    @property
+    def known_secrets(self) -> frozenset[str]
+    def resolve(self, ref: Reference) -> int
+    def resolve_all(self, refs: tuple[Reference, ...]) -> list[int]
+    def adopt(self, resolved_ids: Mapping[str, int]) -> None
+    def resource(self, kind: str, name: str) -> PlannedResource
+    def text_file(self, stem: str, text: str) -> str
+    def json_file(self, stem: str, document: dict) -> str
+    def asset_file(self, name: str, expected_sha256: str) -> str
+    def rest(self, actor: Reference, bug_id: int, values: dict) -> object
+```
+
+**Interfaces consumed** (confirmed present in this repository at
+`bb3a189`): `bzr_live.scenario.ValidatedScenario` (fields `name`, `resources`,
+`resource_plan`, `events`, `assets`, `digest`), `bzr_live.scenario.Reference(kind, name)`,
+`bzr_live.scenario.PlannedResource(kind, name, data, dependencies)`,
+`bzr_live.scenario.Asset(name, path, sha256, content)`,
+`bzr_live.provision.adapters.BzrClient(bzr_path, base_url, api_key, admin_email, run=subprocess.run)`
+with `.read(args, positionals=None)` / `.write(args, positionals=None)` / `.whoami()`,
+`bzr_live.provision.adapters.assign_bug_custom_fields(base_url, api_key, bug_id, values, opener=urllib.request.urlopen)`,
+`bzr_live.provision.adapters.ProvisionError`, `bzr_live.provision.adapters._KEY_ENV`
+(the string `"BZR_LIVE_API_KEY"`), `bzr_live.provision.keys.KeyStore(state_root)` with
+`.actor_key(name)` / `.admin_key()`.
+
+### Step 1.1 — write the failing test
+
+Create `tests/test_replay.py`:
+
+```python
+from __future__ import annotations
+
+import json
+import os
+import stat
+import tempfile
+import unittest
+from pathlib import Path
+
+from bzr_live.provision import KeyStore, ProvisionError
+from bzr_live.replay import ReplayContext, ReplayError
+from bzr_live.scenario import Reference, load_scenario
+
+
+def _state_root(stack: unittest.TestCase) -> Path:
+    """A 0700 state root that is removed when the test ends."""
+    directory = tempfile.TemporaryDirectory()
+    stack.addCleanup(directory.cleanup)
+    root = Path(directory.name) / "state"
+    return root
+
+
+class ContextTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = _state_root(self)
+        self.keys = KeyStore(self.root)
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        self.workspace = workspace.name
+        self.scenario = load_scenario("tests/fixtures/minimal-scenario")
+
+    def _context(self, **kwargs) -> ReplayContext:
+        return ReplayContext(
+            self.scenario, self.keys, bzr_path="bzr",
+            base_url="http://127.0.0.1:8080/", workspace=self.workspace, **kwargs)
+
+    def test_missing_actor_key_names_provisioning(self) -> None:
+        context = self._context()
+        with self.assertRaises(ReplayError) as caught:
+            context.client(Reference("actor", "reporter"))
+        self.assertIn("no API key for actor 'reporter'", str(caught.exception))
+        self.assertIn("bzr_live.provision", str(caught.exception))
+
+    def test_client_is_cached_and_registers_the_secret(self) -> None:
+        self.keys.store_actor_key("reporter", "SECRET-KEY")
+        context = self._context()
+        first = context.client(Reference("actor", "reporter"))
+        second = context.client(Reference("actor", "reporter"))
+        self.assertIs(first, second)
+        self.assertEqual(context.known_secrets, frozenset({"SECRET-KEY"}))
+
+    def test_resolve_reports_an_unresolved_reference(self) -> None:
+        context = self._context()
+        with self.assertRaises(ReplayError) as caught:
+            context.resolve(Reference("bug", "absent"))
+        self.assertIn("bug:absent", str(caught.exception))
+        context.adopt({"bug:absent": 12})
+        self.assertEqual(context.resolve(Reference("bug", "absent")), 12)
+
+    def test_text_file_is_private_and_holds_the_body(self) -> None:
+        context = self._context()
+        path = context.text_file("body", "hello")
+        self.assertEqual(Path(path).read_text(encoding="utf-8"), "hello")
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_text_file_names_are_unique(self) -> None:
+        context = self._context()
+        self.assertNotEqual(context.text_file("body", "a"), context.text_file("body", "b"))
+```
+
+The `minimal-scenario` fixture declares an actor named `reporter`; confirm with
+`python -c "import json;print(open('tests/fixtures/minimal-scenario/resources.json').read())"`
+before relying on the name, and use whatever actor slug it declares.
+
+### Step 1.2 — confirm it fails
+
+```
+uv run --python 3.11 python -m unittest tests.test_replay -v
+```
+
+Expect `ModuleNotFoundError: No module named 'bzr_live.replay'`.
+
+### Step 1.3 — write `context.py`
+
+```python
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import urllib.request
+from collections.abc import Mapping
+from pathlib import Path
+
+from ..provision.adapters import (
+    BUG_CUSTOM_FIELD_BOUNDARY,
+    BzrClient,
+    _KEY_ENV,
+    assign_bug_custom_fields,
+)
+from ..scenario import PlannedResource, Reference, ValidatedScenario
+
+KEY_ENV = _KEY_ENV
+REST_BOUNDARY = BUG_CUSTOM_FIELD_BOUNDARY
+
+
+class ReplayError(Exception):
+    """Actionable replay failure; str(exc) is the operator-facing message."""
+
+
+class ReplayContext:
+    """Credentials, symbolic identity, and the scratch workspace for one run."""
+
+    def __init__(self, scenario, keys, *, bzr_path, base_url, workspace,
+                 run=subprocess.run, opener=urllib.request.urlopen) -> None:
+        self._scenario = scenario
+        self._keys = keys
+        self._bzr_path = bzr_path
+        self._base_url = base_url
+        self._workspace = Path(workspace)
+        self._run = run
+        self._opener = opener
+        self._clients: dict[str, BzrClient] = {}
+        self._keys_seen: dict[str, str] = {}
+        self._ids: dict[str, int] = {}
+        self._resources = {f"{r.kind}:{r.name}": r for r in scenario.resources}
+        self._files = 0
+
+    # --- resources and credentials ---------------------------------------
+
+    def resource(self, kind: str, name: str) -> PlannedResource:
+        try:
+            return self._resources[f"{kind}:{name}"]
+        except KeyError:
+            raise ReplayError(f"{kind}:{name} is not declared in this scenario") from None
+
+    def actor_email(self, actor: Reference) -> str:
+        return self.resource("actor", actor.name).data["email"]
+
+    def actor_key(self, actor: Reference) -> str:
+        if actor.name not in self._keys_seen:
+            key = self._keys.actor_key(actor.name)
+            if key is None:
+                raise ReplayError(
+                    f"no API key for actor {actor.name!r}; run "
+                    f"python -m bzr_live.provision <scenario_dir> first")
+            self._keys_seen[actor.name] = key
+        return self._keys_seen[actor.name]
+
+    def client(self, actor: Reference) -> BzrClient:
+        key = self.actor_key(actor)
+        if actor.name not in self._clients:
+            self._clients[actor.name] = BzrClient(
+                self._bzr_path, self._base_url, key,
+                admin_email=self.actor_email(actor), run=self._run)
+        return self._clients[actor.name]
+
+    @property
+    def known_secrets(self) -> frozenset[str]:
+        return frozenset(self._keys_seen.values())
+
+    # --- identity ---------------------------------------------------------
+
+    def resolve(self, ref: Reference) -> int:
+        try:
+            return self._ids[f"{ref.kind}:{ref.name}"]
+        except KeyError:
+            raise ReplayError(
+                f"{ref.kind}:{ref.name} has no server id; the event that creates it has "
+                "not completed") from None
+
+    def resolve_all(self, refs) -> list[int]:
+        return [self.resolve(ref) for ref in refs]
+
+    def adopt(self, resolved_ids: Mapping[str, int]) -> None:
+        self._ids.update(resolved_ids)
+
+    # --- workspace --------------------------------------------------------
+
+    def _write_private(self, name: str, content: bytes) -> str:
+        path = self._workspace / name
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            offset = 0
+            while offset < len(content):
+                offset += os.write(fd, content[offset:])
+        finally:
+            os.close(fd)
+        return str(path)
+
+    def text_file(self, stem: str, text: str) -> str:
+        self._files += 1
+        return self._write_private(
+            f"{self._files:04d}-{stem}.txt", text.encode("utf-8"))
+
+    def json_file(self, stem: str, document: dict) -> str:
+        self._files += 1
+        encoded = json.dumps(document, ensure_ascii=False).encode("utf-8")
+        return self._write_private(f"{self._files:04d}-{stem}.json", encoded)
+
+    def asset_file(self, name: str, expected_sha256: str) -> str:
+        asset = self._scenario.assets[name]
+        if asset.sha256 != expected_sha256:
+            raise ReplayError(
+                f"asset {name!r} hashes to {asset.sha256} but the event expects "
+                f"{expected_sha256}; the scenario and its journal disagree")
+        self._files += 1
+        directory = self._workspace / f"{self._files:04d}-asset"
+        os.mkdir(directory, 0o700)
+        return self._write_private(
+            f"{directory.name}/{Path(asset.path).name}", asset.content)
+
+    # --- the REST boundary -------------------------------------------------
+
+    def rest(self, actor: Reference, bug_id: int, values: dict) -> object:
+        return assign_bug_custom_fields(
+            self._base_url, self.actor_key(actor), bug_id, values, opener=self._opener)
+```
+
+Create `src/bzr_live/replay/__init__.py`:
+
+```python
+"""Actor-scoped event replay with journal-backed safe resume (issue #6, ADR 0006)."""
+
+from .context import ReplayContext, ReplayError
+
+__all__ = ["ReplayContext", "ReplayError"]
+```
+
+### Step 1.4 — confirm it passes
+
+```
+uv run --python 3.11 python -m unittest tests.test_replay -v
+```
+
+Expect `OK`, five tests.
+
+### Step 1.5 — commit
+
+```
+make check && make test
+git add src/bzr_live/replay tests/test_replay.py
+git commit -m "feat(replay): add the replay context for credentials and identity"
+```
+
+Both guardrails exit 0. `make test` reports 159 tests.
+
+**Acceptance criteria.** A missing actor key raises `ReplayError` naming the actor and the
+provisioning command. Clients are cached per actor. `known_secrets` holds every loaded key.
+`resolve` raises for an unresolved reference and returns the adopted ID afterwards. Workspace
+files are mode 0600 and uniquely named. An asset whose checksum disagrees with the event's
+`asset_sha256` raises.
+
+## Task 2 — the supported-payload table
+
+Creates `src/bzr_live/replay/actions.py` (the `check_supported` half). Tests appended to
+`tests/test_replay.py`.
+
+**Where this fits.** `ReplayEngine` runs `check_supported` over every event as precondition
+2, before any mutation. Task 3 fills in `build` on the same classes.
+
+**Interfaces produced:**
+
+```python
+class ActionHandler:
+    action: str
+    boundary: str = "bzr"
+    @staticmethod
+    def check_supported(event: PlannedEvent) -> None      # raises ReplayError
+
+HANDLERS: dict[str, ActionHandler]        # keyed by PlannedEvent.action, all eight actions
+ATTACHMENT_SUMMARY_LIMIT = 255
+def render_marker(text: str, marker: str) -> str
+def render_attachment_summary(description: str, marker: str, sha256: str) -> str
+```
+
+**Interfaces consumed:** `bzr_live.scenario.PlannedEvent` (fields `name`, `actor`, `action`,
+`action_class`, `payload`, `dependencies`, `reconciliation_marker`, `expected_postcondition`,
+`creates`), and `ReplayError` from Task 1. `event.expected_postcondition` is a mapping with
+keys `action`, `target`, `values`, `marker`; `values` is the per-action mapping the loader
+built.
+
+### Step 2.1 — write the failing tests
+
+Append to `tests/test_replay.py`:
+
+```python
+from bzr_live.replay import HANDLERS, ReplayError
+from bzr_live.scenario import ScenarioValidationError, load_scenario
+
+
+class SupportedPayloadTest(unittest.TestCase):
+    def _event(self, action: str, **values):
+        """A minimal stand-in carrying only what check_supported reads."""
+        class Event:
+            pass
+        event = Event()
+        event.name = "sample"
+        event.action = action
+        event.reconciliation_marker = "bzr-live:demo:sample"
+        event.expected_postcondition = {"action": action, "values": values}
+        return event
+
+    def test_create_rejects_custom_fields(self) -> None:
+        event = self._event("bug.create", version="1.0", custom_fields=({"field": 1},))
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.create"].check_supported(event)
+        self.assertIn("custom_fields", str(caught.exception))
+        self.assertIn("bug.custom-field-set", str(caught.exception))
+
+    def test_create_rejects_estimated_hours(self) -> None:
+        event = self._event("bug.create", version="1.0", estimated_hours="3.5")
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.create"].check_supported(event)
+        self.assertIn("estimated_hours", str(caught.exception))
+        self.assertIn("bug.update", str(caught.exception))
+
+    def test_create_rejects_a_null_version(self) -> None:
+        event = self._event("bug.create", version=None)
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.create"].check_supported(event)
+        self.assertIn("version", str(caught.exception))
+
+    def test_create_accepts_a_supported_payload(self) -> None:
+        HANDLERS["bug.create"].check_supported(self._event("bug.create", version="1.0"))
+
+    def test_update_rejects_groups(self) -> None:
+        event = self._event("bug.update", groups=())
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.update"].check_supported(event)
+        self.assertIn("groups", str(caught.exception))
+
+    def test_update_rejects_a_null_resolution(self) -> None:
+        event = self._event("bug.update", resolution=None)
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.update"].check_supported(event)
+        self.assertIn("resolution", str(caught.exception))
+
+    def test_update_rejects_status_with_duplicate_of(self) -> None:
+        event = self._event("bug.update", status="RESOLVED", duplicate_of=object())
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.update"].check_supported(event)
+        self.assertIn("--dupe-of", str(caught.exception))
+
+    def test_attachment_summary_limit(self) -> None:
+        event = self._event(
+            "bug.attach", description="x" * 250, asset_sha256="a" * 64)
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.attach"].check_supported(event)
+        self.assertIn("255", str(caught.exception))
+
+    def test_every_action_has_a_handler(self) -> None:
+        self.assertEqual(set(HANDLERS), {
+            "bug.create", "bug.update", "bug.comment", "bug.attach", "bug.worktime",
+            "bug.custom-field-set", "bug.flag", "attachment.update"})
+```
+
+### Step 2.2 — confirm it fails
+
+```
+uv run --python 3.11 python -m unittest tests.test_replay -v
+```
+
+Expect `ImportError: cannot import name 'HANDLERS' from 'bzr_live.replay'`.
+
+### Step 2.3 — write the `check_supported` half of `actions.py`
+
+```python
+from __future__ import annotations
+
+from ..scenario import PlannedEvent
+from .context import ReplayError
+
+ATTACHMENT_SUMMARY_LIMIT = 255
+
+_CREATE_UNSUPPORTED = {
+    "custom_fields": "move it to a follow-up bug.custom-field-set event",
+    "estimated_hours": "move it to a follow-up bug.update event",
+    "remaining_hours": "move it to a follow-up bug.update event",
+    "duplicate_of": "move it to a follow-up bug.update event",
+}
+_UPDATE_UNSUPPORTED = {
+    "groups": "set groups in the bug.create event; bzr bug view cannot read them back",
+    "version": "bzr bug update has no version field",
+}
+_UPDATE_NO_CLEAR = {
+    "resolution": "set status to an open status; Bugzilla clears the resolution",
+    "milestone": "bzr bug update cannot clear a milestone",
+}
+
+
+def render_marker(text: str, marker: str) -> str:
+    return f"{text}\n\n[{marker}]"
+
+
+def render_attachment_summary(description: str, marker: str, sha256: str) -> str:
+    return f"{description} [{marker}] sha256={sha256}".strip()
+
+
+def _unsupported(event: PlannedEvent, field: str, fix: str) -> ReplayError:
+    return ReplayError(
+        f"event {event.name!r} ({event.action}) declares {field!r}, which the bzr "
+        f"boundary cannot apply in one mutation; {fix}")
+
+
+class ActionHandler:
+    action = ""
+    boundary = "bzr"
+
+    @staticmethod
+    def check_supported(event: PlannedEvent) -> None:
+        return
+
+
+class BugCreateHandler(ActionHandler):
+    action = "bug.create"
+
+    @staticmethod
+    def check_supported(event: PlannedEvent) -> None:
+        values = event.expected_postcondition["values"]
+        for field, fix in _CREATE_UNSUPPORTED.items():
+            declared = values.get(field)
+            if declared:                      # () and None are both "not declared"
+                raise _unsupported(event, field, fix)
+        if values.get("version") is None:
+            raise _unsupported(
+                event, "version",
+                "Bugzilla requires a version on create; declare one in the payload")
+
+
+class BugUpdateHandler(ActionHandler):
+    action = "bug.update"
+
+    @staticmethod
+    def check_supported(event: PlannedEvent) -> None:
+        values = event.expected_postcondition["values"]
+        for field, fix in _UPDATE_UNSUPPORTED.items():
+            if field in values:
+                raise _unsupported(event, field, fix)
+        for field, fix in _UPDATE_NO_CLEAR.items():
+            if field in values and values[field] is None:
+                raise _unsupported(event, field, fix)
+        if "status" in values and values.get("duplicate_of") is not None:
+            raise _unsupported(
+                event, "status",
+                "bzr rejects --status together with --dupe-of; use separate events")
+
+
+class BugCommentHandler(ActionHandler):
+    action = "bug.comment"
+
+
+class BugAttachHandler(ActionHandler):
+    action = "bug.attach"
+
+    @staticmethod
+    def check_supported(event: PlannedEvent) -> None:
+        values = event.expected_postcondition["values"]
+        rendered = render_attachment_summary(
+            values["description"], event.reconciliation_marker, values["asset_sha256"])
+        if len(rendered) > ATTACHMENT_SUMMARY_LIMIT:
+            raise _unsupported(
+                event, "description",
+                f"the rendered attachment summary is {len(rendered)} characters and "
+                f"Bugzilla stores {ATTACHMENT_SUMMARY_LIMIT}; shorten the description")
+
+
+class BugWorktimeHandler(ActionHandler):
+    action = "bug.worktime"
+
+
+class BugCustomFieldHandler(ActionHandler):
+    action = "bug.custom-field-set"
+    boundary = "bugzilla-rest-custom-field"
+
+
+class BugFlagHandler(ActionHandler):
+    action = "bug.flag"
+
+
+class AttachmentUpdateHandler(ActionHandler):
+    action = "attachment.update"
+
+
+HANDLERS: dict[str, ActionHandler] = {
+    handler.action: handler()
+    for handler in (
+        BugCreateHandler, BugUpdateHandler, BugCommentHandler, BugAttachHandler,
+        BugWorktimeHandler, BugCustomFieldHandler, BugFlagHandler, AttachmentUpdateHandler,
+    )
+}
+```
+
+Extend `src/bzr_live/replay/__init__.py`:
+
+```python
+"""Actor-scoped event replay with journal-backed safe resume (issue #6, ADR 0006)."""
+
+from .actions import HANDLERS, ActionHandler
+from .context import ReplayContext, ReplayError
+
+__all__ = ["HANDLERS", "ActionHandler", "ReplayContext", "ReplayError"]
+```
+
+### Step 2.4 — confirm it passes
+
+```
+uv run --python 3.11 python -m unittest tests.test_replay -v
+```
+
+Expect `OK`, fourteen tests.
+
+### Step 2.5 — commit
+
+```
+make check && make test
+git add src/bzr_live/replay tests/test_replay.py
+git commit -m "feat(replay): refuse payloads the bzr boundary cannot apply"
+```
+
+**Acceptance criteria.** Every row of the spec's supported-payload "Refused" column raises
+`ReplayError` naming the field and its fix. A supported payload raises nothing. `HANDLERS`
+covers exactly the loader's eight actions.
+
+## Task 3 — building invocations
+
+Adds `Invocation` and `build`/`resolved_ids` to
+`src/bzr_live/replay/actions.py`. Tests appended to `tests/test_replay.py`.
+
+**Where this fits.** `ReplayEngine` calls `build` before writing the in-flight record, so the
+`InvocationMetadata` recorded there is the one that is about to run.
+
+**Interfaces produced:**
+
+```python
+@dataclass(frozen=True, slots=True)
+class Invocation:
+    metadata: InvocationMetadata
+    args: tuple[str, ...]
+    positionals: tuple[str, ...]
+    target_id: int | None = None            # bug id, for the REST boundary
+    values: Mapping[str, object] | None = None   # REST body, without the api_key
+
+class ActionHandler:
+    def build(self, context: ReplayContext, event: PlannedEvent) -> Invocation
+    def resolved_ids(self, event: PlannedEvent, output) -> dict[str, int]
+```
+
+**Interfaces consumed:** `ReplayContext` from Task 1 (`client`, `actor_email`, `resolve`,
+`resolve_all`, `text_file`, `json_file`, `asset_file`, `rest`, `resource`),
+`bzr_live.scenario.InvocationMetadata(mutation_boundary, operation, arguments, environment_names)`,
+`bzr_live.replay.context.KEY_ENV` (`"BZR_LIVE_API_KEY"`),
+`bzr_live.provision.executor.custom_field_name(slug) -> str` (maps `a-b` to `cf_a_b`).
+
+### Step 3.1 — write the failing tests
+
+Append to `tests/test_replay.py`. `_FakeRun` records every argv and returns a queued reply;
+it is reused by Tasks 4 and 5.
+
+```python
+import subprocess
+
+
+class _FakeRun:
+    """Stands in for subprocess.run: records calls, returns queued CompletedProcess."""
+
+    def __init__(self, replies=None):
+        self.calls: list[dict] = []
+        self.replies = list(replies or [])
+
+    def __call__(self, argv, capture_output=False, env=None, shell=False, input=None):
+        self.calls.append({"argv": list(argv), "env": dict(env or {}), "input": input})
+        if self.replies:
+            code, payload = self.replies.pop(0)
+        else:
+            code, payload = 0, {}
+        stdout = json.dumps(payload).encode("utf-8") if payload is not None else b""
+        return subprocess.CompletedProcess(argv, code, stdout, b"")
+
+
+class BuildTest(unittest.TestCase):
+    # setUp mirrors ContextTest: a 0700 state root, a workspace, the replay fixture,
+    # and an actor key stored for every actor the fixture declares.
+    ...
+
+    def test_comment_writes_the_body_to_a_private_file_with_the_marker(self) -> None:
+        event = self._event("comment-triage")     # a bug.comment event in the fixture
+        self.context.adopt({"bug:checkout-race": 41})
+        invocation = HANDLERS["bug.comment"].build(self.context, event)
+        self.assertEqual(invocation.positionals, ("41",))
+        body_arg = [a for a in invocation.args if a.startswith("--body-file=")][0]
+        body = Path(body_arg.split("=", 1)[1]).read_text(encoding="utf-8")
+        self.assertTrue(body.endswith("\n\n[bzr-live:replay-demo:comment-triage]"))
+        self.assertEqual(invocation.metadata.mutation_boundary, "bzr")
+        self.assertEqual(invocation.metadata.environment_names, ("BZR_LIVE_API_KEY",))
+
+    def test_create_json_carries_the_server_alias_and_no_cf_fields(self) -> None:
+        event = self._event("create-checkout-race")
+        invocation = HANDLERS["bug.create"].build(self.context, event)
+        path = [a for a in invocation.args if a.startswith("--from-json=")][0].split("=", 1)[1]
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+        self.assertTrue(document["alias"].startswith("bzr-live-"))
+        self.assertNotIn("estimated_time", document)
+        self.assertFalse([k for k in document if k.startswith("cf_")])
+
+    def test_update_computes_add_and_remove_deltas(self) -> None:
+        # bug view reports cc [keep@x, drop@x]; the event declares [keep@x, join@x]
+        ...
+        self.assertIn("--cc-add=join@x", invocation.args)
+        self.assertIn("--cc-remove=drop@x", invocation.args)
+
+    def test_flag_renders_bugzilla_syntax(self) -> None:
+        invocation = HANDLERS["bug.flag"].build(self.context, self._event("flag-review"))
+        self.assertIn("--flag=review?(triager@example.test)", invocation.args)
+
+    def test_create_resolves_the_new_bug_id(self) -> None:
+        ids = HANDLERS["bug.create"].resolved_ids(
+            self._event("create-checkout-race"), {"id": 41})
+        self.assertEqual(ids, {"bug:checkout-race": 41})
+
+    def test_no_argument_ever_carries_the_key(self) -> None:
+        for event in self.scenario.events:
+            invocation = HANDLERS[event.action].build(self.context, event)
+            for argument in invocation.args + invocation.positionals:
+                self.assertNotIn("SECRET-KEY", argument)
+```
+
+### Step 3.2 — confirm it fails
+
+```
+uv run --python 3.11 python -m unittest tests.test_replay -v
+```
+
+Expect `AttributeError: 'BugCommentHandler' object has no attribute 'build'`.
+
+### Step 3.3 — implement `build` and `resolved_ids`
+
+Add to `actions.py` (imports first):
+
+```python
+from dataclasses import dataclass
+from collections.abc import Mapping
+from pathlib import Path
+
+from ..provision.executor import custom_field_name
+from ..scenario import InvocationMetadata, JsonValue
+from .context import KEY_ENV, REST_BOUNDARY, ReplayContext
+
+
+@dataclass(frozen=True, slots=True)
+class Invocation:
+    metadata: InvocationMetadata
+    args: tuple[str, ...] = ()
+    positionals: tuple[str, ...] = ()
+    target_id: int | None = None
+    values: Mapping[str, object] | None = None
+
+
+def _bzr(operation: str, args, positionals=()) -> Invocation:
+    args, positionals = tuple(args), tuple(str(p) for p in positionals)
+    return Invocation(
+        InvocationMetadata("bzr", operation, args + positionals, (KEY_ENV,)),
+        args, positionals)
+
+
+def _delta(declared: list, observed: list) -> tuple[list, list]:
+    """Bugzilla list fields are edited by add/remove, so a declared set is a delta."""
+    add = [item for item in declared if item not in observed]
+    remove = [item for item in observed if item not in declared]
+    return add, remove
+
+
+def _bug_object(payload) -> dict | None:
+    """bzr bug view returns one bug object; tolerate the batch wrapper as well."""
+    if isinstance(payload, dict):
+        if "id" in payload:
+            return payload
+        bugs = payload.get("bugs")
+        if isinstance(bugs, list) and len(bugs) == 1 and isinstance(bugs[0], dict):
+            return bugs[0]
+    return None
+```
+
+`BugCreateHandler.build` — assemble the `--from-json` document, dropping absent keys:
+
+```python
+    def build(self, context, event):
+        values = event.expected_postcondition["values"]
+        document: dict[str, object] = {
+            "alias": values["server_alias"],
+            "product": values["product"].name,
+            "component": values["component"].name,
+            "summary": values["summary"],
+            "description": values["description"],
+            "version": values["version"].name,
+        }
+        if values["milestone"] is not None:
+            document["target_milestone"] = values["milestone"].name
+        if values["assignee"] is not None:
+            document["assignee"] = context.actor_email(values["assignee"])
+        cc = [context.actor_email(ref) for ref in values["cc"]]
+        keywords = [ref.name for ref in values["keywords"]]
+        groups = [ref.name for ref in values["groups"]]
+        for key, collection in (
+            ("cc", cc), ("keywords", keywords), ("groups", groups),
+            ("blocks", context.resolve_all(values["blocks"])),
+            ("depends_on", context.resolve_all(values["depends_on"])),
+        ):
+            if collection:
+                document[key] = collection
+        path = context.json_file(f"create-{event.name}", document)
+        return _bzr("bug create", ["bug", "create", f"--from-json={path}"])
+
+    def resolved_ids(self, event, output):
+        bug = _bug_object(output)
+        if bug is None or not isinstance(bug.get("id"), int) or bug["id"] <= 0:
+            raise ReplayError(
+                f"event {event.name!r}: bzr bug create returned no bug id")
+        return {f"bug:{event.creates.name}": bug["id"]}
+```
+
+`BugUpdateHandler.build` — read the bug, then emit set flags and deltas:
+
+```python
+    def build(self, context, event):
+        values = event.expected_postcondition["values"]
+        bug_ref = event.expected_postcondition["target"]
+        bug_id = context.resolve(bug_ref)
+        observed = _bug_object(
+            context.client(event.actor).read(["bug", "view"], positionals=[str(bug_id)]))
+        if observed is None:
+            raise ReplayError(
+                f"event {event.name!r}: cannot read bug {bug_id} to compute the update")
+        args = ["bug", "update"]
+        for key, flag in (
+            ("summary", "--summary"), ("status", "--status"),
+            ("resolution", "--resolution"),
+        ):
+            if key in values:
+                args.append(f"{flag}={values[key]}")
+        if "assignee" in values:
+            args.append(
+                "--reset-assigned-to" if values["assignee"] is None
+                else f"--assignee={context.actor_email(values['assignee'])}")
+        if values.get("duplicate_of") is not None:
+            args.append(f"--dupe-of={context.resolve(values['duplicate_of'])}")
+        if values.get("milestone") is not None:
+            args.append(f"--target-milestone={values['milestone'].name}")
+        for key, flag in (
+            ("estimated_hours", "--estimated-time"),
+            ("remaining_hours", "--remaining-time"),
+        ):
+            if key in values:
+                args.append(f"{flag}={values[key]}")
+        for key, add_flag, remove_flag, project in (
+            ("cc", "--cc-add", "--cc-remove", lambda r: context.actor_email(r)),
+            ("keywords", "--keywords-add", "--keywords-remove", lambda r: r.name),
+            ("depends_on", "--depends-on-add", "--depends-on-remove",
+             lambda r: context.resolve(r)),
+            ("blocks", "--blocks-add", "--blocks-remove", lambda r: context.resolve(r)),
+        ):
+            if key not in values:
+                continue
+            declared = [project(ref) for ref in values[key]]
+            add, remove = _delta(declared, list(observed.get(key) or []))
+            args += [f"{add_flag}={item}" for item in add]
+            args += [f"{remove_flag}={item}" for item in remove]
+        return _bzr("bug update", args, [bug_id])
+```
+
+The remaining six `build` methods, each two to eight lines:
+
+```python
+# BugCommentHandler
+    def build(self, context, event):
+        values = event.expected_postcondition["values"]
+        bug_id = context.resolve(event.expected_postcondition["target"])
+        path = context.text_file(
+            f"comment-{event.name}",
+            render_marker(values["body"], event.reconciliation_marker))
+        args = ["comment", "add", f"--body-file={path}"]
+        if values["private"]:
+            args.append("--private")
+        return _bzr("comment add", args, [bug_id])
+
+# BugAttachHandler
+    def build(self, context, event):
+        values = event.expected_postcondition["values"]
+        bug_id = context.resolve(values["bug"])
+        path = context.asset_file(values["asset"].name, values["asset_sha256"])
+        summary = render_attachment_summary(
+            values["description"], event.reconciliation_marker, values["asset_sha256"])
+        args = ["attachment", "upload", f"--summary={summary}",
+                f"--content-type={values['content_type']}"]
+        if values["private"]:
+            args.append("--private")
+        return _bzr("attachment upload", args, [bug_id, path])
+
+    def resolved_ids(self, event, output):
+        if not isinstance(output, dict) or not isinstance(output.get("id"), int):
+            raise ReplayError(
+                f"event {event.name!r}: bzr attachment upload returned no attachment id")
+        return {f"attachment:{event.creates.name}": output["id"]}
+
+# BugWorktimeHandler
+    def build(self, context, event):
+        values = event.expected_postcondition["values"]
+        bug_id = context.resolve(values["bug"])
+        path = context.text_file(
+            f"worktime-{event.name}",
+            render_marker(values["comment"], event.reconciliation_marker))
+        return _bzr("bug update", [
+            "bug", "update", f"--work-time={values['hours']}",
+            f"--comment-file={path}"], [bug_id])
+
+# BugCustomFieldHandler
+    def build(self, context, event):
+        values = event.expected_postcondition["values"]
+        bug_id = context.resolve(values["bug"])
+        body = {
+            custom_field_name(assignment["field"].name):
+                list(assignment["value"]) if isinstance(assignment["value"], tuple)
+                else assignment["value"]
+            for assignment in values["values"]
+        }
+        return Invocation(
+            InvocationMetadata(
+                REST_BOUNDARY, f"PUT rest/bug/{bug_id}", tuple(sorted(body)), ()),
+            target_id=bug_id, values=body)
+
+# BugFlagHandler
+    def build(self, context, event):
+        values = event.expected_postcondition["values"]
+        bug_id = context.resolve(values["bug"])
+        spec = f"{values['flag_type'].name}{values['status']}"
+        if values["requestee"] is not None:
+            spec += f"({context.actor_email(values['requestee'])})"
+        return _bzr("bug update", ["bug", "update", f"--flag={spec}"], [bug_id])
+
+# AttachmentUpdateHandler
+    def build(self, context, event):
+        values = event.expected_postcondition["values"]
+        attachment_id = context.resolve(values["attachment"])
+        args = ["attachment", "update",
+                "--obsolete" if values["obsolete"] else "--no-obsolete"]
+        if "description" in values:
+            args.append(f"--summary={values['description']}")
+        return _bzr("attachment update", args, [attachment_id])
+```
+
+Base-class defaults on `ActionHandler`:
+
+```python
+    def build(self, context, event) -> Invocation:
+        raise NotImplementedError(self.action)
+
+    def resolved_ids(self, event, output) -> dict[str, int]:
+        return {}
+```
+
+Export `Invocation` from `__init__.py` alongside `HANDLERS`.
+
+### Step 3.4 — confirm it passes
+
+```
+uv run --python 3.11 python -m unittest tests.test_replay -v
+```
+
+Expect `OK`, twenty tests.
+
+### Step 3.5 — commit
+
+```
+make check && make test
+git add src/bzr_live/replay tests/test_replay.py tests/fixtures/replay-scenario
+git commit -m "feat(replay): build one bzr or REST invocation per event"
+```
+
+**Acceptance criteria.** Every action builds an `Invocation` whose `metadata` names the right
+boundary and, for bzr, `("BZR_LIVE_API_KEY",)`. Comment bodies and the create JSON go to
+mode-0600 workspace files. Append-class text carries the loader's marker; set-class text does
+not. Update deltas are computed from a `bzr bug view` read. No argument or positional
+contains an API key.
+
+## Task 4 — reconciliation
+
+Adds `Reconciliation` and `reconcile` to `src/bzr_live/replay/actions.py`. Tests appended
+to `tests/test_replay.py`.
+
+**Where this fits.** `ReplayEngine` calls `reconcile` whenever an invocation did not clearly
+succeed and whenever it resumes an in-flight record.
+
+**Interfaces produced:**
+
+```python
+@dataclass(frozen=True, slots=True)
+class Reconciliation:
+    next_action: str                 # "advance" | "retry" | "stop"
+    output: JsonValue
+    resolved_ids: Mapping[str, int]
+    detail: str
+
+class ActionHandler:
+    def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation
+```
+
+**Interfaces consumed:** `ReplayContext.client(actor).read(args, positionals)` returning the
+decoded payload or `None` when the object is absent, and `context.resolve`. Reply shapes
+confirmed against bzr `b80303b7`: `bug view` yields the bug object with `id`, `summary`,
+`status`, `resolution`, `dupe_of`, `assigned_to`, `target_milestone`, `keywords`, `blocks`,
+`depends_on`, `cc`, `flags`, and any `cf_*`; `comment list` yields comments with `id` and
+`text`; `attachment list` yields attachments with `id`, `summary`, `is_obsolete`.
+
+### Step 4.1 — write the failing tests
+
+```python
+class ReconcileTest(unittest.TestCase):
+    def test_create_adopts_an_existing_alias(self) -> None:
+        run = _FakeRun([(0, {"id": 41, "summary": "Checkout race"})])
+        result = HANDLERS["bug.create"].reconcile(self._context(run), self._create_event())
+        self.assertEqual(result.next_action, "advance")
+        self.assertEqual(result.resolved_ids, {"bug:checkout-race": 41})
+
+    def test_create_retries_when_the_alias_is_absent(self) -> None:
+        run = _FakeRun([(2, None)])          # exit 2 is BzrClient's "absent"
+        result = HANDLERS["bug.create"].reconcile(self._context(run), self._create_event())
+        self.assertEqual(result.next_action, "retry")
+
+    def test_append_adopts_exactly_one_marker(self) -> None:
+        run = _FakeRun([(0, [{"id": 5, "text": "body\n\n[bzr-live:replay-demo:comment-triage]"}])])
+        result = HANDLERS["bug.comment"].reconcile(self._context(run), self._comment_event())
+        self.assertEqual(result.next_action, "advance")
+
+    def test_append_retries_when_no_marker_is_present(self) -> None:
+        run = _FakeRun([(0, [{"id": 5, "text": "unrelated"}])])
+        result = HANDLERS["bug.comment"].reconcile(self._context(run), self._comment_event())
+        self.assertEqual(result.next_action, "retry")
+
+    def test_append_stops_on_two_markers(self) -> None:
+        marked = {"id": 5, "text": "[bzr-live:replay-demo:comment-triage]"}
+        run = _FakeRun([(0, [marked, dict(marked, id=6)])])
+        result = HANDLERS["bug.comment"].reconcile(self._context(run), self._comment_event())
+        self.assertEqual(result.next_action, "stop")
+        self.assertIn("CONFIRM_RESET=1 make reset", result.detail)
+
+    def test_set_advances_when_the_postcondition_matches(self) -> None: ...
+    def test_set_retries_when_the_postcondition_differs(self) -> None: ...
+    def test_set_retries_when_a_declared_field_is_unreadable(self) -> None: ...
+```
+
+### Step 4.2 — confirm it fails
+
+Expect `AttributeError: 'BugCreateHandler' object has no attribute 'reconcile'`.
+
+### Step 4.3 — implement `reconcile`
+
+Three shared helpers plus one method per handler:
+
+```python
+AMBIGUOUS_HINT = (
+    "the fixture cannot be reconciled automatically; reset it "
+    "(CONFIRM_RESET=1 make reset) and replay")
+
+
+def _marker_count(entries, field: str, marker: str) -> tuple[int, int | None]:
+    token = f"[{marker}]"
+    hits = [entry for entry in entries or []
+            if isinstance(entry, dict) and token in (entry.get(field) or "")]
+    if len(hits) != 1:
+        return len(hits), None
+    return 1, hits[0].get("id")
+
+
+def _append_result(event, count, entry_id, output):
+    if count == 1:
+        return Reconciliation("advance", output, {}, "")
+    if count == 0:
+        return Reconciliation(
+            "retry", output, {}, f"event {event.name!r} did not commit")
+    return Reconciliation(
+        "stop", output, {},
+        f"event {event.name!r} matches {count} results for marker "
+        f"{event.reconciliation_marker!r}; {AMBIGUOUS_HINT}")
+
+
+def _entries(payload, key: str) -> list:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        inner = payload.get(key)
+        if isinstance(inner, list):
+            return inner
+    return []
+```
+
+- `BugCreateHandler.reconcile` reads `["bug", "view"]` with the server alias as the
+  positional. `None` (absent) yields `retry`; an object with a positive integer `id` yields
+  `advance` plus `{f"bug:{event.creates.name}": id}`; anything else yields `stop` with
+  "returned no usable bug id; " + `AMBIGUOUS_HINT`.
+- `BugCommentHandler.reconcile` and `BugWorktimeHandler.reconcile` read
+  `["comment", "list"]` positional `<bug id>`, then `_marker_count(_entries(payload,
+  "comments"), "text", event.reconciliation_marker)` and `_append_result`.
+- `BugAttachHandler.reconcile` reads `["attachment", "list"]` positional `<bug id>`, matches
+  on `summary`, and on a single hit returns `advance` with
+  `{f"attachment:{event.creates.name}": hit_id}`.
+- `BugUpdateHandler.reconcile` reads `["bug", "view"]` positional `<bug id>` and compares
+  each declared value against the mapping in the spec's "Reconciliation" section:
+  `summary`/`status`/`resolution` as strings, `assignee` against `assigned_to` by email,
+  `duplicate_of` against `dupe_of` by resolved id, `milestone` against `target_milestone` by
+  name, and `cc`/`keywords`/`depends_on`/`blocks` as sets. `estimated_hours`,
+  `remaining_hours`, and a null `assignee` have nothing to compare and force `retry`. All
+  comparable values equal yields `advance`; anything else yields `retry` naming the first
+  field that differed.
+- `BugCustomFieldHandler.reconcile` reads `["bug", "view"]` and compares each
+  `custom_field_name(slug)` key.
+- `BugFlagHandler.reconcile` reads `["bug", "view"]` and searches `flags` for an entry whose
+  `name` equals the flag type and whose `status` equals the declared status.
+- `AttachmentUpdateHandler.reconcile` reads `["attachment", "list"]` on the attachment's bug,
+  selects the entry whose `id` equals the resolved attachment id, and compares `is_obsolete`
+  and, where declared, `summary`.
+
+Every set-class `reconcile` returns only `advance` or `retry`, never `stop`.
+
+### Step 4.4 — confirm it passes
+
+```
+uv run --python 3.11 python -m unittest tests.test_replay -v
+```
+
+Expect `OK`, twenty-eight tests.
+
+### Step 4.5 — commit
+
+```
+make check && make test
+git add src/bzr_live/replay tests/test_replay.py
+git commit -m "feat(replay): reconcile each recovery class against the fixture"
+```
+
+**Acceptance criteria.** A create reconciles by alias; an append by marker count with two or
+more yielding `stop` and a message naming `CONFIRM_RESET=1 make reset`; a set by comparing
+readable declared values, never yielding `stop`.
+
+## Task 5 — `ReplayEngine`
+
+Creates `src/bzr_live/replay/engine.py`. Tests appended to `tests/test_replay.py`.
+
+**Where this fits.** The engine is what `__main__` calls. It owns preconditions, the ordered
+loop, and every journal write.
+
+**Interfaces produced:**
+
+```python
+class ReplayEngine:
+    def __init__(self, scenario: ValidatedScenario, context: ReplayContext,
+                 store: JournalStore, *, out: Callable[[str], None] = print) -> None
+    def replay(self) -> list[tuple[str, str]]     # (status, event name)
+    def resume(self) -> list[tuple[str, str]]
+```
+
+**Interfaces consumed:** `bzr_live.scenario.JournalStore(state_dir)` with
+`.read(event, attempt=None)`, `.write_in_flight(record, known_secrets=())`,
+`.replace_completed(record, known_secrets=())`, and context-manager support;
+`bzr_live.scenario.InFlightRecord(scenario_digest, event, attempt, actor, action_class,
+expected_postcondition, reconciliation_marker)`; `bzr_live.scenario.CompletedRecord(...same
+seven..., invocation, handler_output, exit_status, resolved_ids, next_safe_action)`;
+`HANDLERS`, `Invocation`, `Reconciliation` from Tasks 2–4; `ProvisionError`.
+
+### Step 5.1 — write the failing tests
+
+```python
+class EngineTest(unittest.TestCase):
+    def test_replay_refuses_a_non_empty_journal(self) -> None: ...
+    def test_replay_refuses_when_a_server_alias_already_exists(self) -> None: ...
+    def test_replay_executes_every_event_in_order(self) -> None: ...
+    def test_resume_refuses_a_changed_digest(self) -> None: ...
+    def test_resume_adopts_a_committed_in_flight_create(self) -> None: ...
+    def test_resume_retries_an_in_flight_create_the_server_never_saw(self) -> None: ...
+    def test_resume_refuses_a_recorded_stop_without_querying(self) -> None: ...
+    def test_resume_skips_completed_events_and_rebuilds_the_id_table(self) -> None: ...
+    def test_an_unsupported_payload_stops_before_any_mutation(self) -> None: ...
+    def test_no_journal_record_contains_an_api_key(self) -> None: ...
+```
+
+`test_resume_refuses_a_recorded_stop_without_querying` asserts the fake `run` recorded zero
+calls after the refusal, which is what "without re-querying" means.
+
+### Step 5.2 — confirm it fails
+
+Expect `ImportError: cannot import name 'ReplayEngine'`.
+
+### Step 5.3 — write `engine.py`
+
+```python
+from __future__ import annotations
+
+from typing import Callable
+
+from ..provision.adapters import ProvisionError
+from ..scenario import CompletedRecord, InFlightRecord, JournalStore, ValidatedScenario
+from .actions import AMBIGUOUS_HINT, HANDLERS, Reconciliation
+from .context import ReplayContext, ReplayError
+
+_RECONCILED_EXIT = -1     # the invocation's status was never observed (ADR 0006)
+
+
+class ReplayEngine:
+    def __init__(self, scenario, context, store, *, out: Callable[[str], None] = print):
+        self._scenario = scenario
+        self._context = context
+        self._store = store
+        self._out = out
+
+    # --- entry points ------------------------------------------------------
+
+    def replay(self) -> list[tuple[str, str]]:
+        latest = self._check_local_preconditions()
+        present = [event.name for event in self._scenario.events if latest[event.name]]
+        if present:
+            raise ReplayError(
+                f"this scenario has already been replayed under this state root "
+                f"({len(present)} journalled event(s), first {present[0]!r}); use "
+                "resume, or reset the fixture and remove the journal directory")
+        self._sweep_pristine()
+        return self._run(latest)
+
+    def resume(self) -> list[tuple[str, str]]:
+        return self._run(self._check_local_preconditions())
+
+    # --- preconditions -----------------------------------------------------
+
+    def _check_local_preconditions(self) -> dict[str, object]:
+        for event in self._scenario.events:
+            HANDLERS[event.action].check_supported(event)
+        latest: dict[str, object] = {}
+        for event in self._scenario.events:
+            record = self._store.read(event.name)
+            if record is not None and record.scenario_digest != self._scenario.digest:
+                raise ReplayError(
+                    f"event {event.name!r} was journalled under scenario digest "
+                    f"{record.scenario_digest} but this scenario hashes to "
+                    f"{self._scenario.digest}; restore the scenario, or reset the "
+                    "fixture (CONFIRM_RESET=1 make reset) and replay")
+            latest[event.name] = record
+        return latest
+
+    def _sweep_pristine(self) -> None:
+        for event in self._scenario.events:
+            if event.action != "bug.create":
+                continue
+            alias = event.expected_postcondition["values"]["server_alias"]
+            payload = self._context.client(event.actor).read(
+                ["bug", "view"], positionals=[alias])
+            if payload is not None:
+                raise ReplayError(
+                    f"bug alias {alias} (event {event.name!r}) already exists in the "
+                    "fixture; replay requires the pristine baseline — run "
+                    "scripts/checkpoint restore pristine, then replay")
+
+    # --- the loop ----------------------------------------------------------
+
+    def _run(self, latest) -> list[tuple[str, str]]:
+        report: list[tuple[str, str]] = []
+        for event in self._scenario.events:
+            status = self._advance(event, latest[event.name])
+            report.append((status, event.name))
+            self._out(f"{status} {event.name}")
+        done = sum(1 for status, _ in report if status != "skipped")
+        self._out(f"summary: {done} executed, {len(report) - done} already complete")
+        return report
+
+    def _advance(self, event, record) -> str:
+        if record is None:
+            return self._execute(event, 1)
+        if isinstance(record, CompletedRecord):
+            if record.next_safe_action == "advance":
+                self._context.adopt(record.resolved_ids)
+                return "skipped"
+            if record.next_safe_action == "stop":
+                raise ReplayError(
+                    f"event {event.name!r} was recorded as ambiguous by an earlier run; "
+                    f"{AMBIGUOUS_HINT}")
+            return self._execute(event, record.attempt + 1)
+        # An in-flight record from an earlier run: settle it, then continue per its answer.
+        result = self._settle(event, record.attempt)
+        if result.next_action == "advance":
+            return "resumed"
+        if result.next_action == "stop":
+            raise ReplayError(f"event {event.name!r}: {result.detail}")
+        return self._execute(event, record.attempt + 1)
+
+    def _execute(self, event, attempt) -> str:
+        self._context.actor_key(event.actor)      # fail fast, and register the secret
+        invocation = HANDLERS[event.action].build(self._context, event)
+        self._store.write_in_flight(
+            InFlightRecord(
+                self._scenario.digest, event.name, attempt, event.actor,
+                event.action_class, event.expected_postcondition,
+                event.reconciliation_marker),
+            known_secrets=self._context.known_secrets)
+        try:
+            output = self._context.invoke(event.actor, invocation)
+        except ProvisionError as exc:
+            result = self._settle(event, attempt, invocation=invocation)
+            if result.next_action == "advance":
+                return "reconciled"
+            # One execution per event per run: the next attempt belongs to `resume`.
+            raise ReplayError(
+                f"event {event.name!r} failed: {exc}. {result.detail}") from None
+        ids = HANDLERS[event.action].resolved_ids(event, output)
+        self._write_completed(event, attempt, invocation, output, 0, ids, "advance")
+        self._context.adopt(ids)
+        return "executed"
+
+    def _settle(self, event, attempt, invocation=None) -> Reconciliation:
+        """Reconcile against the fixture and record the outcome. Never raises on its own."""
+        result = HANDLERS[event.action].reconcile(self._context, event)
+        invocation = invocation or HANDLERS[event.action].build(self._context, event)
+        self._write_completed(
+            event, attempt, invocation, result.output, _RECONCILED_EXIT,
+            result.resolved_ids, result.next_action)
+        if result.next_action == "advance":
+            self._context.adopt(result.resolved_ids)
+        return result
+
+    def _write_completed(self, event, attempt, invocation, output, exit_status,
+                         resolved_ids, next_action) -> None:
+        self._store.replace_completed(
+            CompletedRecord(
+                self._scenario.digest, event.name, attempt, event.actor,
+                event.action_class, event.expected_postcondition,
+                event.reconciliation_marker, invocation.metadata, output,
+                exit_status, dict(resolved_ids), next_action),
+            known_secrets=self._context.known_secrets)
+```
+
+Two details the implementer must get right:
+
+- `_settle` rebuilds the invocation when it was not supplied, because a resumed in-flight
+  record needs an `InvocationMetadata` for its completed record and the original run's is
+  gone. Rebuilding is deterministic for every handler *except* `bug.update`, whose delta
+  depends on a fresh read; that is correct, because the recorded metadata then describes what
+  the resumed state actually implies.
+- `_settle` never raises on its own, so the caller controls what a `retry` means: on a
+  resumed in-flight record it means "execute attempt *n+1* now", and after a failure this run
+  already caused it means "abort — the next attempt belongs to `resume`". Folding the raise
+  into `_settle` would collapse those two and would also swallow the boundary's own error
+  message.
+- `ReplayContext.invoke(actor, invocation)` is added in this task:
+
+```python
+    def invoke(self, actor, invocation):
+        if invocation.metadata.mutation_boundary == REST_BOUNDARY:
+            return self.rest(actor, invocation.target_id, dict(invocation.values))
+        return self.client(actor).write(
+            list(invocation.args), list(invocation.positionals) or None)
+```
+
+Rename `actions._AMBIGUOUS` to the public `AMBIGUOUS_HINT` in Task 4's code and import it
+here. The refusal wording exists once, in `actions.py`.
+
+### Step 5.4 — confirm it passes
+
+```
+uv run --python 3.11 python -m unittest tests.test_replay -v
+```
+
+Expect `OK`, thirty-eight tests.
+
+### Step 5.5 — commit
+
+```
+make check && make test
+git add src/bzr_live/replay tests/test_replay.py
+git commit -m "feat(replay): drive the event loop with journalled resume"
+```
+
+**Acceptance criteria.** `replay` refuses a non-empty journal and a pre-existing server alias
+before any mutation. `resume` refuses a digest mismatch and a recorded `stop` without
+querying the server. An in-flight record reconciles to adoption or a fresh attempt. Completed
+`advance` records are skipped and their IDs adopted. No journal record contains an API key.
+
+## Task 6 — CLI, fixture, and wiring
+
+Creates `src/bzr_live/replay/__main__.py` and `tests/fixtures/replay-scenario/`; changes
+`Makefile`, `.github/workflows/scenario-contract.yml`, `README.md`.
+
+**Where this fits.** Last task: the operator-facing surface and the gate coverage.
+
+**Interfaces produced:** `bzr_live.replay.__main__.main(argv=None) -> int`.
+
+**Interfaces consumed:** `ReplayEngine`, `ReplayContext`, `KeyStore`, `JournalStore`,
+`load_scenario`, `ReplayError`, `ProvisionError`, `ScenarioValidationError`.
+
+### Step 6.1 — write the fixture
+
+`tests/fixtures/replay-scenario/scenario.json`, `resources.json`, `events.jsonl` and
+`assets/notes.txt`, declaring one product, one component, one version, one milestone, one
+keyword, one flag type, one custom field, two actors, and eight events — one per action, in
+dependency order: `create-checkout-race` (`bug.create`), `update-triage` (`bug.update`),
+`comment-triage` (`bug.comment`), `attach-notes` (`bug.attach`), `worktime-triage`
+(`bug.worktime`), `custom-field-triage` (`bug.custom-field-set`), `flag-review`
+(`bug.flag`), `obsolete-notes` (`attachment.update`). Its `scenario.json` `name` is
+`replay-demo`, which the marker assertions in Tasks 3 and 4 depend on.
+
+Verify it loads before writing any engine test against it:
+
+```
+uv run --python 3.11 python -c "from bzr_live.scenario import load_scenario; s = load_scenario('tests/fixtures/replay-scenario'); print(s.name, len(s.events), s.digest[:12])"
+```
+
+Expect `replay-demo 8` and a 12-character digest prefix.
+
+### Step 6.2 — write the CLI
+
+```python
+from __future__ import annotations
+
+import argparse
+import sys
+import tempfile
+from pathlib import Path
+
+from ..provision.adapters import ProvisionError
+from ..provision.keys import KeyStore
+from ..scenario import JournalStore, ScenarioValidationError, load_scenario
+from .context import ReplayContext, ReplayError
+from .engine import ReplayEngine
+
+
+def _parse(argv):
+    parser = argparse.ArgumentParser(
+        prog="python -m bzr_live.replay",
+        description="Replay a scenario's events into the local Bugzilla fixture.")
+    parser.add_argument("command", choices=("replay", "resume"))
+    parser.add_argument("scenario_dir")
+    parser.add_argument("--state-root", default="./state")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8080/")
+    parser.add_argument("--bzr", default="bzr")
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    options = _parse(argv)
+    try:
+        scenario = load_scenario(options.scenario_dir)
+        keys = KeyStore(options.state_root)
+        journal = Path(options.state_root) / "journal" / scenario.name
+        journal.parent.mkdir(mode=0o700, exist_ok=True)
+        with tempfile.TemporaryDirectory() as workspace:
+            Path(workspace).chmod(0o700)
+            context = ReplayContext(
+                scenario, keys, bzr_path=options.bzr, base_url=options.base_url,
+                workspace=workspace)
+            with JournalStore(journal) as store:
+                engine = ReplayEngine(scenario, context, store)
+                getattr(engine, options.command)()
+    except (ReplayError, ProvisionError, ScenarioValidationError) as exc:
+        print(f"replay failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+### Step 6.3 — widen the guardrail and gate the docs
+
+In `Makefile`, change the `compileall` line from
+
+```
+	@uv run --python 3.11 python -m compileall -q src tests/test_checkpoint.py tests/test_provision.py
+```
+
+to
+
+```
+	@uv run --python 3.11 python -m compileall -q src tests
+```
+
+`tests/` already holds five test modules the named list omitted, so this closes an existing
+blind spot rather than only making room for `tests/test_replay.py`.
+
+In `.github/workflows/scenario-contract.yml`, add these three lines to **both** the
+`pull_request.paths` and `push.paths` lists, beside the existing ADR and spec entries:
+
+```yaml
+      - docs/adr/0006-actor-scoped-event-replay.md
+      - docs/workflow/specs/2026-09-01-replay-actor-scoped-events-design.md
+      - docs/workflow/plans/2026-09-01-replay-actor-scoped-events.md
+```
+
+`src/**` and `tests/**` are already listed, so the new package and tests gate without further
+edits.
+
+In `README.md`, add `replay` and `resume` to the command list with the pristine precondition
+and the provisioning prerequisite stated in one sentence each.
+
+### Step 6.4 — verify
+
+```
+uv run --python 3.11 python -m bzr_live.replay --help
+uv run --python 3.11 python -m bzr_live.replay replay tests/fixtures/replay-scenario --state-root "$(mktemp -d)/state"
+make check
+make test
+```
+
+`--help` lists `replay` and `resume` and the four options. The replay run exits 1 with
+`replay failed: no API key for actor ...` on stderr, proving the precondition path reaches
+the operator. `make check` and `make test` both exit 0; `make test` reports 38 more tests
+than the 154-test baseline.
+
+### Step 6.5 — commit
+
+```
+git add src/bzr_live/replay tests Makefile .github/workflows/scenario-contract.yml README.md
+git commit -m "feat(replay): add the replay and resume commands"
+```
+
+**Acceptance criteria.** `python -m bzr_live.replay replay|resume <dir>` runs and maps every
+failure to exit 1 with a `replay failed:` message on stderr. The journal lands in
+`<state-root>/journal/<scenario name>/`. The workspace is a mode-0700 temporary directory
+removed on exit. `make check` compiles every module under `tests/`. The new ADR, spec and
+plan gate the `scenario-contract` workflow.
+
+## Requirement-to-task map
+
+| Spec requirement | Task |
+|---|---|
+| Actor credential resolution, missing-key message | 1 |
+| Symbolic reference → server ID table, rebuild on resume | 1, 5 |
+| Workspace files, asset materialization and its checksum re-assertion | 1 |
+| Supported-payload table (all refusals) | 2 |
+| Marker rendering for append-class events | 2, 3 |
+| One invocation per event, per-action argv and payload | 3 |
+| Delta computation for Bugzilla list fields | 3 |
+| Reconciliation per recovery class | 4 |
+| Ambiguity refusal with a reset instruction | 4 |
+| In-flight before, completed after, `exit_status = -1` on reconciliation | 5 |
+| Digest binding | 5 |
+| Empty-journal and pristine-sweep preconditions | 5 |
+| One execution per event per run | 5 |
+| Recorded `stop` refuses on a later resume | 5 |
+| Secrets absent from journal records and argv | 1, 3, 5 |
+| CLI, exit codes, journal location | 6 |
+| Gate coverage for the new module, tests, and docs | 6 |
+
+## Deferrals carried into this plan
+
+None yet. Any deferral a `$trial-loop` run disposes of during the design or branch review is
+appended here with its owning record path or tracker issue.

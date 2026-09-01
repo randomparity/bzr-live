@@ -19,6 +19,11 @@ semantic result per event or refuses with an actionable message.
 In scope: the `replay` and `resume` commands and the execution and reconciliation of all
 eight actions the merged loader defines.
 
+The pristine precondition is checked per scenario, not globally: replay proves that *this*
+scenario's bugs are absent, not that the fixture holds nothing at all. Residue from a
+different scenario replayed under the same fixture is the operator's to clear with
+`scripts/checkpoint restore pristine`, which is what they are told to run.
+
 Out of scope, with owners: restoring the pristine checkpoint (operator, via
 `scripts/checkpoint restore pristine`); `replay --through EVENT` (deferred, epic #1);
 `load` and `verify` subcommands (epic #1); checkpoint internals (issue #5); scenario
@@ -66,9 +71,12 @@ python -m bzr_live.replay resume <scenario_dir> [same options]
 Exit 0 on success, 1 on any `ReplayError` (message on stderr, prefixed `replay failed:`),
 matching `bzr_live.provision.__main__`.
 
-The journal lives in `<state-root>/journal/`, a sibling of `admin.key` and `actor-keys/`.
-`JournalStore` rejects any directory entry that is not `.lock`, `.tmp-*`, or
-`<event>.<attempt>.json`, so it cannot share the key root.
+The journal lives in `<state-root>/journal/<scenario name>/`, a sibling of `admin.key` and
+`actor-keys/`. Two reasons for that shape: `JournalStore` rejects any directory entry that
+is not `.lock`, `.tmp-*`, or `<event>.<attempt>.json`, so it cannot share the key root; and
+scoping by scenario name keeps two scenarios replayed under one state root from colliding on
+a shared event name. The scenario name is a loader-validated slug, so it is a safe path
+component.
 
 ## Preconditions
 
@@ -81,17 +89,21 @@ offending item and the fix.
 2. **Payload support.** Every event is checked against the per-action supported-payload
    table below. Applies to both commands, so a scenario that cannot be replayed says so
    before it half-runs.
-3. **Asset integrity.** For each `bug.attach`, `assets[name].sha256` must equal the
-   event postcondition's `asset_sha256`.
-4. **`replay` only — empty journal.** The journal directory must hold no attempt file.
+3. **`replay` only — empty journal.** The journal directory must hold no attempt file.
    Otherwise: "this scenario has already been replayed under <state-root>; use `resume`, or
    reset the fixture and remove the journal".
-5. **`replay` only — pristine sweep.** For each `bug.create` event, `bzr bug view
+4. **`replay` only — pristine sweep.** For each `bug.create` event, `bzr bug view
    <server_alias>` under that event's own actor credential must report absent. A present
    alias refuses: "<alias> already exists in the fixture; replay requires the pristine
    baseline (`scripts/checkpoint restore pristine`)".
 
-Preconditions 1–3 are local and run first; 5 is the only one that touches the network.
+Preconditions 1–3 are local and run first; 4 is the only one that touches the network.
+
+Asset integrity is not a precondition here because it cannot fail here: `load_scenario`
+already verifies every asset's bytes against its declared SHA-256, and it copies that same
+digest into each `bug.attach` postcondition's `asset_sha256`. The engine re-asserts the
+equality where it materializes the file for upload, so a future change that decouples the two
+fails loudly rather than uploading unverified bytes.
 
 ## Supported-payload table
 
