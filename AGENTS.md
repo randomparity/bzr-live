@@ -31,6 +31,32 @@ been rejected for ignoring it. bzr-live is a throwaway fixture:
 When in doubt, prefer the simple implementation a disposable fixture deserves.
 Production-grade infrastructure here is scope overreach, not diligence.
 
+## Purpose: prove `bzr`. Highlight its limits, do not work around them
+
+This fixture exists to exercise `bzr`'s real write paths. When `bzr` cannot express
+something a scenario legitimately declares, that gap **is the finding** — it is the
+most valuable thing this repository produces. Surfacing it is the job; routing
+around it silently destroys the evidence.
+
+- **Never silently substitute.** Do not inject a value the scenario did not declare,
+  swap one command for another, or drop a field `bzr` will not accept. A fixture that
+  quietly compensates reports success while proving nothing.
+- **Fail before mutating, and say why.** Where a payload cannot be executed, refuse it
+  as a precondition and name the `bzr` limitation with its source citation — not a
+  workaround instruction. "bzr's `bug create --from-json` has no `dupe_of` field" is a
+  finding; "move it to a follow-up event" is a shrug.
+- **Record every gap in `docs/bzr-findings.md`**, with the `bzr` source citation, the
+  observed behaviour, and whether it is a defect or a deliberate design choice. File
+  the defects as issues on `randomparity/bzr` and cross-link them. Ask the operator
+  before filing; never file speculatively.
+- **Fix the fixture in the fixture.** A Bugzilla install-configuration gap belongs in
+  `containers/`, not in a client-side substitution. Adjust the fixture so the honest
+  payload succeeds, rather than teaching the runner to send something else.
+- **Authorized workarounds are named ones only.** The epic authorizes exactly two: the
+  container-local Perl admin bridge for setup surfaces `bzr` does not offer, and one
+  stock-REST route for per-bug custom fields. Anything else needs the same explicit
+  authorization; do not invent a third.
+
 ## Build & verification commands
 
 ```bash
