@@ -28,9 +28,10 @@ assignment. Reconciliation is two passes over the already-ordered `resource_plan
 read and compare every declared definition (divergence stops the run before any
 resource mutation or actor-key minting; only the admin API-key bootstrap precedes
 pass 1), then create what is absent in plan order and read each creation back. Actor
-and admin API keys live in `<state-root>/actor-keys/` as 0600 files in a 0700
-owner-checked directory; an existing key file is reused, and keys never appear in
-ordinary output.
+API keys live in `<state-root>/actor-keys/` as 0600 files in a 0700 owner-checked
+directory; the admin key lives beside that directory as `<state-root>/admin.key`,
+since a scenario actor may legally be named `admin`. An existing key file is reused,
+and keys never appear in ordinary output.
 
 ## Consequences
 

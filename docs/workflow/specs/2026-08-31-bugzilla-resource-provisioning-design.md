@@ -114,7 +114,9 @@ pass 1 simply classifies the already-created prefix `unchanged` and the remainde
 | flag-type | bridge `get-flag-type` | bridge `create-flag-type` |
 
 One `product view` read is reused for the product's own comparison and for its
-versions/milestones, cached per run.
+versions/milestones — cached within pass 1 only. Pass-2 readback always re-reads
+live state: any write touching a product (product create, bridge create-version /
+create-milestone) invalidates that product's cached view.
 
 **Not-found contract for bzr reads.** Exit 0 with a JSON payload means present.
 A read (`view`/`search`) exiting 2 — bzr's stable "not found or bad args" code —
@@ -166,7 +168,8 @@ fixture noise and ignored.
   same-directory atomic rename — ordinary local fixture hygiene, nothing more
   (issue boundary);
 - the admin key is stored as `<state_root>/admin.key`, outside `actor-keys/`, so a
-  scenario actor named `admin` (a legal slug) cannot collide with it.
+  scenario actor named `admin` (a legal slug) cannot collide with it; it gets the
+  same 0600-mode, ownership, regular-file, and no-symlink checks as actor key files.
 
 Key acquisition per login: if the key file exists, reuse it; otherwise call bridge
 `create-api-key {login}` and write the file. The executor verifies the admin key once
@@ -253,8 +256,13 @@ implemented.
   refusal with the path and the expected mode/ownership.
 - Invalid stored admin key: refusal naming the key file and the recovery choice.
 
-All failures exit non-zero with a single actionable message; partial provisioning is
-recoverable by rerunning after the cause is fixed (pass 1 re-classifies).
+All failures exit non-zero with a single actionable message. A run interrupted
+*between* resources is recoverable by plain rerun: pass 1 re-classifies the created
+prefix as unchanged. A failure *inside* a multi-step create (an actor's group
+memberships, a select field's values, a flag type's inclusions) can leave a resource
+pass 1 reports as divergent; the recovery for that case is a fixture reset
+(`make reset`) rather than a plain rerun, and the conflict message's recovery hint
+says so.
 
 ## Testing
 
