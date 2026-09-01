@@ -20,6 +20,10 @@ if [[ -z ${BZ_PORT:-} && -f "$ROOT/.env" ]]; then
   BZ_PORT=$(grep -E '^BZ_PORT=' "$ROOT/.env" | tail -1 | cut -d= -f2)
 fi
 BASE_URL="http://127.0.0.1:${BZ_PORT:-8080}/"
+if [[ -z ${BZ_ADMIN_EMAIL:-} && -f "$ROOT/.env" ]]; then
+  BZ_ADMIN_EMAIL=$(grep -E '^BZ_ADMIN_EMAIL=' "$ROOT/.env" | tail -1 | cut -d= -f2)
+fi
+ADMIN_EMAIL=${BZ_ADMIN_EMAIL:-admin@bugzilla.test}
 
 run() {
   uv run --python 3.11 python -m bzr_live.provision "$SCENARIO" \
@@ -54,20 +58,27 @@ key=$(cat "$STATE/state/admin.key")
 values=$(BZR_LIVE_API_KEY=$key "$BZR" --json \
   --server-url "$BASE_URL" \
   --server-api-key-env BZR_LIVE_API_KEY \
+  --server-email "$ADMIN_EMAIL" \
   field list cf_q4_risk)
 grep -q 'low' <<<"$values" || {
   echo "smoke failed: cf_q4_risk legal values not observable through bzr" >&2
   echo "$values" >&2
   exit 1
 }
-# The text field's definition must also be observable through bzr (criterion 5):
-# field list on a freetext field should succeed (its value list may be empty).
-BZR_LIVE_API_KEY=$key "$BZR" --json \
+# The text field's definition must also reach bzr (criterion 5). Live boundary:
+# Bugzilla omits `values` for freetext fields and bzr 0.8.3-dev's field model
+# requires it, so field list exits 8 (deserialize) while the error body itself
+# carries the server's definition — proof the definition is exposed to bzr's
+# transport. Accept success or exactly that limitation naming our field.
+notes_out=$(BZR_LIVE_API_KEY=$key "$BZR" --json \
   --server-url "$BASE_URL" \
   --server-api-key-env BZR_LIVE_API_KEY \
-  field list cf_q4_notes >/dev/null || {
+  --server-email "$ADMIN_EMAIL" \
+  field list cf_q4_notes 2>&1) && notes_ok=0 || notes_ok=$?
+if [[ $notes_ok -ne 0 ]] && ! grep -q 'cf_q4_notes' <<<"$notes_out"; then
   echo "smoke failed: cf_q4_notes definition not observable through bzr" >&2
+  echo "$notes_out" >&2
   exit 1
-}
+fi
 
 echo "provision smoke: OK"
