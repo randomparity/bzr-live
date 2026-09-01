@@ -8,14 +8,18 @@ Every entry names the `bzr` source that establishes it, at a commit, and says wh
 behaviour was **observed** against a running fixture or **read** from source. An entry that
 has only been read is marked so; `make replay-smoke` is what promotes it.
 
-Citations are against `randomparity/bzr` at `b80303b7` unless stated otherwise.
+Citations are against `randomparity/bzr` at `b80303b7` unless stated otherwise. Before
+filing anything upstream, check it against `bzr`'s own `docs/adr/` and its open issues:
+two entries here started as defects and turned out to be an accepted decision (G7) and an
+already-filed one (D5).
 
 | ID | Class | Summary | Upstream |
 |---|---|---|---|
-| [D1](#d1) | defect | A flag type name containing `-` is unparseable by `--flag` | *pending* |
-| [D2](#d2) | defect | An absent bug exits 4, not 2, though `bzr` has a not-found exit code and maps the codes elsewhere | *pending* |
-| [D3](#d3) | defect | `bug view` omits `groups`, `estimated_time` and `remaining_time` that Bugzilla returns | *pending* |
-| [D4](#d4) | defect (unverified) | `bug create --from-json` `alias` silently no-ops where aliases are disabled | *pending* |
+| [D1](#d1) | defect | A flag type name containing `-` is unparseable by `--flag` | *proposed* |
+| [G7](#g7) | design choice | An absent bug exits 4 with an API code, not 2 — `bzr` ADR 0015 forbids masking a server error | n/a |
+| [D3](#d3) | defect | `bug view` omits `groups`, `estimated_time` and `remaining_time` that Bugzilla returns | *proposed* |
+| [D4](#d4) | defect (unverified) | `bug create --from-json` `alias` silently no-ops where aliases are disabled | hold: unverified |
+| [D5](#d5) | defect | `rep_platform` is the wrong wire name; the field is `platform` | [bzr#621](https://github.com/randomparity/bzr/issues/621) |
 | [G1](#g1) | gap | `bug create --from-json` has no `estimated_time` / `remaining_time` | — |
 | [G2](#g2) | gap | `bug update` has no `--version` | — |
 | [G3](#g3) | gap | No `--reset-target-milestone`, though `--reset-assigned-to` exists | — |
@@ -47,10 +51,10 @@ start, since the status is always the last character or immediately precedes `(`
 naming this entry. `tests/replay_smoke.sh` probes the live behaviour and records the exit
 code and message here.
 
-## D2
+## G7
 
-**An absent bug exits 4 with an API code, though `bzr` reserves exit 2 for not-found and
-already maps these codes elsewhere.** *Observed, in `bzr`'s own functional suite.*
+**An absent bug exits 4 with an API code rather than 2.** *Observed, in `bzr`'s own
+functional suite. Deliberate — see below.*
 
 `bzr --json bug view 999999999` exits **4** with `api_code` 101, asserted against a live
 Bugzilla at `tests/functional/phases/08e-bugs-restricted-access.sh:289-292`. The alias form
@@ -68,6 +72,17 @@ The consequence for a caller is that "this bug does not exist" and "the server r
 request" are the same exit code, distinguishable only by parsing `api_code` out of stderr.
 Note that 102 (Access Denied) must stay distinct from both: an invisible bug is not an
 absent one.
+
+**This is by design, and the fixture was wrong to call it a defect.** `bzr`'s accepted
+ADR 0015, "A server error is never masked by an empty result" (issue #504), settles it: `bzr`
+relays what the server said and never substitutes not-found for a stated error. Exit 2 is
+reachable only when a request *succeeds* and the `bugs` array is empty. Reporting
+`api_code` 100 as exit 4 is that decision working correctly, and the adjacency path maps
+100/101 to not-found because a per-row result in a batch is not a masking situation.
+
+Recorded here because it still constrains a caller — "does not exist" and "the server
+rejected this" share an exit code, separable only by reading `api_code` off stderr, and
+[G6](#g6) removes the obvious alternative. No issue filed.
 
 **What the fixture does.** Passes an explicit `absent_codes={100, 101}` to its own
 `BzrClient.read`, leaving 102 to raise. See ADR 0006.
@@ -89,10 +104,36 @@ the two time fields via `--estimated-time`/`--remaining-time` — so each is a *
 field: no caller can read back what it wrote, and no caller can compute an add/remove delta
 for `groups` from server state.
 
+Related but distinct from the open conformance epic [bzr#616]: entry 10 (bzr#623) covers
+`groups: []` being unexpressible on *create*, and [bzr#621](https://github.com/randomparity/bzr/issues/621)
+covers the `platform` naming on read and write. Neither covers the read-side omission of
+these three fields.
+
 **What the fixture does.** Refuses a declared `groups` set on `bug.update`, because a delta
 cannot be computed and the result cannot be confirmed; treats `estimated_hours` and
 `remaining_hours` as fields that can never confirm and therefore always re-apply. See
 ADR 0006.
+
+## D5
+
+**`rep_platform` is the wrong wire name; Bugzilla calls the field `platform`.**
+*Already filed upstream: [bzr#621](https://github.com/randomparity/bzr/issues/621), open,
+part of the conformance epic [bzr#616](https://github.com/randomparity/bzr/issues/616).*
+
+`bzr` names the hardware field `rep_platform` throughout, while Bugzilla emits and accepts
+`platform`. On the read path a non-empty `include_fields` list containing `rep_platform`
+does not merely fail to match — it suppresses the `platform` key the server would otherwise
+return. `JsonCreateBug` (`src/commands/bug/create_json.rs`) carries the same `rep_platform`
+name on the create path.
+
+**Why this matters here.** An earlier draft of ADR 0006 had replay inject a fixed
+`op_sys`/`rep_platform` pair into every create document, to satisfy an installation that
+declares no defaults. That would have sent a field name bzr already has an open defect
+about, to make a run appear to succeed. The fixture now sets `defaultplatform` and
+`defaultopsys` in `containers/bugzilla/checksetup_answers.txt` instead, and the create
+document carries only what the scenario declared.
+
+[bzr#616]: https://github.com/randomparity/bzr/issues/616
 
 ## D4
 
