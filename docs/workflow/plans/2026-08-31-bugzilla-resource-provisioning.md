@@ -1224,9 +1224,10 @@ sub dispatch {
 }
 ```
 
-Notes for the implementer: `Bugzilla::FlagType::match` and `target_type` returning
-the single-character stored form (`b`/`a`), `legal_values`, and `is_select` all
-exist at the pinned SHA; if the live smoke shows a different accessor shape, fix the
+Notes for the implementer: `Bugzilla::FlagType::match` (a criteria-hashref
+function), the `target_type` accessor (the DB stores `b`/`a` but the accessor maps
+to `bug`/`attachment` — FlagType.pm:272), `legal_values`, and `is_select` all exist
+at the pinned SHA; if the live smoke shows a different accessor shape, fix the
 bridge — never the executor's canonical contract. `perl -c` cannot run on the host
 (no Bugzilla libs); syntax-check inside the image:
 `docker compose ... exec -T bugzilla perl -c /usr/local/bin/bzr-live-bridge` during
