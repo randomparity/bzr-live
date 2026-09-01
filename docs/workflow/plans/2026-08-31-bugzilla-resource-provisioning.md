@@ -208,7 +208,8 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-3. Implement. `src/bzr_live/provision/__init__.py`:
+3. Implement. `src/bzr_live/provision/__init__.py` — Task 1 writes exactly this
+   (later tasks extend it):
 
 ```python
 """Host-side Bugzilla fixture provisioning (issue #4, ADR 0004)."""
@@ -216,32 +217,24 @@ if __name__ == "__main__":
 from .adapters import (
     BOUNDARIES,
     BUG_CUSTOM_FIELD_BOUNDARY,
-    BridgeClient,
-    BzrClient,
     ProvisionError,
-    assign_bug_custom_fields,
     compose_project_name,
 )
-from .executor import ProvisionConflictError, Provisioner
 from .keys import KeyStore
 
 __all__ = [
     "BOUNDARIES",
     "BUG_CUSTOM_FIELD_BOUNDARY",
-    "BridgeClient",
-    "BzrClient",
     "KeyStore",
-    "ProvisionConflictError",
     "ProvisionError",
-    "Provisioner",
-    "assign_bug_custom_fields",
     "compose_project_name",
 ]
 ```
 
-(The `executor` import lands in Task 3; until then keep the two executor names out of
-the file — add them in Task 3's step. For Task 1, write the file with only the
-adapters/keys imports and matching `__all__`.)
+Task 2 adds `BridgeClient`, `BzrClient`, and `assign_bug_custom_fields` to the
+`.adapters` import and to `__all__`; Task 3 adds
+`from .executor import ProvisionConflictError, Provisioner` and those two names to
+`__all__` (keep `__all__` sorted).
 
 `src/bzr_live/provision/adapters.py` (Task 1 portion):
 
@@ -412,6 +405,7 @@ Steps:
 import io
 import json
 import subprocess
+import urllib.error
 import urllib.request
 
 from bzr_live.provision.adapters import (
@@ -493,10 +487,13 @@ class BridgeClientTests(unittest.TestCase):
         self.assertEqual(result, {"name": "q4-hot"})
 
     def test_error_reply_raises_without_secret_leak(self) -> None:
-        reply = json.dumps({"ok": False, "error": "boom"}).encode()
+        # The scripted error smuggles key-like material; none of it may surface.
+        reply = json.dumps(
+            {"ok": False, "error": "insert failed for key t0psecretmaterial"}).encode()
         client, _ = self._client([(1, reply, b"")])
         with self.assertRaises(ProvisionError) as ctx:
             client.call("create-api-key", {"login": None})
+        self.assertNotIn("t0psecretmaterial", str(ctx.exception))
         self.assertNotIn("api_key", str(ctx.exception))
 
     def test_container_not_found_names_project_root_recovery(self) -> None:
@@ -537,6 +534,19 @@ class RestAdapterTests(unittest.TestCase):
     def test_non_int_bug_id_is_rejected(self) -> None:
         with self.assertRaises(ProvisionError):
             assign_bug_custom_fields("http://127.0.0.1:8080/", "k", "7", {"cf_x": "v"})
+
+    def test_http_error_maps_to_provision_error_without_key(self) -> None:
+        def raising_opener(request):
+            raise urllib.error.HTTPError(
+                request.full_url, 401, "Unauthorized", {},
+                io.BytesIO(b'{"error": true, "message": "auth"}'))
+
+        with self.assertRaises(ProvisionError) as ctx:
+            assign_bug_custom_fields(
+                "http://127.0.0.1:8080/", "k3y", 7, {"cf_x": "v"},
+                opener=raising_opener)
+        self.assertIn("401", str(ctx.exception))
+        self.assertNotIn("k3y", str(ctx.exception))
 ```
 
 2. Run `uv run --python 3.11 python -m unittest tests.test_provision -v` — the new
@@ -547,6 +557,7 @@ class RestAdapterTests(unittest.TestCase):
 import json
 import os
 import subprocess
+import urllib.error
 import urllib.request
 
 _KEY_ENV = "BZR_LIVE_API_KEY"
@@ -659,6 +670,10 @@ class BridgeClient:
         if not isinstance(reply, dict) or "ok" not in reply:
             raise ProvisionError(f"bridge reply for {operation} was malformed")
         if not reply["ok"]:
+            if secret:
+                # never echo any part of a create-api-key reply (spec: failure modes)
+                raise ProvisionError(
+                    "bridge create-api-key failed; check the fixture and rerun")
             raise ProvisionError(f"bridge {operation} failed: {reply.get('error', 'unknown')}")
         return reply.get("result")
 
@@ -680,8 +695,17 @@ def assign_bug_custom_fields(base_url: str, api_key: str, bug_id: int,
         headers={"Content-Type": "application/json"},
         method="PUT",
     )
-    with opener(request) as response:
-        raw = response.read()
+    try:
+        with opener(request) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        # Bugzilla returns error bodies with 4xx/5xx; read the body, never the key.
+        detail = exc.read().decode("utf-8", "replace")[:500]
+        raise ProvisionError(
+            f"REST custom-field assignment failed (HTTP {exc.code}): {detail}") from None
+    except urllib.error.URLError as exc:
+        raise ProvisionError(
+            f"REST custom-field assignment failed: {exc.reason}") from None
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
