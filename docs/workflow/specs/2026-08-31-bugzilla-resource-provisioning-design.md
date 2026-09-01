@@ -126,7 +126,8 @@ A read (`view`/`search`) exiting 2 — bzr's stable "not found or bad args" code
 classifies the resource as absent, but only under two preconditions that remove the
 "bad args" half of that code: the run-start `bzr whoami` succeeded (the connection
 and invocation shape work), and every variable argv value either matches the slug
-grammar or rides after a literal `--` separator. Positional values that are not
+grammar, is a `cf_`-prefixed mapped field name (which cannot begin with `-`), or
+rides after a literal `--` separator. Positional values that are not
 slugs (the actor email in `user search`) are always passed after `--`, so a value
 beginning with `-` (legal under the loader's email grammar) can never be parsed as
 a flag and misclassified as absent.
@@ -170,7 +171,18 @@ fixture noise and ignored.
   pairs. Sort keys and grant flags are not declared and not compared.
 - Version and milestone comparison is existence within the declared product (they
   declare no other fields).
-- Actor display names, group/product/keyword/component descriptions compare exactly.
+- Actor display names, group/product/keyword/component descriptions compare exactly —
+  with one carve-out: a fresh fixture is not an empty namespace for groups, because
+  checksetup pre-creates the system groups (`admin`, `editbugs`, `editusers`,
+  `canconfirm`, and the rest of `SYSTEM_GROUPS`, several of which are legal scenario
+  slugs). A declared group whose name matches an existing system group reconciles as
+  existing without description comparison (its fixed description is fixture
+  furniture, not scenario state); it is reported `unchanged` and never created. The
+  conflict path never fires for this class, so the `make reset` hint — which would
+  recreate the system groups and loop forever — is never offered for it.
+- A declared custom-field value of `---` is rejected at provisioning time with an
+  actionable message naming the field: Bugzilla reserves it as the single-select
+  placeholder, so it can be neither created nor compared.
 
 ## Actor API keys
 
