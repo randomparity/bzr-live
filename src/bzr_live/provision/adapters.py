@@ -195,7 +195,15 @@ class BridgeClient:
                     "bridge create-api-key failed; check the fixture and rerun")
             raise ProvisionError(
                 f"bridge {operation} failed: {reply.get('error', 'unknown')}")
-        return reply.get("result")
+        result = reply.get("result")
+        if secret and (not isinstance(result, dict)
+                       or not isinstance(result.get("api_key"), str)
+                       or not result["api_key"]):
+            # static message: never echo any part of a create-api-key reply
+            raise ProvisionError(
+                "bridge create-api-key reply carried no key; rebuild the "
+                "fixture image (make build) and rerun")
+        return result
 
 
 def assign_bug_custom_fields(base_url: str, api_key: str, bug_id: int,
