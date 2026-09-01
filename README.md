@@ -75,3 +75,21 @@ make build-multiarch
 
 `make build-multiarch` builds the Bugzilla image for Linux amd64 and arm64.
 Pull requests also run the live lifecycle on native x86_64 Ubuntu.
+
+Scenario provisioning
+---------------------
+
+Provision a validated scenario's resources into the running fixture:
+
+    uv run python -m bzr_live.provision tests/fixtures/provision-scenario \
+      --state-root ./state --bzr /path/to/bzr
+
+Reruns are idempotent: existing resources that match their declaration are
+reported `unchanged`, and a resource that differs in a declared field fails with
+a conflict naming the field. Actor API keys are written under the state root
+(default `./state`, gitignored) as owner-only files — `admin.key` for the
+fixture admin and `actor-keys/<actor>.key` per scenario actor. The state root is
+disposable local fixture state; deleting it re-mints keys on the next run.
+
+`tests/provision_smoke.sh` runs the live two-run proof against a fresh fixture
+(`BZR_LIVE_BZR=<bzr binary> bash tests/provision_smoke.sh`).

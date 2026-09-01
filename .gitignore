@@ -1,2 +1,6 @@
 .env
 .env.tmp.*
+/state/
+__pycache__/
+*.egg-info/
+/dist/
