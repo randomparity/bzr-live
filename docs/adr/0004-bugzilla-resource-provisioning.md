@@ -55,15 +55,19 @@ ordinary output.
 - **General Bugzilla REST administration client.** verified: the issue body restricts
   REST to per-bug custom-field assignment and lists general REST administration as a
   non-goal; source: GitHub issue `randomparity/bzr-live#4`.
-- **Create-first, catch "already exists" instead of read-first.** judgment: error-text
-  matching per kind is fragile across boundaries and cannot distinguish "exists and
-  matches" from "exists and diverges", which the issue requires to fail clearly.
+- **Create-first, catch "already exists" instead of read-first.** verified: the issue
+  body's "Required implementation boundaries" mandates the chosen alternative — "Use a
+  straightforward two-pass flow: read and compare all declared definitions, then create
+  missing resources in plan order and read them back"; source: GitHub issue
+  `randomparity/bzr-live#4`. Error-text matching also could not distinguish "exists and
+  matches" from "exists and diverges".
 - **A durable local reconciliation ledger for idempotency.** verified: the issue
   Non-goals exclude durable registries and transaction protocols, and the fixture
   read-back already answers existence; source: GitHub issue `randomparity/bzr-live#4`.
 - **Storing actor keys in `.env` or one aggregate file.** judgment: per-actor files
   under one 0700 directory let later event execution read a single actor's credential
-  without parsing an aggregate, and match the checkpoint ADR's runner-state shape.
+  without parsing an aggregate. (They also align with the runner-state directory shape
+  proposed in ADR 0005, which is not yet accepted.)
 - **Driving the bridge over HTTP instead of `docker compose exec`.** judgment: an HTTP
   admin endpoint inside the container would widen the fixture's network surface;
   `exec` keeps the bridge reachable only by the local operator who already owns the
