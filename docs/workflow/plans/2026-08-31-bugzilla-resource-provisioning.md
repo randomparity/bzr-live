@@ -814,7 +814,10 @@ class _FakeBzr:
 ```
 
 Test cases (names are normative; write each, watch it fail, implement, watch it
-pass):
+pass). Every conflict-path test pre-seeds the admin key with
+`store.store_admin_key("k3y")` so the bootstrap is inert; "zero writes" and "mints
+no keys" mean zero **resource** mutations and zero **actor**-key mints — the
+run-start `whoami` read is always expected:
 
 - `test_plan_order_is_respected` — fresh empty fake state; run; assert the combined
   bzr+bridge write log creates in exactly `scenario.resource_plan` order and the
@@ -1262,6 +1265,11 @@ STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-provision-smoke.XXXXXX")
 trap 'rm -rf "$STATE"' EXIT
 chmod 700 "$STATE"
 
+# The fixture's port lives in the checkout's .env; fall back to it when the shell
+# does not export BZ_PORT, so a customized port still reaches every host-side call.
+if [[ -z ${BZ_PORT:-} && -f "$ROOT/.env" ]]; then
+  BZ_PORT=$(grep -E '^BZ_PORT=' "$ROOT/.env" | tail -1 | cut -d= -f2)
+fi
 BASE_URL="http://127.0.0.1:${BZ_PORT:-8080}/"
 
 run() {
