@@ -31,8 +31,21 @@ my %FIELD_TYPES = (
 );
 my %FIELD_TYPE_NAMES = reverse %FIELD_TYPES;
 
-sub reply_ok    { print encode_json({ok => JSON::XS::true, result => $_[0]}); exit 0 }
-sub reply_error { print encode_json({ok => JSON::XS::false, error => "$_[0]"}); exit 1 }
+# stdout carries exactly one JSON reply. Bugzilla's schema helpers print
+# progress lines ("Adding new column ...") to stdout, so reserve the real
+# stdout for the protocol and send everything else to stderr.
+open(my $protocol, '>&', \*STDOUT) or die "cannot keep protocol handle: $!\n";
+open(STDOUT, '>&', \*STDERR) or die "cannot redirect stdout: $!\n";
+
+sub reply_ok {
+  print {$protocol} encode_json({ok => JSON::XS::true, result => $_[0]});
+  exit 0;
+}
+
+sub reply_error {
+  print {$protocol} encode_json({ok => JSON::XS::false, error => "$_[0]"});
+  exit 1;
+}
 
 my %OPERATIONS = map { $_ => 1 } qw(
   create-version create-milestone create-custom-field create-keyword
