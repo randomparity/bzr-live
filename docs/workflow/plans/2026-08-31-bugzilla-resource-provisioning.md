@@ -348,6 +348,7 @@ class KeyStore:
 
     def _write(self, path: Path, key: str) -> None:
         tmp = path.parent / f".tmp-{path.name}"
+        tmp.unlink(missing_ok=True)  # a stale tmp from a killed run must not block us
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             os.write(fd, (key + "\n").encode("utf-8"))
@@ -750,9 +751,12 @@ Behavior contract (from the spec, normative for this task):
 - Pass 1 classifies every plan entry `absent`/`unchanged`/`divergent` without any
   mutation; the first divergence raises `ProvisionConflictError` before pass 2.
   Product views are cached in pass 1 only.
-- Pass 2 creates absent entries in plan order, invalidates the product cache on
-  product/version/milestone writes, reads each creation back (fresh reads), and
-  ensures an actor key file for every actor entry (created or unchanged).
+- Pass 2 creates absent entries in plan order and reads each creation back with
+  fresh reads: the product-view cache exists only during pass 1, and no pass-2
+  readback ever consults it. The bzr `field list` readback applies to select
+  custom fields; a text field's pass-2 readback is the bridge `get-custom-field`
+  (its bzr observability is asserted by the smoke). Pass 2 also ensures an actor
+  key file for every actor entry (created or unchanged).
 - Comparison semantics per kind exactly as the spec's table (declared fields only;
   case-insensitive emails; system-group carve-out reported `unchanged`; custom-field
   values as sets ignoring `---`; flag-type canonical inclusion pairs; version and
@@ -1063,7 +1067,10 @@ my %OPERATIONS = map { $_ => 1 } qw(
 );
 
 my $operation = $ARGV[0] // '';
-exit 2 unless $OPERATIONS{$operation};
+unless ($OPERATIONS{$operation}) {
+  print STDERR "unknown operation\n";
+  exit 2;
+}
 
 my $request = eval {
   local $/;
@@ -1248,6 +1255,7 @@ docs).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+cd "$ROOT"  # uv resolves the project from cwd
 BZR=${BZR_LIVE_BZR:?set BZR_LIVE_BZR to the bzr binary to validate with}
 SCENARIO="$ROOT/tests/fixtures/provision-scenario"
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-provision-smoke.XXXXXX")
@@ -1286,13 +1294,24 @@ fi
 
 echo "provision smoke: custom-field readback through bzr"
 key=$(cat "$STATE/state/admin.key")
+values=$(BZR_LIVE_API_KEY=$key "$BZR" --json \
+  --server-url "$BASE_URL" \
+  --server-api-key-env BZR_LIVE_API_KEY \
+  field list cf_q4_risk)
+grep -q 'low' <<<"$values" || {
+  echo "smoke failed: cf_q4_risk legal values not observable through bzr" >&2
+  echo "$values" >&2
+  exit 1
+}
+# The text field's definition must also be observable through bzr (criterion 5):
+# field list on a freetext field should succeed (its value list may be empty).
 BZR_LIVE_API_KEY=$key "$BZR" --json \
   --server-url "$BASE_URL" \
   --server-api-key-env BZR_LIVE_API_KEY \
-  field list cf_q4_risk | grep -q 'low' || {
-    echo "smoke failed: cf_q4_risk legal values not observable through bzr" >&2
-    exit 1
-  }
+  field list cf_q4_notes >/dev/null || {
+  echo "smoke failed: cf_q4_notes definition not observable through bzr" >&2
+  exit 1
+}
 
 echo "provision smoke: OK"
 ```
@@ -1346,11 +1365,15 @@ No new files. Run, in order, each expected green:
 4. `uv build` then the installed-wheel smoke exactly as CI:
    `uv run --isolated --no-project --with ./dist/bzr_live-0.1.0-py3-none-any.whl
    python tests/smoke_installed.py tests/fixtures/minimal-scenario`.
-5. Live proof (operator-run, Docker required): `make up`, then
+5. Live proof (operator-run, Docker required). Freshness first — the smoke's
+   first-run assertion needs an unprovisioned fixture, and `make up` reuses
+   existing volumes: `CONFIRM_RESET=1 make reset` (fine on a never-initialized
+   fixture), then `make up`, then
    `BZR_LIVE_BZR="/Volumes/Source Code Volume/src/bzr-worktrees/bzr-live-issue-4/target/release/bzr"
-   bash tests/provision_smoke.sh`, then `CONFIRM_RESET=1 make reset`.
+   bash tests/provision_smoke.sh`, then `CONFIRM_RESET=1 make reset` again.
    Expected: `provision smoke: OK`; first run lines all `created`, second all
-   `unchanged`.
+   `unchanged`. A re-run after any smoke failure starts over from the leading
+   reset.
 6. `make build-multiarch` — container builds for both platforms with the new COPY.
 
 Record actual durations beside each command in the task plan when run. Commit any
