@@ -46,6 +46,22 @@ _KEY_ENV = "BZR_LIVE_API_KEY"
 _NO_CONTAINER_MARKERS = ("is not running", "no such service", "no container found")
 
 
+def _api_error_code(stderr: str) -> int | None:
+    for line in reversed(stderr.strip().splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        error = parsed.get("error") if isinstance(parsed, dict) else None
+        if isinstance(error, dict):
+            code = error.get("api_code")
+            return code if isinstance(code, int) else None
+    return None
+
+
 def _payload(raw: bytes, context: str) -> object:
     try:
         value = json.loads(raw.decode("utf-8"))
@@ -60,15 +76,19 @@ class BzrClient:
     """Stateless bzr subprocess seam. The key rides the environment, never argv."""
 
     def __init__(self, bzr_path: str, base_url: str, api_key: str,
-                 run=subprocess.run) -> None:
+                 admin_email: str, run=subprocess.run) -> None:
         self._bzr = bzr_path
         self._base_url = base_url
         self._api_key = api_key
+        # The pinned Bugzilla has no rest/whoami; bzr's identity fallback
+        # (rest/valid_login) needs the login email, passed via --server-email.
+        self._admin_email = admin_email
         self._run = run
 
     def _invoke(self, args: list[str], positionals: list[str] | None):
         argv = [self._bzr, "--json", "--server-url", self._base_url,
-                "--server-api-key-env", _KEY_ENV, *args]
+                "--server-api-key-env", _KEY_ENV,
+                "--server-email", self._admin_email, *args]
         if positionals:
             argv += ["--", *positionals]
         env = dict(os.environ)
@@ -76,15 +96,24 @@ class BzrClient:
         return self._run(argv, capture_output=True, env=env, shell=False)
 
     def read(self, args: list[str], positionals: list[str] | None = None):
-        """A read exiting 2 is absent (not-found contract); other failures raise."""
+        """A read exiting 2, or exiting 4 with a not-found API code, is absent.
+
+        Live-verified: a missing object is a server-side API error (exit 4)
+        whose structured code rides stderr's last line. 51 (object), 105
+        (unknown component), and 106 (unknown/inaccessible product) are the
+        not-found codes at the pinned Bugzilla (WebService/Constants.pm).
+        """
         done = self._invoke(args, positionals)
         if done.returncode == 0:
             return _payload(done.stdout, f"bzr {' '.join(args)}")
         if done.returncode == 2:
             return None
+        stderr = done.stderr.decode("utf-8", "replace")
+        if done.returncode == 4 and _api_error_code(stderr) in (51, 105, 106):
+            return None
         raise ProvisionError(
             f"bzr boundary failure (exit {done.returncode}) running "
-            f"{' '.join(args)}: {done.stderr.decode('utf-8', 'replace').strip()}")
+            f"{' '.join(args)}: {stderr.strip()}")
 
     def write(self, args: list[str], positionals: list[str] | None = None):
         done = self._invoke(args, positionals)

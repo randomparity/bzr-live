@@ -150,8 +150,11 @@ fixture noise and ignored.
   created with the admin account as its initial owner — Bugzilla requires one — and
   its assignee is excluded from comparison, like any undeclared field. A declared
   assignee is compared case-insensitively. The admin login used for this fallback
-  comes from the run-start `bzr whoami` reply; the host never has to *configure*
-  the admin login.
+  comes from the run-start `bzr whoami` reply. Because the pinned Bugzilla has no
+  `rest/whoami`, bzr's identity fallback needs `--server-email`: the CLI resolves
+  the admin email from exported `BZ_ADMIN_EMAIL`, else the checkout's
+  lifecycle-generated `.env`, else compose.yaml's default — the operator never has
+  to *configure* it (live-smoke finding, 2026-08-31).
 - `actor.groups`: the declared groups must each be present in the user's group
   memberships; extra server-side groups (e.g. every user's implicit defaults) are
   ignored. A pre-existing user missing a declared group is divergent.

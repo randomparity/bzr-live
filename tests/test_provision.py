@@ -121,16 +121,20 @@ class _FakeRun:
 class BzrClientTests(unittest.TestCase):
     def _client(self, results):
         fake = _FakeRun(results)
-        return BzrClient("/opt/bzr", "http://127.0.0.1:8080/", "k3y", run=fake), fake
+        client = BzrClient(
+            "/opt/bzr", "http://127.0.0.1:8080/", "k3y",
+            admin_email="admin@bugzilla.test", run=fake)
+        return client, fake
 
     def test_read_builds_stateless_argv_and_passes_key_via_env(self) -> None:
         client, fake = self._client([(0, b'{"data": {"name": "q4-devs"}}', b"")])
         payload = client.read(["group", "view"], positionals=["q4-devs"])
         argv, kwargs = fake.calls[0]
         self.assertEqual(
-            argv[:6],
+            argv[:8],
             ["/opt/bzr", "--json", "--server-url", "http://127.0.0.1:8080/",
-             "--server-api-key-env", "BZR_LIVE_API_KEY"],
+             "--server-api-key-env", "BZR_LIVE_API_KEY",
+             "--server-email", "admin@bugzilla.test"],
         )
         self.assertIn("--", argv)
         self.assertEqual(argv[argv.index("--") + 1 :], ["q4-devs"])
@@ -142,6 +146,25 @@ class BzrClientTests(unittest.TestCase):
     def test_read_exit_two_is_absent(self) -> None:
         client, _ = self._client([(2, b"", b"not found")])
         self.assertIsNone(client.read(["group", "view"], positionals=["missing"]))
+
+    def test_read_api_not_found_codes_are_absent(self) -> None:
+        # Live fact: a missing object is a server-side API error (exit 4) with a
+        # structured code on stderr's last line; 51/105/106 are the pinned
+        # not-found codes (Bugzilla WebService/Constants.pm at BZ_SOURCE_SHA).
+        for code in (51, 105, 106):
+            err = json.dumps({"schema_version": "1.0.0", "error": {
+                "api_code": code, "type": "api", "message": "x", "exit_code": 4}})
+            client, _ = self._client([(4, b"", b"WARN noise\n" + err.encode())])
+            self.assertIsNone(
+                client.read(["group", "view"], positionals=["missing"]),
+                f"api_code {code} should classify absent")
+
+    def test_read_other_api_error_is_boundary_failure(self) -> None:
+        err = json.dumps({"schema_version": "1.0.0", "error": {
+            "api_code": 32000, "type": "api", "message": "boom", "exit_code": 4}})
+        client, _ = self._client([(4, b"", err.encode())])
+        with self.assertRaises(ProvisionError):
+            client.read(["group", "view"], positionals=["q4-devs"])
 
     def test_read_other_exit_is_boundary_failure(self) -> None:
         client, _ = self._client([(4, b"", b"api error")])
@@ -626,6 +649,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(options.base_url, "http://127.0.0.1:8080/")
         self.assertEqual(options.bzr, "bzr")
         self.assertEqual(options.project_root, ".")
+
+    def test_cli_admin_email_resolution(self) -> None:
+        from bzr_live.provision import __main__ as cli
+
+        root = self.tmp / "checkout"
+        root.mkdir()
+        # no .env, no environment -> compose default
+        self.assertEqual(
+            cli._admin_email(str(root), env={}), "admin@bugzilla.test")
+        # the lifecycle-generated .env wins over the default
+        (root / ".env").write_text("BZ_PORT=8080\nBZ_ADMIN_EMAIL=ops@example.test\n")
+        self.assertEqual(
+            cli._admin_email(str(root), env={}), "ops@example.test")
+        # an exported environment value outranks the .env
+        self.assertEqual(
+            cli._admin_email(str(root), env={"BZ_ADMIN_EMAIL": "env@example.test"}),
+            "env@example.test")
 
 
 if __name__ == "__main__":
