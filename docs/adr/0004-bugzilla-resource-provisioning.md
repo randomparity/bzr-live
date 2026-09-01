@@ -36,8 +36,9 @@ ordinary output.
 
 - An identical rerun is a verified no-op, and a partial run converges on rerun; the
   fixture answers existence. The key files are the one piece of durable local state:
-  a fixture recreated under a kept state root holds stale keys, caught by the
-  run-start admin `whoami` verification.
+  a fixture recreated under a kept state root holds stale keys — the run-start
+  `whoami` verification catches a stale admin key; stale actor key files surface only
+  when event execution first uses them, or when the operator resets the state root.
 - A divergent pre-existing resource is detected before the run performs any resource
   mutation or actor-key minting; concurrent mutators are unhandled by design (single
   local operator).
@@ -63,8 +64,7 @@ ordinary output.
   body's "Required implementation boundaries" mandates the chosen alternative — "Use a
   straightforward two-pass flow: read and compare all declared definitions, then create
   missing resources in plan order and read them back"; source: GitHub issue
-  `randomparity/bzr-live#4`. Error-text matching also could not distinguish "exists and
-  matches" from "exists and diverges".
+  `randomparity/bzr-live#4`.
 - **A durable local reconciliation ledger for idempotency.** verified: the issue
   Non-goals exclude durable registries and transaction protocols, and the fixture
   read-back already answers existence; source: GitHub issue `randomparity/bzr-live#4`.
