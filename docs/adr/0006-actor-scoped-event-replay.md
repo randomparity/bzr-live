@@ -25,6 +25,13 @@ Three facts about the boundary constrain the answer, each read from bzr at `b803
   cannot be read back.
 - `bug view` accepts aliases as well as numeric IDs, so a scenario-namespaced server alias
   is a server-enforced unique handle a create can be reconciled against.
+- A `bug view` of a bug that is absent, or that the caller may not see, exits **4**, not 2.
+  bzr's functional suite asserts exit 4 with `api_code` 101 for a missing numeric ID and
+  exit 4 with `api_code` 102 for a group-restricted bug, both against a live Bugzilla
+  (`tests/functional/phases/08e-bugs-restricted-access.sh:24-25,289-292` in the bzr
+  checkout); the matching alias code is 100. `BzrClient.read` reports absent only for
+  `api_code` 51, 105 or 106 — the product and component codes issue #4 needed — so as it
+  stands it raises on all three.
 
 ## Decision
 
@@ -37,6 +44,12 @@ read against Bugzilla, whose answer supplies the value. If the reconciliation re
 fails, no completed record is written: the in-flight record survives and a later `resume`
 reconciles it. Persisting `reconcile` would deadlock the event, because ADR 0002 admits a
 second attempt only after a recorded `retry`.
+
+**Absence is read through a widened boundary client, and inaccessibility is not absence.**
+`BzrClient.read` gains a keyword `absent_codes` defaulting to today's `{51, 105, 106}`, so
+provisioning is unchanged; replay passes `{100, 101}` for every bug lookup. Code 102 stays
+unmatched and raises, because a bug the actor may not see is not a bug that is not there,
+and treating the two alike is what would let replay create a duplicate.
 
 **Reconciliation is keyed on the recovery class.** A `unique-create` reconciles by reading
 its server alias: present adopts the returned ID, absent proves no commit and records
@@ -66,9 +79,14 @@ from the declared one.
 per-action supported-payload table runs with the pristine sweep and refuses `bug.create`
 carrying `estimated_hours`, `remaining_hours`, `duplicate_of`, `custom_fields`, or a null
 `version`; `bug.update` carrying `groups`, `version`, a null `resolution`, a null
-`milestone`, or both `status` and `duplicate_of`; and any attachment description that would
-exceed Bugzilla's 255-character summary column once its marker is appended. Each refusal
-names the field and the scenario edit that resolves it.
+`milestone`, a null `duplicate_of`, or `duplicate_of` together with either `status` or
+`resolution`; and any attachment description whose rendered summary would exceed 255 **bytes**
+once its marker is appended. Each refusal names the field and the scenario edit that resolves
+it. Two of those grounds are narrower than they look and are stated as they are: a null
+`version` is refused not because Bugzilla rejects it but because bzr silently defaults it to
+`"unspecified"`, a version the fixture's provisioned product does not declare; and the
+attachment ceiling is `attachments.description`, which Bugzilla 5.2 declares `TINYTEXT`
+(`Bugzilla/DB/Schema.pm`) — 255 bytes, so the check counts encoded bytes, not code points.
 
 ## Consequences
 
@@ -93,11 +111,27 @@ names the field and the scenario edit that resolves it.
   million-event scenarios.
 - The sweep reads with each create's own actor credential rather than the admin key, so no
   admin key or `.env` parsing enters the replay CLI. A pre-existing bug hidden from that
-  actor by a group would pass the sweep; the create then fails on the duplicate alias and
-  reconciles to ambiguous, so the outcome degrades to a refusal, never a silent duplicate.
+  actor by a group answers `api_code` 102, which is not in `absent_codes`, so the sweep
+  raises and `replay` refuses before mutating anything. That is the intended outcome, and it
+  is reached by the read failing rather than by any reconciliation: the run stops with the
+  boundary's own message rather than treating an invisible bug as an absent one.
+
+- Widening `BzrClient.read` is a change to a boundary client issue #4 owns. The new argument
+  is keyword-only with today's set as its default, so no provisioning call site changes, but
+  the two issues now share one not-found contract rather than one code set.
 
 ## Considered & rejected
 
+- **Refuse every in-flight record on resume and tell the operator to reset.** judgment: the
+  cheapest design consistent with `AGENTS.md` ("Crash consistency is out of scope … A broken
+  fixture is fixed by rerunning, resetting, or recreating it"), and it satisfies the goal's
+  own refusal arm — rejected because issue #6's completion criterion requires an interrupted
+  run to *adopt* a committed result rather than force a full reset, which is what keeps a
+  multi-hundred-event scenario replayable at all.
+- **Treat any failed bug read as absent.** verified: a group-restricted bug answers exit 4
+  with `api_code` 102, asserted against a live Bugzilla at
+  `tests/functional/phases/08e-bugs-restricted-access.sh:24-25` in the bzr checkout; collapsing
+  it into absence would let the pristine sweep pass and the create then duplicate.
 - **Persist `next_safe_action: reconcile` and let `resume` resolve it.** verified: ADR 0002's
   retry transition, implemented at `src/bzr_live/scenario/journal.py:436-437`, admits attempt
   *n+1* only when attempt *n* recorded `retry`, and `replace_completed` requires a matching

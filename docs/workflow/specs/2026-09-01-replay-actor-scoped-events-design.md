@@ -55,6 +55,7 @@ scenario dir ──load_scenario──▶ ValidatedScenario ──┐
 | `src/bzr_live/replay/__main__.py` | argument parsing and error-to-exit-code mapping |
 | `tests/test_replay.py` | unit suite over mocked `subprocess.run` and URL opener |
 | `tests/fixtures/replay-scenario/` | a scenario exercising all eight actions |
+| `src/bzr_live/provision/adapters.py` | *changed*: `BzrClient.read` gains keyword-only `absent_codes` (see **Reading absence**) |
 
 Every unit is testable in isolation: `ReplayContext` needs only a `ValidatedScenario` and a
 `KeyStore`; a handler needs only a context and a `PlannedEvent`; `ReplayEngine` needs a
@@ -89,15 +90,36 @@ offending item and the fix.
 2. **Payload support.** Every event is checked against the per-action supported-payload
    table below. Applies to both commands, so a scenario that cannot be replayed says so
    before it half-runs.
-3. **`replay` only — empty journal.** The journal directory must hold no attempt file.
-   Otherwise: "this scenario has already been replayed under <state-root>; use `resume`, or
-   reset the fixture and remove the journal".
+3. **`replay` only — empty journal.** The journal directory is listed once and must hold no
+   file matching `<event>.<attempt>.json`, whatever the event name. Scanning only the current
+   scenario's event names would let a journal whose events were since renamed read as empty,
+   and the digest check cannot fire on a record no event name reaches. The message names the
+   stray record: "this scenario has already been replayed under <state-root> (found
+   <name>); use `resume`, or reset the fixture and remove the journal directory".
 4. **`replay` only — pristine sweep.** For each `bug.create` event, `bzr bug view
    <server_alias>` under that event's own actor credential must report absent. A present
    alias refuses: "<alias> already exists in the fixture; replay requires the pristine
    baseline (`scripts/checkpoint restore pristine`)".
 
 Preconditions 1–3 are local and run first; 4 is the only one that touches the network.
+
+### Reading absence
+
+Both the sweep and the `unique-create` reconciliation need "is this alias absent?", and the
+boundary does not answer it today. Observed behaviour, from bzr's own functional suite run
+against live Bugzilla containers: `bzr --json bug view 999999999` exits **4** with
+`api_code` 101, and a group-restricted bug exits 4 with `api_code` 102
+(`tests/functional/phases/08e-bugs-restricted-access.sh:24-25,289-292` in the bzr checkout,
+verified against Bugzilla 5.0.6 and run across 5.0/5.2/5.3). The alias form of the same
+condition is `api_code` 100. `BzrClient.read` reports absent only for `api_code` 51, 105 or
+106 — the product and component codes issue #4 needed — so every one of those raises.
+
+So `BzrClient.read` takes a keyword-only `absent_codes`, defaulting to today's
+`{51, 105, 106}`; replay passes `{100, 101}` for bug lookups. Code 102 is deliberately left
+out: a bug the actor cannot see is not a bug that is not there, so the read raises and the
+run refuses rather than sweeping past an invisible bug and creating a duplicate. This is the
+one change this issue makes to `bzr_live.provision`, authorized by the operator during design
+review; every existing call site keeps the default and is unaffected.
 
 Asset integrity is not a precondition here because it cannot fail here: `load_scenario`
 already verifies every asset's bytes against its declared SHA-256, and it copies that same
@@ -113,14 +135,20 @@ as refused is supported.
 
 | Action | Sent as | Refused, with the message's suggested fix |
 |---|---|---|
-| `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on` | non-empty `custom_fields` → "move to a follow-up `bug.custom-field-set` event"; non-null `estimated_hours` / `remaining_hours` / `duplicate_of` → "move to a follow-up `bug.update` event"; null `version` → "Bugzilla requires a version on create" |
-| `bug.update` | `bzr bug update <id>` with `--summary`, `--status`, `--resolution`, `--assignee` or `--reset-assigned-to`, `--dupe-of`, `--target-milestone`, `--estimated-time`, `--remaining-time`, and `--cc-add/-remove`, `--keywords-add/-remove`, `--blocks-add/-remove`, `--depends-on-add/-remove` computed as deltas against `bzr bug view` | `groups` → "set groups in the `bug.create` event"; `version` → "bzr `bug update` has no version field"; null `resolution` → "set `status` to an open status; Bugzilla clears the resolution"; null `milestone` → "bzr `bug update` cannot clear a milestone"; `status` together with `duplicate_of` → "bzr rejects `--status` with `--dupe-of`; use separate events" |
+| `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on` | non-empty `custom_fields` → "move to a follow-up `bug.custom-field-set` event"; non-null `estimated_hours` / `remaining_hours` / `duplicate_of` → "move to a follow-up `bug.update` event"; null `version` → "declare a version; bzr defaults an omitted one to `unspecified`, which this scenario's product does not declare" |
+| `bug.update` | `bzr bug update <id>` with `--summary`, `--status`, `--resolution`, `--assignee` or `--reset-assigned-to`, `--dupe-of`, `--target-milestone`, `--estimated-time`, `--remaining-time`, and `--cc-add/-remove`, `--keywords-add/-remove`, `--blocks-add/-remove`, `--depends-on-add/-remove` computed as deltas against `bzr bug view` | `groups` → "set groups in the `bug.create` event"; `version` → "bzr `bug update` has no version field"; null `resolution` → "set `status` to an open status; Bugzilla clears the resolution"; null `milestone` → "bzr `bug update` cannot clear a milestone"; null `duplicate_of` → "bzr `bug update` cannot clear a duplicate; set `status` to an open status"; `duplicate_of` together with `status` **or** `resolution` → "bzr rejects `--dupe-of` with `--status` and with `--resolution`; use separate events" |
 | `bug.comment` | `bzr comment add <id> --body-file=<tmpfile> [--private]` | — |
-| `bug.attach` | `bzr attachment upload <id> <file> --summary=<description + marker + checksum> --content-type=<type> [--private]` | rendered summary longer than 255 characters → "shorten the attachment description" |
+| `bug.attach` | `bzr attachment upload <id> <file> --summary=<description + marker + checksum> --content-type=<type> [--private]` | rendered summary longer than 255 **bytes** when UTF-8 encoded → "shorten the attachment description" |
 | `bug.worktime` | `bzr bug update <id> --work-time=<hours> --comment-file=<tmpfile>` | — |
 | `bug.custom-field-set` | `assign_bug_custom_fields(base_url, actor_key, id, {cf_<slug>: value})` | — |
 | `bug.flag` | `bzr bug update <id> --flag=<name><status>[(<requestee email>)]` | — |
 | `attachment.update` | `bzr attachment update <id> --obsolete` / `--no-obsolete`, plus `--summary=<description>` when declared | — |
+
+The attachment ceiling is `attachments.description`, declared `TINYTEXT` in Bugzilla 5.2's
+`Bugzilla/DB/Schema.pm` — a MySQL 255-**byte** column. The check therefore measures
+`len(rendered.encode("utf-8"))`; counting code points would let a non-ASCII description
+through and fail at the server. The marker and checksum already spend about 90 bytes, so a
+description's real budget is around 165.
 
 Deltas are computed against a fresh `bzr bug view` read taken immediately before the update,
 because Bugzilla's list fields are edited by add/remove and not by assignment. The engine
@@ -194,7 +222,7 @@ invocation's status was not observed, and carries the reconciliation read as
 |---|---|---|---|---|
 | `unique-create` | `bzr bug view <server_alias>` | alias present; adopt its `id` | alias absent | reply present but carries no positive integer `id` |
 | `append` | `bzr comment list <bug id>` (comment, worktime) or `bzr attachment list <bug id>` (attach) | exactly one entry contains the marker | no entry contains it | two or more do |
-| `idempotent-set` | `bzr bug view <bug id>`, or `bzr attachment list <bug id>` for `attachment.update` | every readable declared value matches | any readable declared value differs, or the target is unreadable | — |
+| `idempotent-set` | `bzr bug view <bug id>`, or `bzr attachment view <attachment id>` for `attachment.update` | every readable declared value matches | any readable declared value differs, or the target is unreadable | — |
 
 `idempotent-set` never yields `stop`: re-applying the whole declared set converges, so a
 non-match is always safe to retry.
@@ -212,8 +240,15 @@ idempotent, so the cost is one extra invocation.
 
 For `bug.custom-field-set` the comparison reads `cf_<slug>` from the same `bzr bug view`
 payload; for `bug.flag` it reads the `flags` array, matching on flag type name and status
-(and requestee where declared); for `attachment.update` it reads the target attachment's
-`is_obsolete` and, where declared, its `summary`.
+(and requestee where declared); for `attachment.update` it reads `bzr attachment view
+<attachment id>` and compares `is_obsolete` and, where declared, `summary`.
+
+`attachment.update` reads by attachment ID rather than by listing a bug's attachments,
+because the event carries no bug reference: the loader normalizes its payload to
+`{attachment, obsolete, description?}` with the attachment as the postcondition target, and
+`bzr attachment list` takes only a bug ID. `bzr attachment view <attachment id>` returns
+`id`, `summary` and `is_obsolete` — every field the comparison needs — and
+`context.resolve(values["attachment"])` already yields the ID it wants.
 
 ## Identity resolution
 
@@ -291,8 +326,15 @@ Each of these is a case:
 - digest mismatch on `resume` → refused;
 - `replay` with a non-empty journal → refused;
 - pristine sweep finds an existing alias → refused before any mutation;
-- every refused row of the supported-payload table;
-- attachment description exceeding 255 characters after marker rendering → refused;
+- every refused row of the supported-payload table, including both `duplicate_of` conflicts
+  and the null `duplicate_of`;
+- attachment description whose rendered summary exceeds 255 bytes → refused, with a
+  non-ASCII case so the byte-versus-character unit is pinned by a test;
+- `BzrClient.read` with `absent_codes={100, 101}`: exit 4 with `api_code` 100 or 101 returns
+  `None`; exit 4 with `api_code` 102 raises; the default set is unchanged for provisioning;
+- pristine sweep against a group-restricted bug (`api_code` 102) → refuses rather than
+  treating the bug as absent;
+- a journal holding a record for an event the scenario no longer names → `replay` refuses;
 - asset checksum mismatch → refused;
 - an actor key never appears in any journal record or in any argv.
 
