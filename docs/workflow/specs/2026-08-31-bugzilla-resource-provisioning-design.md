@@ -203,7 +203,7 @@ Key acquisition per login: if the key file exists, reuse it; otherwise call brid
 per run with `bzr whoami`; an invalid stored key fails with a message naming the file
 and suggesting a fixture/state-root mismatch (`make reset` or removing the state
 root). Actor keys are written for the scenario's actors so later event execution
-(issue #5/#6 scope) can authenticate independently; this issue only creates and
+(issue #6 scope) can authenticate independently; this issue only creates and
 stores them.
 
 Bootstrap order inside a run: the admin key is acquired at run start (file reuse or

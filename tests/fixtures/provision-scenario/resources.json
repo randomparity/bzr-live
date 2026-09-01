@@ -1,0 +1,20 @@
+{"format_version": 1, "resources": [
+  {"kind": "group", "name": "q4-devs", "description": "Q4 developers"},
+  {"kind": "actor", "name": "q4-ada", "email": "q4-ada@example.test",
+   "display_name": "Ada Q4", "groups": [{"ref": "group:q4-devs"}]},
+  {"kind": "product", "name": "q4-checkout", "description": "Checkout product"},
+  {"kind": "component", "name": "q4-cart", "product": {"ref": "product:q4-checkout"},
+   "description": "Cart component", "default_assignee": {"ref": "actor:q4-ada"}},
+  {"kind": "component", "name": "q4-docs", "product": {"ref": "product:q4-checkout"},
+   "description": "Docs component"},
+  {"kind": "version", "name": "q4-v1", "product": {"ref": "product:q4-checkout"}},
+  {"kind": "milestone", "name": "q4-m1", "product": {"ref": "product:q4-checkout"}},
+  {"kind": "custom-field", "name": "q4-risk", "field_type": "single-select",
+   "values": ["low", "high"]},
+  {"kind": "custom-field", "name": "q4-notes", "field_type": "text"},
+  {"kind": "keyword", "name": "q4-hot", "description": "Hot issue"},
+  {"kind": "flag-type", "name": "q4-review", "description": "Review flag",
+   "target": "bug", "products": [{"ref": "product:q4-checkout"}]},
+  {"kind": "flag-type", "name": "q4-any", "description": "Unscoped flag",
+   "target": "bug"}
+]}
