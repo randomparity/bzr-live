@@ -17,12 +17,19 @@ store. What is undecided is how a run *uses* that journal: when reconciliation r
 authorizes adopting a result the server already holds, and what happens to a payload the
 authorized boundary cannot express in one mutation.
 
-Three facts about the boundary constrain the answer, each read from bzr at `b80303b7`:
+Six facts about the boundary constrain the answer, each read from bzr at `b80303b7` and
+recorded, with its class, in `docs/bzr-findings.md`:
 
-- `bug create --from-json` sets `deny_unknown_fields` and defines no `estimated_time`,
-  `remaining_time`, `dupe_of`, or `cf_*` key; `bug update` defines no `--version`.
-- `bzr bug view` serializes no `groups` field, so a declared group set on an existing bug
-  cannot be read back.
+- `bug create --from-json` sets `deny_unknown_fields` and defines no `estimated_time` or
+  `remaining_time` (finding G1) and no `cf_*` key (G4, a deliberate upstream choice);
+  `bug update` defines no `--version` (G2) and no milestone reset (G3). It also defines no
+  `dupe_of`, but neither does Bugzilla's own `Bug.create`, so that one is not a bzr gap.
+- `bzr bug view` serializes no `groups`, `estimated_time` or `remaining_time`, so those
+  fields can be written through bzr but never read back (D3).
+- A flag-type name containing `-`, `+`, `?` or `X` cannot be addressed at all: bzr's
+  `parse_single_flag` takes the *first* of those characters as the status, so `needs-info?`
+  parses as name `needs` (D1). Bugzilla permits such names and this repository's slugs allow
+  hyphens.
 - `bug view` accepts aliases as well as numeric IDs, so a scenario-namespaced server alias
   is a server-enforced unique handle a create can be reconciled against.
 - bzr documents `op_sys` and `rep_platform` as "required by some Bugzilla installations"
@@ -30,12 +37,14 @@ Three facts about the boundary constrain the answer, each read from bzr at `b803
   fixture's `containers/bugzilla/checksetup_answers.txt` sets no `defaultplatform` or
   `defaultopsys` answer. The scenario contract has no slot for either — the loader's
   `bug.create` postcondition key set (`src/bzr_live/scenario/journal.py:227-234`) does not
-  carry them — so a scenario cannot supply them even if it wanted to.
+  carry them. This is a *fixture-configuration* gap rather than a bzr one: Bugzilla supplies
+  the values from its own parameters when they are set.
 - Bug aliases are enabled on this fixture: `checksetup_answers.txt` sets
   `$answer{'usebugaliases'} = 1`. That matters because bzr's own functional containers run
-  with them off — `tests/functional/phases/08c-bugs-create-fields.sh:8-9` says "bug aliases
-  are disabled on these default-config containers, so the field silently no-ops" — so the
-  parameter, not the client, is what makes the alias round-trip available here.
+  with them off — the header comment of
+  `tests/functional/phases/08c-bugs-create-fields.sh` says "bug aliases are disabled on these
+  default-config containers, so the field silently no-ops" (D4) — so the parameter, not the
+  client, is what makes the alias round-trip available here.
 - A `bug view` of a bug that is absent, or that the caller may not see, exits **4**, not 2.
   bzr's functional suite asserts exit 4 with `api_code` 101 for a missing numeric ID and
   exit 4 with `api_code` 102 for a group-restricted bug, both against a live Bugzilla
@@ -84,11 +93,19 @@ create the moment the duplicate alias sent it into reconciliation. That sweep is
 "replay begins from the keyed pristine baseline" means operationally; restoring the baseline
 stays the operator's `scripts/checkpoint restore pristine`.
 
-**Every create sends a fixed `op_sys` and `rep_platform`.** The contract has no slot for
-them and the fixture declares no defaults, so replay sends `Linux` and `PC` — the pair bzr's
-own functional fixtures use against stock Bugzilla — rather than omitting fields the
-installation may require. Scenarios cannot vary them; nothing in the contract could express
-the variation anyway.
+**The fixture is fixed in the fixture; the runner substitutes nothing.** `checksetup_answers.txt`
+gains `defaultplatform` and `defaultopsys` so a create declaring neither succeeds on its own
+terms. Replay sends exactly what the scenario declares and nothing else. Injecting a fixed
+`op_sys`/`rep_platform` pair in the create document was the alternative, and it is the shape
+`AGENTS.md` forbids: a value the scenario never declared, sent so the run would appear to
+succeed.
+
+**A payload bzr cannot execute is refused before any mutation, and the refusal names the
+limitation rather than a workaround.** Each refusal cites its entry in
+`docs/bzr-findings.md`, which is where the gap is recorded with its bzr source, its class
+— defect or design choice — and its upstream issue. Surfacing these is what the fixture is
+for; a message reading "move it to a follow-up event" would tell an author to route around
+bzr and leave no trace that bzr could not do it.
 
 **Markers are rendered only for append-class events.** A comment body gains a trailing
 `[<marker>]` line; a work-time update carries the same marker in the comment posted in the
@@ -98,16 +115,17 @@ from the declared one.
 
 **A payload the boundary cannot express in one mutation is refused before any mutation.** A
 per-action supported-payload table runs with the pristine sweep and refuses `bug.create`
-carrying `estimated_hours`, `remaining_hours`, `duplicate_of`, `custom_fields`, or a null
-`version`; `bug.update` carrying `groups`, `version`, a null `resolution`, a null
-`milestone`, a null `duplicate_of`, or `duplicate_of` together with either `status` or
-`resolution`; and any attachment description whose rendered summary would exceed 255 **bytes**
-once its marker is appended. Each refusal names the field and the scenario edit that resolves
-it. Two of those grounds are narrower than they look and are stated as they are: a null
-`version` is refused not because Bugzilla rejects it but because bzr silently defaults it to
-`"unspecified"`, a version the fixture's provisioned product does not declare; and the
-attachment ceiling is `attachments.description`, which Bugzilla 5.2 declares `TINYTEXT`
-(`Bugzilla/DB/Schema.pm`) — 255 bytes, so the check counts encoded bytes, not code points.
+carrying `estimated_hours` or `remaining_hours` (finding G1), `custom_fields` (G4),
+`duplicate_of`, or a null `version`; `bug.update` carrying `groups` (D3), `version` (G2), a
+null `milestone` (G3), a null `resolution`, a null `duplicate_of`, or `duplicate_of` together
+with `status` or `resolution` (G5); a `bug.flag` whose flag-type name contains `+ - ? X`
+(D1); and any attachment description whose rendered summary would exceed 255 **bytes** once
+its marker is appended. Two grounds are narrower than they look: a null `version` is refused
+because bzr silently defaults it to `"unspecified"`, a version the fixture's provisioned
+product does not declare; and the attachment ceiling is `attachments.description`, which
+Bugzilla 5.2 declares `TINYTEXT` (`Bugzilla/DB/Schema.pm`) — 255 bytes, so the check counts
+encoded bytes, not code points. That last one is a Bugzilla column width, not a bzr gap, so
+it earns no findings entry.
 
 ## Consequences
 
@@ -137,6 +155,11 @@ attachment ceiling is `attachments.description`, which Bugzilla 5.2 declares `TI
   is reached by the read failing rather than by any reconciliation: the run stops with the
   boundary's own message rather than treating an invisible bug as an absent one.
 
+- The supported-payload table is a census of what bzr cannot express, so it is a live
+  document: each row points at `docs/bzr-findings.md`, and a bzr release that closes a gap
+  deletes a row here rather than adding one. The scenario contract stays wider than the
+  engine on purpose — narrowing the contract to what bzr can do today would erase the
+  evidence.
 - Two of this record's boundary facts are inferred from the fixture's configuration rather
   than observed against it: that a create omitting `op_sys`/`rep_platform` would be rejected,
   and that the `alias` key round-trips. The unit suite mocks the subprocess boundary and

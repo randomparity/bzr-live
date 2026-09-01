@@ -17,8 +17,10 @@ CLI.
 `unittest`, discovered by `python -m unittest discover -s tests`.
 
 Expected implementation size: 1350–1750 changed lines (L) — summed from the file map below,
-counting new module and test bodies plus the fixture, the operator-run smoke script, the
-`adapters.py` change, and wiring edits, excluding these design documents.
+counting new module and test bodies plus the scenario fixture, the operator-run smoke script,
+the `adapters.py` and `checksetup_answers.txt` changes, and wiring edits. Excludes these
+design documents; `docs/bzr-findings.md` is counted, since it is a deliverable rather than a
+design artifact.
 
 ## Global Constraints
 
@@ -64,10 +66,67 @@ Transcribed from
 | `tests/test_replay.py` | new | unit suite over mocked `subprocess.run` and URL opener |
 | `tests/fixtures/replay-scenario/` | new | scenario exercising all eight actions (built in Task 1; every later task's tests load it) |
 | `src/bzr_live/provision/adapters.py` | changed | `BzrClient.read` gains keyword-only `absent_codes`; new `BUG_ABSENT_CODES` |
+| `docs/bzr-findings.md` | new | the register of bzr limitations this work surfaced (Task 0) |
+| `containers/bugzilla/checksetup_answers.txt` | changed | `defaultplatform` / `defaultopsys`, so an honest create succeeds (Task 0) |
 | `tests/replay_smoke.sh` | new | operator-run live proof: the create succeeds and its alias round-trips |
 | `Makefile` | changed | widen `compileall` from two named test files to `tests`; add `tests/replay_smoke.sh` to the shell checks and a `replay-smoke` target |
 | `.github/workflows/scenario-contract.yml` | changed | add the new ADR, spec and plan to both `paths` lists |
 | `README.md` | changed | document `replay` and `resume` |
+
+## Task 0 — the findings register and the fixture's create defaults
+
+Creates `docs/bzr-findings.md`; changes `containers/bugzilla/checksetup_answers.txt`.
+No code, no tests.
+
+**Where this fits.** First, because every later task's refusal messages cite entries in the
+register, and because the fixture must be able to accept an honest create before any replay
+step can be verified against it.
+
+### Step 0.1 — write the register
+
+`docs/bzr-findings.md`, one entry per bzr limitation this design surfaced, each carrying the
+bzr source citation at `b80303b7`, whether the behaviour was **observed** or **read from
+source**, what the fixture does about it, and its upstream issue once filed. The set is
+D1–D4 (defects) and G1–G6 (gaps and deliberate design choices); `AGENTS.md`, "Purpose: prove
+`bzr`", is the rule it serves.
+
+### Step 0.2 — give the fixture create defaults
+
+`bzr` documents `op_sys` and `rep_platform` as "required by some Bugzilla installations"
+(`src/cli/bug/create.rs:138,141`) and passes both on every functional create. Bugzilla
+supplies them from its own `defaultplatform`/`defaultopsys` parameters when set, and this
+fixture sets neither. Add to `containers/bugzilla/checksetup_answers.txt`, beside the other
+parameter answers:
+
+```perl
+$answer{'defaultplatform'} = 'PC';
+$answer{'defaultopsys'} = 'Linux';
+```
+
+The alternative — injecting a fixed pair into every create document — sends a value the
+scenario never declared so the run appears to succeed, which `AGENTS.md` forbids. Fixing the
+fixture keeps the create payload a faithful record of what the scenario asked for.
+
+### Step 0.3 — verify
+
+```
+make check
+```
+
+Exit 0. The parameter change only takes effect on a fresh install, so the operator must run
+`CONFIRM_RESET=1 make reset && make up` before `make replay-smoke`; note that in the
+register entry and in Step 6.1b's preamble.
+
+### Step 0.4 — commit
+
+```
+git add docs/bzr-findings.md containers/bugzilla/checksetup_answers.txt
+git commit -m "docs: register the bzr limitations this fixture surfaces"
+```
+
+**Acceptance criteria.** Every refusal message a later task writes has a register entry to
+cite. `checksetup_answers.txt` sets `defaultplatform` and `defaultopsys`, so a create
+declaring neither succeeds without the runner substituting anything.
 
 ## Task 1 — `ReplayContext`
 
@@ -647,20 +706,26 @@ ATTACHMENT_SUMMARY_BYTE_LIMIT = 255
 # Grounds for the refusals below, at bzr b80303b7: create_json.rs:150 defaults an omitted
 # version to "unspecified"; update.rs:85 and :92 both carry conflicts_with = "dupe_of".
 # Kept here rather than in the operator-facing messages, which outlive any line number.
+# Each message names the bzr limitation and its docs/bzr-findings.md entry. It does not tell
+# the author how to route around bzr: surfacing the gap is what this fixture is for.
 _CREATE_UNSUPPORTED = {
-    "custom_fields": "move it to a follow-up bug.custom-field-set event",
-    "estimated_hours": "move it to a follow-up bug.update event",
-    "remaining_hours": "move it to a follow-up bug.update event",
-    "duplicate_of": "move it to a follow-up bug.update event",
+    "custom_fields": "bzr excludes cf_* from bug create by design (finding G4)",
+    "estimated_hours": "bzr bug create --from-json has no estimated_time field, "
+                       "though Bugzilla accepts one (finding G1)",
+    "remaining_hours": "bzr bug create --from-json has no remaining_time field, "
+                       "though Bugzilla accepts one (finding G1)",
+    "duplicate_of": "Bugzilla's own Bug.create has no dupe_of field",
 }
 _UPDATE_UNSUPPORTED = {
-    "groups": "set groups in the bug.create event; bzr bug view cannot read them back",
-    "version": "bzr bug update has no version field",
+    "groups": "bzr bug view does not return groups, so no delta can be computed and no "
+              "result confirmed (finding D3)",
+    "version": "bzr bug update has no version flag, though Bugzilla accepts one "
+               "(finding G2)",
 }
 _UPDATE_NO_CLEAR = {
-    "resolution": "set status to an open status; Bugzilla clears the resolution",
-    "milestone": "bzr bug update cannot clear a milestone",
-    "duplicate_of": "bzr bug update cannot clear a duplicate; set status to an open status",
+    "resolution": "Bugzilla clears the resolution on transition to an open status",
+    "milestone": "bzr offers --reset-assigned-to but no milestone reset (finding G3)",
+    "duplicate_of": "bzr offers no un-duplicate flag",
 }
 # Both flags carry `conflicts_with = "dupe_of"` at bzr b80303b7
 # (src/cli/bug/update.rs:85 and :92), so clap rejects either pairing at parse time.
@@ -675,10 +740,10 @@ def render_attachment_summary(description: str, marker: str, sha256: str) -> str
     return f"{description} [{marker}] sha256={sha256}".strip()
 
 
-def _unsupported(event: PlannedEvent, field: str, fix: str) -> ReplayError:
+def _unsupported(event: PlannedEvent, field: str, limitation: str) -> ReplayError:
     return ReplayError(
         f"event {event.name!r} ({event.action}) declares {field!r}, which the bzr "
-        f"boundary cannot apply in one mutation; {fix}")
+        f"boundary cannot apply: {limitation}. See docs/bzr-findings.md")
 
 
 class ActionHandler:
@@ -703,8 +768,8 @@ class BugCreateHandler(ActionHandler):
         if values.get("version") is None:
             raise _unsupported(
                 event, "version",
-                "declare a version; bzr defaults an omitted one to 'unspecified', "
-                "which this scenario's product does not declare")
+                "bzr defaults an omitted version to 'unspecified', which this "
+                "scenario's product does not declare")
 
 
 class BugUpdateHandler(ActionHandler):
@@ -724,8 +789,8 @@ class BugUpdateHandler(ActionHandler):
                 if field in values:
                     raise _unsupported(
                         event, field,
-                        f"bzr rejects --{field} together with --dupe-of; "
-                        "use separate events")
+                        f"bzr's --{field} carries conflicts_with = \"dupe_of\", "
+                        "deliberately (finding G5)")
 
 
 class BugCommentHandler(ActionHandler):
@@ -770,8 +835,9 @@ class BugFlagHandler(ActionHandler):
         if any(character in name for character in "+-?X"):
             raise _unsupported(
                 event, "flag_type",
-                f"the flag type name {name!r} contains a character bzr reads as a flag "
-                "status; rename the flag type without a hyphen")
+                f"bzr cannot address the flag type name {name!r}: its flag parser takes "
+                "the first of + - ? X as the status character, so the name is truncated. "
+                "Bugzilla permits such names (finding D1)")
 
 
 class AttachmentUpdateHandler(ActionHandler):
@@ -992,12 +1058,10 @@ def _bug_object(payload) -> dict | None:
             "summary": values["summary"],
             "description": values["description"],
             "version": values["version"].name,
-            # bzr documents both as "required by some Bugzilla installations"
-            # (src/cli/bug/create.rs:138,141) and this fixture sets no defaultplatform or
-            # defaultopsys; the contract has no slot for them, so they are fixed here.
-            "op_sys": "Linux",
-            "rep_platform": "PC",
         }
+        # Nothing else goes in. bzr wants op_sys/rep_platform on installations that set no
+        # defaults; the honest fix is the fixture's checksetup answers (Task 0), not a value
+        # the scenario never declared. See AGENTS.md, "Purpose: prove bzr".
         if values["milestone"] is not None:
             document["target_milestone"] = values["milestone"].name
         if values["assignee"] is not None:
@@ -1760,8 +1824,8 @@ requirement, same `.env` port and admin-email fallbacks, same `mktemp -d` state 
 cleanup trap). It provisions the replay fixture, replays it, and then asserts the two facts
 the unit suite cannot reach:
 
-1. the first `bug.create` succeeded — proving a create carrying this design's fixed
-   `op_sys`/`rep_platform` pair is accepted by this fixture; and
+1. the first `bug.create` succeeded while declaring no `op_sys`/`rep_platform` — proving
+   Task 0's `defaultplatform`/`defaultopsys` answers make an honest create work; and
 2. `bzr --json bug view <server_alias>` resolves to the id that create returned — proving the
    `alias` key round-trips here rather than silently no-opping as it does on bzr's
    alias-disabled containers.
@@ -1775,6 +1839,15 @@ s = load_scenario('tests/fixtures/replay-scenario')
 print(next(e.expected_postcondition['values']['server_alias']
            for e in s.events if e.action == 'bug.create'))"
 ```
+
+It then probes each `docs/bzr-findings.md` entry still marked *read from source* — most
+usefully D1, by attempting a hyphenated flag type — and records the observed exit code and
+message in the register, promoting the entry from read to observed. That probe is the
+fixture doing its actual job.
+
+The smoke requires a fixture installed **after** Task 0's checksetup change:
+`CONFIRM_RESET=1 make reset && make up` first, since Bugzilla reads those answers only at
+install.
 
 If either assertion fails, ADR 0006's "Considered & rejected" already names the fallback —
 reconcile creates by a namespaced marker in the description — and taking it is a design
@@ -1864,7 +1937,8 @@ plan gate the `scenario-contract` workflow.
 | Recorded `stop` refuses on a later resume | 5 |
 | Secrets absent from journal records and argv | 1, 3, 5 |
 | CLI, exit codes, journal location | 6 |
-| Fixed `op_sys` / `rep_platform` on create | 3, 6 |
+| Create carries only what the scenario declared; fixture supplies the defaults | 0, 3, 6 |
+| Every refusal names a bzr limitation and cites its register entry | 0, 2 |
 | Flag-type name refusal, and flag-clear reconciling by absence | 2, 4 |
 | Pristine check binds any first execution, not just `replay` | 5 |
 | Failing reconciliation read leaves the in-flight record | 5 |

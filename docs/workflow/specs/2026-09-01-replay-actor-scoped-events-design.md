@@ -57,6 +57,8 @@ scenario dir ──load_scenario──▶ ValidatedScenario ──┐
 | `tests/fixtures/replay-scenario/` | a scenario exercising all eight actions |
 | `tests/replay_smoke.sh` | operator-run live proof: create succeeds and its alias round-trips |
 | `src/bzr_live/provision/adapters.py` | *changed*: `BzrClient.read` gains keyword-only `absent_codes` (see **Reading absence**) |
+| `docs/bzr-findings.md` | *new*: the register of bzr limitations this work surfaced — the fixture's own deliverable |
+| `containers/bugzilla/checksetup_answers.txt` | *changed*: `defaultplatform` and `defaultopsys`, so an honest create succeeds without runner-side substitution |
 
 Every unit is testable in isolation: `ReplayContext` needs only a `ValidatedScenario` and a
 `KeyStore`; a handler needs only a context and a `PlannedEvent`; `ReplayEngine` needs a
@@ -146,29 +148,43 @@ as refused is supported.
 
 | Action | Sent as | Refused, with the message's suggested fix |
 |---|---|---|
-| `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on`, plus a fixed `op_sys: "Linux"` and `rep_platform: "PC"` | non-empty `custom_fields` → "move to a follow-up `bug.custom-field-set` event"; non-null `estimated_hours` / `remaining_hours` / `duplicate_of` → "move to a follow-up `bug.update` event"; null `version` → "declare a version; bzr defaults an omitted one to `unspecified`, which this scenario's product does not declare" |
-| `bug.update` | `bzr bug update <id>` with `--summary`, `--status`, `--resolution`, `--assignee` or `--reset-assigned-to`, `--dupe-of`, `--target-milestone`, `--estimated-time`, `--remaining-time`, and `--cc-add/-remove`, `--keywords-add/-remove`, `--blocks-add/-remove`, `--depends-on-add/-remove` computed as deltas against `bzr bug view` | `groups` → "set groups in the `bug.create` event"; `version` → "bzr `bug update` has no version field"; null `resolution` → "set `status` to an open status; Bugzilla clears the resolution"; null `milestone` → "bzr `bug update` cannot clear a milestone"; null `duplicate_of` → "bzr `bug update` cannot clear a duplicate; set `status` to an open status"; `duplicate_of` together with `status` **or** `resolution` → "bzr rejects `--dupe-of` with `--status` and with `--resolution`; use separate events" |
+| `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding exactly what the scenario declared: `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on` | `estimated_hours` / `remaining_hours` → bzr's create JSON has no such field, though Bugzilla accepts both ([G1]); `custom_fields` → bzr excludes `cf_*` from create by design ([G4]); `duplicate_of` → Bugzilla's own `Bug.create` has no `dupe_of`; null `version` → bzr would default it to `unspecified`, which this scenario's product does not declare |
+| `bug.update` | `bzr bug update <id>` with `--summary`, `--status`, `--resolution`, `--assignee` or `--reset-assigned-to`, `--dupe-of`, `--target-milestone`, `--estimated-time`, `--remaining-time`, and `--cc-add/-remove`, `--keywords-add/-remove`, `--blocks-add/-remove`, `--depends-on-add/-remove` computed as deltas against `bzr bug view` | `groups` → `bzr bug view` does not return `groups`, so no delta can be computed and no result confirmed ([D3]); `version` → bzr's `bug update` has no version flag, though Bugzilla accepts one ([G2]); null `milestone` → bzr offers `--reset-assigned-to` but no milestone reset ([G3]); null `resolution` → Bugzilla clears it on transition to an open status; null `duplicate_of` → bzr offers no un-duplicate flag; `duplicate_of` with `status` **or** `resolution` → both flags carry `conflicts_with = "dupe_of"`, deliberately ([G5]) |
 | `bug.comment` | `bzr comment add <id> --body-file=<tmpfile> [--private]` | — |
 | `bug.attach` | `bzr attachment upload <id> <file> --summary=<description + marker + checksum> --content-type=<type> [--private]` | rendered summary longer than 255 **bytes** when UTF-8 encoded → "shorten the attachment description" |
 | `bug.worktime` | `bzr bug update <id> --work-time=<hours> --comment-file=<tmpfile>` | — |
 | `bug.custom-field-set` | `assign_bug_custom_fields(base_url, actor_key, id, {cf_<slug>: value})` | — |
-| `bug.flag` | `bzr bug update <id> --flag=<name><status>[(<requestee email>)]` | flag-type name containing `+`, `-`, `?` or `X` → "rename the flag type without a hyphen; bzr reads the first of `+-?X` as the flag status" |
+| `bug.flag` | `bzr bug update <id> --flag=<name><status>[(<requestee email>)]` | flag-type name containing `+`, `-`, `?` or `X` → bzr's flag parser takes the first of those characters as the status, so the name is unaddressable ([D1]) |
 | `attachment.update` | `bzr attachment update <id> --obsolete` / `--no-obsolete`, plus `--summary=<description>` when declared | — |
 
-`op_sys` and `rep_platform` are sent as a fixed pair because bzr documents both as "required
-by some Bugzilla installations" (`src/cli/bug/create.rs:138,141`) and passes them on every
-functional create, while this fixture's `checksetup_answers.txt` declares no `defaultplatform`
-or `defaultopsys`. The scenario contract has no slot for either, so there is nothing to vary
-and no scenario edit that could supply them; `Linux`/`PC` are the values bzr's own fixtures
-use against stock Bugzilla. `tests/replay_smoke.sh` is what proves the create succeeds.
+Every refusal names the bzr limitation and links its entry in
+[`docs/bzr-findings.md`](../../bzr-findings.md), which carries the source citation, the class
+— defect or deliberate design choice — and the upstream issue. The messages do not tell an
+author how to route around bzr; the point of this fixture is that the gap stays visible. The
+table is expected to shrink as bzr closes gaps, and the scenario contract stays deliberately
+wider than what bzr can execute — narrowing it would erase the evidence.
 
-The `bug.flag` refusal exists because resource names are slugs (`[a-z][a-z0-9-]{0,62}`) and
-`Provisioner._create_flag_type` registers the slug verbatim, while bzr's `parse_single_flag`
-locates the status as the **first** of `+ - ? X` anywhere in the string. A flag type
-`needs-info` therefore renders `--flag=needs-info?`, which bzr reads as name `needs`, status
-"deny", trailing `info?`, and rejects with exit 7. Uppercase `X` cannot appear in a slug, so
-the hyphen is the only reachable hazard — but the failure would otherwise arrive mid-run, and
-the only fix is renaming the flag type, which changes the digest and forces a full reset.
+The create document carries **only** what the scenario declared. bzr documents `op_sys` and
+`rep_platform` as "required by some Bugzilla installations", and this fixture declared no
+`defaultplatform`/`defaultopsys`, so the honest fix is in the fixture:
+`containers/bugzilla/checksetup_answers.txt` sets both, and the runner substitutes nothing.
+Injecting a fixed pair into the create document would have been a value the scenario never
+declared, sent so the run would appear to succeed — the shape `AGENTS.md` forbids.
+
+The `bug.flag` refusal is a **bzr defect**, not a scenario error. Resource names are slugs
+(`[a-z][a-z0-9-]{0,62}`), `Provisioner._create_flag_type` registers the slug verbatim, and
+Bugzilla permits hyphenated flag type names — bzr simply cannot address them. Replay refuses
+before mutating, because the alternative is a mid-run failure whose only fix changes the
+scenario digest and forces a full reset; the refusal cites [D1] so the defect is recorded
+rather than absorbed.
+
+[D1]: ../../bzr-findings.md#d1
+[D3]: ../../bzr-findings.md#d3
+[G1]: ../../bzr-findings.md#g1
+[G2]: ../../bzr-findings.md#g2
+[G3]: ../../bzr-findings.md#g3
+[G4]: ../../bzr-findings.md#g4
+[G5]: ../../bzr-findings.md#g5
 
 The attachment ceiling is `attachments.description`, declared `TINYTEXT` in Bugzilla 5.2's
 `Bugzilla/DB/Schema.pm` — a MySQL 255-**byte** column. The check therefore measures
@@ -346,8 +362,11 @@ Two facts are out of their reach because they are properties of the fixture rath
 this code — that a create omitting `op_sys`/`rep_platform` would be rejected, and that the
 `alias` key round-trips rather than silently no-opping — so `tests/replay_smoke.sh` carries
 them: an operator-run live proof beside `tests/provision_smoke.sh`, the same split ADR 0004
-chose. It replays the fixture scenario against a healthy `make up` and asserts that
-`bzr bug view <server_alias>` resolves to the id the create returned. CI runs the unit suite;
+chose. It replays the fixture scenario against a healthy `make up`, asserts that a create
+declaring no `op_sys`/`rep_platform` succeeds on the reconfigured fixture, and asserts that
+`bzr bug view <server_alias>` resolves to the id that create returned. It also probes each
+`docs/bzr-findings.md` entry marked *read from source* and records the observed behaviour
+there, which is how an entry is promoted from read to observed. CI runs the unit suite;
 the smoke is operator-run by decision.
 
 Each of these is a case:
@@ -366,7 +385,8 @@ Each of these is a case:
 - every refused row of the supported-payload table — every `bug.create` row, every
   `bug.update` row including both `duplicate_of` conflicts and the null `duplicate_of`, and
   the `bug.flag` hyphenated-name row;
-- a create document carries `op_sys` and `rep_platform`;
+- a create document carries no field the scenario did not declare — in particular no
+  `op_sys` or `rep_platform`;
 - a `bug.flag` clear (`X`) reconciles to `advance` when no entry with that type name is
   present;
 - attachment description whose rendered summary exceeds 255 bytes → refused, with a
