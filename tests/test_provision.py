@@ -176,6 +176,18 @@ class BzrClientTests(unittest.TestCase):
         with self.assertRaises(ProvisionError):
             client.write(["group", "create", "--name=q4-devs"])
 
+    def test_missing_binary_is_actionable_not_a_traceback(self) -> None:
+        def missing_run(argv, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+        client = BzrClient(
+            "/nonexistent-bzr", "http://127.0.0.1:8080/", "k3y",
+            admin_email="admin@bugzilla.test", run=missing_run)
+        with self.assertRaises(ProvisionError) as ctx:
+            client.read(["whoami"])
+        self.assertIn("/nonexistent-bzr", str(ctx.exception))
+        self.assertIn("--bzr", str(ctx.exception))
+
 
 class BridgeClientTests(unittest.TestCase):
     def _client(self, results):
@@ -207,6 +219,16 @@ class BridgeClientTests(unittest.TestCase):
             client.call("create-api-key", {"login": None})
         self.assertNotIn("t0psecretmaterial", str(ctx.exception))
         self.assertNotIn("api_key", str(ctx.exception))
+
+    def test_missing_docker_is_actionable_not_a_traceback(self) -> None:
+        def missing_run(argv, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+        client = BridgeClient(["docker", "compose"], "bzr-live-abc",
+                              run=missing_run)
+        with self.assertRaises(ProvisionError) as ctx:
+            client.call("get-keyword", {"name": "q4-hot"})
+        self.assertIn("docker", str(ctx.exception))
 
     def test_container_not_found_names_project_root_recovery(self) -> None:
         client, _ = self._client([(1, b"", b'service "bugzilla" is not running')])
@@ -387,6 +409,7 @@ def _declared_bzr_state():
             "name": "q4-docs", "description": "Docs component",
             "default_assignee": "someone-else@example.test"},
         "field:cf_q4_risk": [{"name": "low"}, {"name": "high"}, {"name": "---"}],
+        "field:cf_q4_tags": [{"name": "perf"}, {"name": "ui"}],
     }
 
 
@@ -397,6 +420,9 @@ def _declared_bridge_state():
             "values": ["high", "low"]},
         "custom-field:cf_q4_notes": {
             "name": "cf_q4_notes", "field_type": "text", "values": []},
+        "custom-field:cf_q4_tags": {
+            "name": "cf_q4_tags", "field_type": "multi-select",
+            "values": ["perf", "ui"]},
         "keyword:q4-hot": {"name": "q4-hot", "description": "Hot issue"},
         "flag-type:q4-review": {
             "name": "q4-review", "description": "Review flag", "target": "bug",
@@ -435,7 +461,7 @@ class ExecutorTests(unittest.TestCase):
         bzr = _FakeBzr()
         bridge = _FakeBridge(bzr)
         report = self._provisioner(bzr, bridge).run()
-        self.assertEqual([status for status, _ in report], ["created"] * 12)
+        self.assertEqual([status for status, _ in report], ["created"] * 13)
         self.assertEqual(
             [identity for _, identity in report],
             [f"{r.kind}:{r.name}" for r in self.scenario.resource_plan])
@@ -447,7 +473,7 @@ class ExecutorTests(unittest.TestCase):
         bzr = _FakeBzr(_declared_bzr_state())
         bridge = _FakeBridge(bzr, _declared_bridge_state())
         report = self._provisioner(bzr, bridge).run()
-        self.assertEqual([status for status, _ in report], ["unchanged"] * 12)
+        self.assertEqual([status for status, _ in report], ["unchanged"] * 13)
         self.assertEqual(bzr.writes, [])
         self.assertEqual(
             [op for op, _ in bridge.calls if op.startswith("create-")], [])
@@ -559,6 +585,10 @@ class ExecutorTests(unittest.TestCase):
         self._provisioner(bzr, bridge).run()
         field_reads = [pos for args, pos in bzr.reads if tuple(args[:2]) == ("field", "list")]
         self.assertIn(("cf_q4_risk",), field_reads)
+        self.assertIn(("cf_q4_tags",), field_reads)  # multi-select reads back too
+        created_types = {p["name"]: p["field_type"] for op, p in bridge.calls
+                         if op == "create-custom-field"}
+        self.assertEqual(created_types["cf_q4_tags"], "multi-select")
         for operation, payload in bridge.calls:
             if operation in ("get-custom-field", "create-custom-field"):
                 self.assertTrue(payload["name"].startswith("cf_q4_"))
@@ -597,7 +627,7 @@ class ExecutorTests(unittest.TestCase):
         self.assertNotIn("key-", joined)
         self.assertNotIn("k3y", joined)
         self.assertIn("created product:q4-checkout", joined)
-        self.assertIn("summary: 12 created, 0 unchanged", joined)
+        self.assertIn("summary: 13 created, 0 unchanged", joined)
 
     def test_custom_field_name_mapping(self) -> None:
         self.assertEqual(custom_field_name("risk-level"), "cf_risk_level")

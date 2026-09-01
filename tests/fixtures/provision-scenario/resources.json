@@ -12,6 +12,8 @@
   {"kind": "custom-field", "name": "q4-risk", "field_type": "single-select",
    "values": ["low", "high"]},
   {"kind": "custom-field", "name": "q4-notes", "field_type": "text"},
+  {"kind": "custom-field", "name": "q4-tags", "field_type": "multi-select",
+   "values": ["perf", "ui"]},
   {"kind": "keyword", "name": "q4-hot", "description": "Hot issue"},
   {"kind": "flag-type", "name": "q4-review", "description": "Review flag",
    "target": "bug", "products": [{"ref": "product:q4-checkout"}]},
