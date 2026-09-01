@@ -48,9 +48,10 @@ ordinary output.
 - Custom-field slugs gain a deterministic `cf_`/underscore name mapping that later
   event execution must share.
 - The unit suite mocks the subprocess/HTTP boundaries; proof that the bridge's
-  Bugzilla API calls work belongs to the live Docker smoke, which needs a bzr binary
-  carrying the `default_assigned_to` fix (unreleased candidate until then), so CI
-  runs only the unit suite for now.
+  Bugzilla API calls work belongs to the operator-run live Docker smoke, which needs
+  a bzr binary carrying the `default_assigned_to` fix (the authorized unreleased
+  candidate). CI runs the unit suite; the live smoke is operator-run by decision —
+  a disposable local fixture does not owe its proof to GitHub runners.
 
 ## Considered & rejected
 
@@ -65,9 +66,10 @@ ordinary output.
   straightforward two-pass flow: read and compare all declared definitions, then create
   missing resources in plan order and read them back"; source: GitHub issue
   `randomparity/bzr-live#4`.
-- **A durable local reconciliation ledger for idempotency.** verified: the issue
-  Non-goals exclude durable registries and transaction protocols, and the fixture
-  read-back already answers existence; source: GitHub issue `randomparity/bzr-live#4`.
+- **A durable local reconciliation ledger for idempotency.** verified: the issue's
+  "Required implementation boundaries" mandates the read-first two-pass flow, under
+  which the fixture read-back already answers existence and a ledger would be a second
+  source of truth; source: GitHub issue `randomparity/bzr-live#4`.
 - **Storing actor keys in `.env` or one aggregate file.** judgment: per-actor files
   under one 0700 directory let later event execution read a single actor's credential
   without parsing an aggregate. (They also align with the runner-state directory shape

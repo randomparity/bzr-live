@@ -260,10 +260,9 @@ one custom field's legal values through `bzr field list`. Requires a bzr binary 
 candidate until the fix ships in a release).
 
 **CI note:** the scenario-contract workflow runs the unit tests as-is. The live smoke
-is local-only for now: GitHub runners have no bzr candidate binary, and pinning an
-unreleased bzr into CI is out of scope. Wiring the smoke into the container-lifecycle
-workflow is deferred until a bzr release contains the `default_assigned_to` fix; the
-PR records this deferral.
+is operator-run by decision, not deferral: GitHub runners have no bzr binary carrying
+the `default_assigned_to` fix, and a disposable local fixture does not owe its live
+proof to CI. Issue #4's acceptance criterion 7 is met by the operator-run smoke.
 
 ## Threat model
 
