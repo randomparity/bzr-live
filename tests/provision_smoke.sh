@@ -69,13 +69,16 @@ grep -q 'low' <<<"$values" || {
 # Bugzilla omits `values` for freetext fields and bzr 0.8.3-dev's field model
 # requires it, so field list exits 8 (deserialize) while the error body itself
 # carries the server's definition — proof the definition is exposed to bzr's
-# transport. Accept success or exactly that limitation naming our field.
+# transport. Accept success, or exactly that limitation: exit 8 (bzr's
+# deserialize code; usage/API/network/auth errors exit 2/4/5/9) naming our
+# field. Anything else fails the criterion.
 notes_out=$(BZR_LIVE_API_KEY=$key "$BZR" --json \
   --server-url "$BASE_URL" \
   --server-api-key-env BZR_LIVE_API_KEY \
   --server-email "$ADMIN_EMAIL" \
   field list cf_q4_notes 2>&1) && notes_ok=0 || notes_ok=$?
-if [[ $notes_ok -ne 0 ]] && ! grep -q 'cf_q4_notes' <<<"$notes_out"; then
+if [[ $notes_ok -ne 0 ]] \
+    && { [[ $notes_ok -ne 8 ]] || ! grep -q 'cf_q4_notes' <<<"$notes_out"; }; then
   echo "smoke failed: cf_q4_notes definition not observable through bzr" >&2
   echo "$notes_out" >&2
   exit 1
