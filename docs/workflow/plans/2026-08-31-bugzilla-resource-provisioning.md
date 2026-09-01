@@ -190,6 +190,7 @@ class KeyStoreTests(unittest.TestCase):
 
     def test_rejects_bad_directory_mode(self) -> None:
         self.root.mkdir(mode=0o755)
+        os.chmod(self.root, 0o755)  # mkdir's mode is umask-masked; pin it explicitly
         with self.assertRaises(adapters.ProvisionError):
             keys.KeyStore(self.root)
 
@@ -732,6 +733,10 @@ Behavior contract (from the spec, normative for this task):
   case-insensitive emails; system-group carve-out reported `unchanged`; custom-field
   values as sets ignoring `---`; flag-type canonical inclusion pairs; version and
   milestone are existence-only).
+- Every bridge custom-field payload (`create-custom-field`, `get-custom-field`)
+  carries `custom_field_name(slug)` — `cf_q4_risk`, never the raw slug `q4-risk`:
+  Bugzilla rejects hyphens in field names and stores the `cf_` form, so a raw-slug
+  probe would misclassify every provisioned field as absent on rerun.
 - Readback verification failures and mid-create divergence raise `ProvisionError`
   naming resource and field; the conflict message for a divergent *multi-step*
   partial (actor groups, select values, flag inclusions) appends the
@@ -811,7 +816,8 @@ pass):
   compare equal; a missing pair is divergent.
 - `test_custom_field_readback_via_field_list` — after create, the executor calls
   `field list` with the mapped `cf_q4_risk` name and compares value sets ignoring
-  `---`.
+  `---`; the fake bridge also asserts both custom-field payloads carried
+  `{"name": "cf_q4_risk"}`, never the raw slug.
 - `test_actor_keys_ensured_in_pass_two_only` — conflict run mints no keys; clean
   run mints exactly the missing actor keys via `create-api-key` with the actor
   email.
@@ -1093,13 +1099,15 @@ sub dispatch {
   my ($operation, $request, $admin) = @_;
 
   if ($operation eq 'create-version') {
+    # Version/Milestone use NAME_FIELD 'value'; passing 'name' is an invalid column
+    # at the pinned SHA (Version.pm:30-56, Object.pm create).
     my $version = Bugzilla::Version->create(
-      {name => $request->{name}, product => product_of($request->{product})});
+      {value => $request->{name}, product => product_of($request->{product})});
     return {name => $version->name};
   }
   if ($operation eq 'create-milestone') {
     my $milestone = Bugzilla::Milestone->create(
-      {name => $request->{name}, product => product_of($request->{product})});
+      {value => $request->{name}, product => product_of($request->{product})});
     return {name => $milestone->name};
   }
   if ($operation eq 'create-keyword') {
@@ -1222,10 +1230,19 @@ STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-provision-smoke.XXXXXX")
 trap 'rm -rf "$STATE"' EXIT
 chmod 700 "$STATE"
 
+BASE_URL="http://127.0.0.1:${BZ_PORT:-8080}/"
+
 run() {
   uv run --python 3.11 python -m bzr_live.provision "$SCENARIO" \
-    --state-root "$STATE/state" --bzr "$BZR" --project-root "$ROOT"
+    --state-root "$STATE/state" --bzr "$BZR" --project-root "$ROOT" \
+    --base-url "$BASE_URL"
 }
+
+echo "provision smoke: bridge syntax check inside the image"
+PROJECT="bzr-live-$(printf '%s' "$ROOT" | openssl dgst -sha256 -r | cut -c1-12)"
+docker compose --project-name "$PROJECT" --project-directory "$ROOT" \
+  --file "$ROOT/compose.yaml" exec -T bugzilla \
+  perl -c /usr/local/bin/bzr-live-bridge
 
 echo "provision smoke: first run (expect all created)"
 first=$(run)
@@ -1246,7 +1263,7 @@ fi
 echo "provision smoke: custom-field readback through bzr"
 key=$(cat "$STATE/state/admin.key")
 BZR_LIVE_API_KEY=$key "$BZR" --json \
-  --server-url "http://127.0.0.1:${BZ_PORT:-8080}/" \
+  --server-url "$BASE_URL" \
   --server-api-key-env BZR_LIVE_API_KEY \
   field list cf_q4_risk | grep -q 'low' || {
     echo "smoke failed: cf_q4_risk legal values not observable through bzr" >&2
@@ -1267,10 +1284,13 @@ recorded decision.
 /state/
 ```
 
-`README.md` — add a section after the checkpoint material:
+`README.md` — append a section at the end of the file, using the README's existing
+setext heading style (`Scenario provisioning` underlined with `---`), with this
+content:
 
 ```markdown
-## Scenario provisioning
+Scenario provisioning
+---------------------
 
 Provision a validated scenario's resources into the running fixture:
 
