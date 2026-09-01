@@ -48,7 +48,8 @@ static table from resource kind to boundary; the routing test asserts the whole 
   Dockerfile at `/usr/local/bin/bzr-live-bridge` (mode 0755).
 - `tests/fixtures/provision-scenario/` — a scenario declaring at least one resource of
   every supported kind, including one component without a declared
-  `default_assignee`, used by unit tests and the live smoke.
+  `default_assignee` and one flag type declaring no products or components (the
+  any/any inclusion), used by unit tests and the live smoke.
 - `tests/test_provision.py` — focused unit tests with fake adapters.
 - `tests/provision_smoke.sh` — live two-run Docker proof (local; see CI note).
 - `AGENTS.md` (+ `CLAUDE.md` symlink) — operator-directed repository scope note:
@@ -64,7 +65,9 @@ uv run python -m bzr_live.provision SCENARIO_DIR \
   [--state-root PATH]      # default ./state
   [--base-url URL]         # default http://127.0.0.1:8080/
   [--bzr PATH]             # bzr executable path, default "bzr"
-  [--project-root PATH]    # checkout root for compose project derivation, default CWD
+  [--project-root PATH]    # checkout root for compose project derivation, default CWD;
+                           # resolved to its physical path (realpath), matching
+                           # scripts/lifecycle's `pwd -P`
 ```
 
 Exit 0 on success (all resources created or unchanged), non-zero with a one-line
@@ -122,7 +125,11 @@ create-milestone) invalidates that product's cached view.
 A read (`view`/`search`) exiting 2 — bzr's stable "not found or bad args" code —
 classifies the resource as absent, but only under two preconditions that remove the
 "bad args" half of that code: the run-start `bzr whoami` succeeded (the connection
-and invocation shape work), and the arguments came from validated scenario slugs.
+and invocation shape work), and every variable argv value either matches the slug
+grammar or rides after a literal `--` separator. Positional values that are not
+slugs (the actor email in `user search`) are always passed after `--`, so a value
+beginning with `-` (legal under the loader's email grammar) can never be parsed as
+a flag and misclassified as absent.
 Any other non-zero exit, and exit 2 on a write, is a boundary failure. An absent
 parent product classifies its declared versions, milestones, and components as
 absent. For `user search`, absent means the result set contains no entry whose
@@ -141,7 +148,9 @@ fixture noise and ignored.
 - A component with no declared `default_assignee` (the loader stores `None`) is
   created with the admin account as its initial owner — Bugzilla requires one — and
   its assignee is excluded from comparison, like any undeclared field. A declared
-  assignee is compared case-insensitively.
+  assignee is compared case-insensitively. The admin login used for this fallback
+  comes from the run-start `bzr whoami` reply; the host never has to *configure*
+  the admin login.
 - `actor.groups`: the declared groups must each be present in the user's group
   memberships; extra server-side groups (e.g. every user's implicit defaults) are
   ignored. A pre-existing user missing a declared group is divergent.
@@ -151,8 +160,14 @@ fixture noise and ignored.
   multi-select→`MULTI_SELECT`. Declared `values` must equal the field's legal values
   as a set, ignoring Bugzilla's built-in `---` placeholder that single-select fields
   always carry.
-- `flag-type`: declared `target`, `description`, and the product/component inclusion
-  set are compared; sort keys and grant flags are not declared and not compared.
+- `flag-type`: declared `target`, `description`, and the inclusion set are compared.
+  The inclusion set canonicalizes both sides to (product-or-any, component-or-any)
+  pairs: an empty declaration (no products, no components) is the single (any, any)
+  inclusion; each declared product contributes (product, any); each declared
+  component contributes (its owning product, component). The bridge's
+  `create-flag-type`/`get-flag-type` carry inclusions in exactly this pair shape
+  (nulls meaning any), and rerun comparison is set equality over the canonical
+  pairs. Sort keys and grant flags are not declared and not compared.
 - Version and milestone comparison is existence within the declared product (they
   declare no other fields).
 - Actor display names, group/product/keyword/component descriptions compare exactly.
@@ -205,12 +220,13 @@ Allowlisted operations — anything else exits 2 with `unknown operation`:
 - `create-custom-field {name, field_type, values[]}` — `Bugzilla::Field->create`
   (`custom => 1`), then `Bugzilla::Field::Choice` per legal value for select types
 - `create-keyword {name, description}` — `Bugzilla::Keyword->create`
-- `create-flag-type {name, description, target, products[], components{}}` —
-  `Bugzilla::FlagType->create` with inclusions
+- `create-flag-type {name, description, target, inclusions[]}` — inclusions are
+  {product, component} pairs with `null` meaning any, the canonical shape defined
+  under comparison semantics — `Bugzilla::FlagType->create` with inclusions
 - `create-api-key {login}` — `Bugzilla::User::APIKey->create`; the only operation
   whose reply carries a secret. A `null` (or omitted) `login` resolves to the
   container's `BZ_ADMIN_EMAIL` account — the same source `set_user` uses — so the
-  host never has to know the admin login; the reply names the resolved login.
+  host never has to configure the admin login; the reply names the resolved login.
   Actor-key minting always passes the explicit actor email
 - `get-custom-field {name}` / `get-keyword {name}` / `get-flag-type {name}` — read
   current definition or `{"ok": true, "result": null}` when absent; `get-flag-type`
@@ -251,6 +267,10 @@ implemented.
 - Boundary failure: non-zero bzr/bridge exit or malformed JSON reply → failure naming
   the boundary, the operation, and the resource; stderr from the child is included
   except for `create-api-key`, whose reply is never echoed.
+- Wrong `--project-root`: a compose exec that fails because the derived project's
+  `bugzilla` container does not exist maps to an actionable message naming the
+  derived project name and suggesting `--project-root <checkout root>` (or running
+  from the checkout), not a generic bridge failure.
 - Readback mismatch after create: hard failure naming resource and field.
 - State-root violations (wrong mode, wrong owner, symlink, non-regular key file):
   refusal with the path and the expected mode/ownership.
@@ -318,9 +338,10 @@ existing loopback-published port.
 
 **Controls per boundary.**
 
-1. bzr subprocess: argv is built from validated `ValidatedScenario` values (loader
-   already constrains slugs/emails) and fixed flags; the API key passes via
-   environment (`--server-api-key-env`), never argv; `shell=False`.
+1. bzr subprocess: argv is built from validated `ValidatedScenario` values and fixed
+   flags — slugs are grammar-constrained, while emails and free text are only
+   shape-checked and therefore ride after `--` or as `--flag=value`; the API key
+   passes via environment (`--server-api-key-env`), never argv; `shell=False`.
 2. bridge subprocess: fixed argv (operation name from a closed set); all data rides
    JSON stdin, so no shell or Perl interpolation of scenario values; the container
    already holds admin credentials, so the bridge adds no new secret exposure;
