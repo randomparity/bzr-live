@@ -26,7 +26,7 @@ ADR 0002 performs no mutation). It consumes a `ValidatedScenario` from
 |---|---|---|
 | `bzr` | actor, group, product, component (writes and reads); custom-field legal-value readback | subprocess: caller-supplied bzr argv prefix + `--json --server-url <url> --server-api-key-env BZR_LIVE_API_KEY <verb ...>` |
 | `bridge` | version, milestone, custom-field, keyword, flag-type (create + read where bzr has no read), API-key creation | subprocess: `docker compose ... exec -T --user www-data bugzilla bzr-live-bridge <operation>` with a JSON request on stdin and a JSON reply on stdout |
-| `bugzilla-rest-custom-field` | per-bug custom-field assignment only | `urllib.request` `PUT /rest/bug/<id>` with `api_key` header; no other REST route |
+| `bugzilla-rest-custom-field` | per-bug custom-field assignment only | `urllib.request` `PUT /rest/bug/<id>` with `api_key` in the JSON body; no other REST route |
 
 The boundary names match the journal contract's `_BOUNDARIES` vocabulary
 (`bzr`, `bugzilla-rest-custom-field`) plus the container-local bridge. Routing is a
@@ -47,7 +47,8 @@ static table from resource kind to boundary; the routing test asserts the whole 
 - `containers/bugzilla/bridge.pl` — the fixed-operation Perl bridge, installed by the
   Dockerfile at `/usr/local/bin/bzr-live-bridge` (mode 0755).
 - `tests/fixtures/provision-scenario/` — a scenario declaring at least one resource of
-  every supported kind, used by unit tests and the live smoke.
+  every supported kind, including one component without a declared
+  `default_assignee`, used by unit tests and the live smoke.
 - `tests/test_provision.py` — focused unit tests with fake adapters.
 - `tests/provision_smoke.sh` — live two-run Docker proof (local; see CI note).
 - `AGENTS.md` (+ `CLAUDE.md` symlink) — operator-directed repository scope note:
@@ -115,6 +116,19 @@ pass 1 simply classifies the already-created prefix `unchanged` and the remainde
 One `product view` read is reused for the product's own comparison and for its
 versions/milestones, cached per run.
 
+**Not-found contract for bzr reads.** Exit 0 with a JSON payload means present.
+A read (`view`/`search`) exiting 2 — bzr's stable "not found or bad args" code —
+classifies the resource as absent, but only under two preconditions that remove the
+"bad args" half of that code: the run-start `bzr whoami` succeeded (the connection
+and invocation shape work), and the arguments came from validated scenario slugs.
+Any other non-zero exit, and exit 2 on a write, is a boundary failure. An absent
+parent product classifies its declared versions, milestones, and components as
+absent. For `user search`, absent means the result set contains no entry whose
+login equals the declared email case-insensitively — the query is a substring
+match, so the executor selects the exact-login entry and ignores every other row;
+zero exact matches is absent, and multiple exact matches cannot occur (logins are
+unique).
+
 ### Comparison semantics
 
 Only declared scenario fields are compared; every other server-side attribute is
@@ -122,6 +136,10 @@ fixture noise and ignored.
 
 - Emails (actor identity, component `default_assignee`) compare case-insensitively —
   Bugzilla treats logins case-insensitively.
+- A component with no declared `default_assignee` (the loader stores `None`) is
+  created with the admin account as its initial owner — Bugzilla requires one — and
+  its assignee is excluded from comparison, like any undeclared field. A declared
+  assignee is compared case-insensitively.
 - `actor.groups`: the declared groups must each be present in the user's group
   memberships; extra server-side groups (e.g. every user's implicit defaults) are
   ignored. A pre-existing user missing a declared group is divergent.
@@ -143,10 +161,12 @@ fixture noise and ignored.
 
 - creates `state_root` and `actor-keys/` with mode 0700 (and requires 0700 plus
   current-user ownership when they already exist);
-- one file per login: `<actor-name>.key` holding the raw key and a trailing newline,
-  written with `os.open(..., O_CREAT | O_EXCL, 0o600)` then a same-directory atomic
-  rename — ordinary local fixture hygiene, nothing more (issue boundary);
-- the admin key is stored as `admin.key` alongside actor keys.
+- one file per actor: `actor-keys/<actor-name>.key` holding the raw key and a
+  trailing newline, written with `os.open(..., O_CREAT | O_EXCL, 0o600)` then a
+  same-directory atomic rename — ordinary local fixture hygiene, nothing more
+  (issue boundary);
+- the admin key is stored as `<state_root>/admin.key`, outside `actor-keys/`, so a
+  scenario actor named `admin` (a legal slug) cannot collide with it.
 
 Key acquisition per login: if the key file exists, reuse it; otherwise call bridge
 `create-api-key {login}` and write the file. The executor verifies the admin key once
@@ -185,7 +205,10 @@ Allowlisted operations — anything else exits 2 with `unknown operation`:
 - `create-flag-type {name, description, target, products[], components{}}` —
   `Bugzilla::FlagType->create` with inclusions
 - `create-api-key {login}` — `Bugzilla::User::APIKey->create`; the only operation
-  whose reply carries a secret
+  whose reply carries a secret. A `null` (or omitted) `login` resolves to the
+  container's `BZ_ADMIN_EMAIL` account — the same source `set_user` uses — so the
+  host never has to know the admin login; the reply names the resolved login.
+  Actor-key minting always passes the explicit actor email
 - `get-custom-field {name}` / `get-keyword {name}` / `get-flag-type {name}` — read
   current definition or `{"ok": true, "result": null}` when absent; `get-flag-type`
   errors if more than one flag type carries the name (Bugzilla does not enforce
@@ -206,9 +229,13 @@ the request/response protocol, allowlist bounds, and error mapping.
 ## REST custom-field adapter
 
 `assign_bug_custom_fields(base_url, api_key, bug_id, values)` issues one
-`PUT /rest/bug/<id>` with JSON body `{"cf_x": ...}` and the key in the
-`X-BUGZILLA-API-KEY` request header, via `urllib.request`, raising on non-2xx or an
-error body. It exists because the issue
+`PUT /rest/bug/<id>` with JSON body `{"cf_x": ..., "api_key": <key>}` via
+`urllib.request`, raising on non-2xx or an error body. The key rides in the JSON
+body, not the URL and not a header: the pinned Bugzilla's REST layer merges body
+JSON into request params and `fix_credentials` accepts only the `api_key`
+parameter (upstream has no `X-BUGZILLA-API-KEY` header handling — that is a
+bugzilla.mozilla.org extension), and a query-string key would land in the
+container's Apache access log. It exists because the issue
 charter routes per-bug custom-field assignment through stock REST; resource
 provisioning itself never calls it (bugs are event scope). Its tests cover routing,
 request shape, and error mapping with a stubbed opener. No other REST route or verb is
@@ -237,12 +264,16 @@ boundaries — mock the boundary, not the logic):
 1. adapter routing — the full kind→boundary table, and that per-bug custom-field
    assignment routes to REST;
 2. plan order — creates happen in `resource_plan` order across boundaries;
+   comparison classification — bzr exit-2 reads classify absent under the
+   not-found contract, other exits are boundary failures, absent parents
+   propagate, and `user search` supersets resolve by exact login;
 3. identical rerun — all-unchanged classification issues no writes;
 4. divergent existing definition — conflict raised, no pass-2 mutation;
 5. partial-run rerun — a prefix-provisioned fixture converges, only the missing
    suffix is created;
 6. actor key files — 0700/0600 creation, reuse without re-creation, refusal on bad
-   mode/ownership/symlink;
+   mode/ownership/symlink, and admin-key separation (an actor named `admin` gets
+   `actor-keys/admin.key`, never `<state_root>/admin.key`);
 7. bridge operation bounds — the client only emits allowlisted operations; unknown
    operation and error replies map to failures; `create-api-key` replies never reach
    ordinary output or exception text;
@@ -287,8 +318,9 @@ existing loopback-published port.
    already holds admin credentials, so the bridge adds no new secret exposure;
    `shell=False`.
 3. REST: single hard-coded route template; the bug id is an `int`; body is
-   json-encoded; the key travels in the `X-BUGZILLA-API-KEY` header over loopback
-   HTTP (the fixture's existing transport).
+   json-encoded; the key travels as the `api_key` body parameter over loopback
+   HTTP (the fixture's existing transport), keeping it out of URLs and the
+   container's access logs.
 4. Key files: 0700 directory, 0600 files, owner check, `O_NOFOLLOW`/`O_EXCL` on
    create; keys excluded from stdout/stderr/exceptions.
 
