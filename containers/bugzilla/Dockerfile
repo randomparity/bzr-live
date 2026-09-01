@@ -125,6 +125,7 @@ RUN curl --fail --location --silent --show-error \
 COPY containers/bugzilla/apache.conf /etc/apache2/sites-available/000-default.conf
 COPY containers/bugzilla/checksetup_answers.txt /opt/bzr-live/checksetup_answers.txt
 COPY --chmod=0755 containers/bugzilla/entrypoint.sh /usr/local/bin/bzr-live-bugzilla
+COPY --chmod=0755 containers/bugzilla/bridge.pl /usr/local/bin/bzr-live-bridge
 
 RUN a2enmod expires headers rewrite \
  && a2dismod mpm_event \
