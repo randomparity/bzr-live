@@ -56,8 +56,9 @@ parameter — and neither is a bzr limitation either:
 - A `bug view` of a bug that is absent, or that the caller may not see, exits **4**, not 2.
   bzr's functional suite asserts exit 4 with `api_code` 101 for a missing numeric ID and
   exit 4 with `api_code` 102 for a group-restricted bug, both against a live Bugzilla
-  (`tests/functional/phases/08e-bugs-restricted-access.sh:24-25,289-292` in the bzr
-  checkout); the matching alias code is 100. `BzrClient.read` reports absent only for
+  (`tests/functional/phases/08e-bugs-restricted-access.sh:289-292` and `:169,180,262`
+  respectively, in the bzr checkout); the matching alias code is 100, per
+  `src/client/response.rs:549-550`. `BzrClient.read` reports absent only for
   `api_code` 51, 105 or 106 — the product and component codes issue #4 needed — so as it
   stands it raises on all three.
 
@@ -127,28 +128,43 @@ from the declared one.
 per-action supported-payload table runs with the pristine sweep and refuses `bug.create`
 carrying `estimated_hours` or `remaining_hours` (finding G1), `custom_fields` (G4),
 `duplicate_of`, or a null `version` (G9); `bug.update` carrying `groups` (D3), `version` (G2),
-a null `milestone` (G3), a null `resolution`, a null `duplicate_of` (G8), or `duplicate_of`
+a null `milestone` (G3), a null `resolution`, a null `duplicate_of`, or `duplicate_of`
 together with `status` or `resolution` (G5); a `bug.flag` whose flag-type name contains
 `+ - ? X` (D1); and any attachment description whose rendered summary would exceed 255
 **bytes** once its marker is appended.
 
-Three of those grounds are *not* bzr's, and saying so matters as much as naming the ones that
-are: blaming bzr for a constraint it did not impose corrupts the register exactly as silently
-routing around a real gap would. `duplicate_of` on create is absent from bzr because it is
-absent from Bugzilla's own `Bug.create`. A null `resolution` on update is refused because
-Bugzilla clears the resolution on a transition to an open status, so a scenario declaring the
-null is declaring a status change it should state directly. And the attachment ceiling is
-`attachments.description`, which Bugzilla 5.2 declares `TINYTEXT` (`Bugzilla/DB/Schema.pm`) —
-255 bytes, so the check counts encoded bytes, not code points. None of the three earns a
-findings entry, and each refusal says whose constraint it is.
+**Four of those grounds are Bugzilla's, not bzr's, and saying so matters as much as naming
+the ones that are.** Charging bzr for a constraint it did not impose corrupts the register
+exactly as silently routing around a real gap would, and the register is this repository's
+product. All four are verified against the fixture's own Bugzilla image
+(`bzr-live-…-bugzilla`, `BUGZILLA_VERSION` "5.2+", read with `docker run --rm --entrypoint
+sh … cat`), not inferred:
 
-G8 is the one entry that straddles the line, and it is recorded as straddling it. What is
-verified is bzr's half: `--dupe-of` takes an ID and there is no `--reset-dupe-of`, though
-`--reset-assigned-to` and `--reset-qa-contact` establish the pattern
-(`src/cli/bug/update.rs:96-122`). Whether Bugzilla models un-duplicating as nulling `dupe_of`
-at all, or only as changing the resolution, is not verified here — so the register entry
-states the bzr half as read and the Bugzilla half as open, and nothing is filed upstream
-until the second half is settled.
+- `duplicate_of` **on create** is absent from bzr because it is absent from Bugzilla's own
+  `Bug.create`.
+- A null `resolution` **on update** cannot be sent at all. `Bug.update`'s own documentation
+  states that "attempting to set the resolution to *any* value (even an empty or null string)
+  on an open bug will cause an error to be thrown", and that "if you change the `status` field
+  to an open status, the resolution field will automatically be cleared, so you don't have to
+  clear it manually" (`Bugzilla/WebService/Bug.pm:4085-4094`). The mechanism is in
+  `Bugzilla::Bug::set_bug_status`, which calls `clear_resolution()` on a transition to an open
+  status and then *deletes* `resolution` from the update parameters (`Bugzilla/Bug.pm:2956-2960`).
+- A null `duplicate_of` **on update** is the same mechanism. `clear_resolution` is what clears
+  the duplicate — it calls `_clear_dup_id` — and it throws `resolution_cant_clear` unless the
+  bug is already open (`Bugzilla/Bug.pm:2933-2939`). `Bug.update`'s `dupe_of` is typed `int`
+  with no null form, and its documentation says to set `dupe_of` and *not* the status or
+  resolution, because Bugzilla derives those (`Bugzilla/WebService/Bug.pm:3935-3942`). So bzr's
+  `dupe_of: Option<u64>` mirrors Bugzilla exactly, and the absent `--reset-dupe-of` is not a
+  bzr gap: there is nothing on the wire for it to send.
+- The attachment ceiling is `attachments.description`, declared `TINYTEXT` at
+  `Bugzilla/DB/Schema.pm:505` — 255 bytes, so the check counts encoded bytes, not code points.
+
+An earlier revision of this record charged the last two to bzr, on the reasoning that
+`--reset-assigned-to` and `--reset-qa-contact` establish a reset pattern the other fields lack.
+That reasoning was wrong in the direction this ADR warns about, and the register entry it
+produced (G8) has been withdrawn. The asymmetry in `UpdateArgs` is real, but it mirrors a
+Bugzilla asymmetry rather than creating one: `assigned_to` and `qa_contact` have component
+defaults to reset *to*, and `resolution` and `dupe_of` are cleared by a status transition.
 
 ## Consequences
 
@@ -193,7 +209,9 @@ until the second half is settled.
   than observed against it: that a create omitting `op_sys`/`rep_platform` would be rejected,
   that the `alias` key round-trips, and that Bugzilla enforces alias uniqueness — the last
   being what makes a duplicate create *fail* into reconciliation rather than quietly produce a
-  second bug under one alias. The unit suite mocks the subprocess boundary and
+  second bug under one alias. The Bugzilla-model grounds above are *not* on this list: they
+  were settled by reading the fixture's own image, and each carries its file and line. The
+  unit suite mocks the subprocess boundary and
   cannot reach either, so `tests/replay_smoke.sh` — an operator-run live proof beside
   `tests/provision_smoke.sh`, the split ADR 0004 already chose — is what discharges them.
   Until it has run, both are stated as inferences here rather than as verified grounds.

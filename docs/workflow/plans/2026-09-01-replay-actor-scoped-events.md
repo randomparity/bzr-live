@@ -20,7 +20,7 @@ Expected implementation size: **~2,000–2,500 changed lines (L)**, dominated by
 About 900 lines of module body, summed from the inline bodies in the file map below:
 `context.py` ~145, `actions.py` ~530 (a ~158-line `check_supported` half, a ~220-line `build`
 half, and eight `reconcile` methods), `engine.py` ~180, `__main__.py` ~50, `__init__.py` ~8.
-Then ~1,050–1,525 lines of test body: 61 new tests at this repository's measured 17–25 lines
+Then ~1,050–1,550 lines of test body: 62 new tests at this repository's measured 17–25 lines
 per test, the floor being `tests/test_provision.py` at 17.1. The remainder is the eight-action
 scenario fixture (~55), `tests/replay_smoke.sh` (~100, against `provision_smoke.sh`'s 87 for
 strictly less work), the `adapters.py` and `checksetup_answers.txt` edits (~10), and the
@@ -92,10 +92,10 @@ any replay step can be verified against it.
 and committed on this branch, and its entries have been checked against bzr's own ADRs and
 open issues, with bzr#640 and bzr#641 filed and cross-linked. Do **not** rewrite it from a
 description — that discards verified upstream work. Its set is D1, D3, D4, D5, G1–G9. There is
-no D2: that entry was reclassified to G7 once bzr's accepted ADR 0015 turned out to govern it.
-G8 (no flag clears `dupe_of`; the Bugzilla half deliberately left open and unfiled) and G9
-(bzr's silent `"unspecified"` version default) are the entries the refusal messages in Task 2
-cite, and they are already there.
+no D2 (reclassified to G7 once bzr's accepted ADR 0015 turned out to govern it) and no G8:
+that entry charged bzr for the absent `--reset-dupe-of`, and the fixture's own Bugzilla image
+showed the constraint is Bugzilla's, so it was withdrawn. G9 (bzr's silent `"unspecified"`
+version default) is already there.
 
 ### Step 0.1 — give the fixture create defaults
 
@@ -689,7 +689,8 @@ class SupportedPayloadTest(unittest.TestCase):
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.update"].check_supported(event)
         self.assertIn("duplicate_of", str(caught.exception))
-        self.assertIn("finding G8", str(caught.exception))
+        self.assertIn("Bugzilla", str(caught.exception))
+        self.assertNotIn("(finding ", str(caught.exception))
 
     def test_create_rejects_duplicate_of(self) -> None:
         event = self._event("bug.create", version="1.0", duplicate_of=object())
@@ -737,13 +738,13 @@ from __future__ import annotations
 from ..scenario import PlannedEvent
 from .context import ReplayError
 
-# Bugzilla 5.2 declares attachments.description TINYTEXT (Bugzilla/DB/Schema.pm), a MySQL
-# 255-BYTE column, so the check measures encoded bytes and not code points.
+# Bugzilla declares attachments.description TINYTEXT at Bugzilla/DB/Schema.pm:505 -- read
+# from this fixture's own image (BUGZILLA_VERSION "5.2+") -- a MySQL 255-BYTE column, so the
+# check measures encoded bytes and not code points.
 ATTACHMENT_SUMMARY_BYTE_LIMIT = 255
 
 # Grounds for the refusals below, at bzr b80303b7: create_json.rs:150 defaults an omitted
-# version to "unspecified"; update.rs:85 and :92 both carry conflicts_with = "dupe_of";
-# update.rs:96-122 declares dupe_of: Option<u64> with no --reset-dupe-of.
+# version to "unspecified"; update.rs:85 and :92 both carry conflicts_with = "dupe_of".
 # Kept here rather than in the operator-facing messages, which outlive any line number.
 #
 # A message naming a *bzr* limitation cites its docs/bzr-findings.md entry as "(finding X)".
@@ -768,11 +769,12 @@ _UPDATE_NO_CLEAR = {
     "resolution": "Bugzilla clears the resolution on transition to an open status, "
                   "so declare that status change instead",
     "milestone": "bzr offers --reset-assigned-to but no milestone reset (finding G3)",
-    # bzr's half is read from source; whether Bugzilla models un-duplicating this way at
-    # all is unverified, and the message says so rather than picking a side.
-    "duplicate_of": "bzr's --dupe-of takes an ID and there is no --reset-dupe-of, "
-                    "though whether Bugzilla clears a duplicate that way rather than "
-                    "by a resolution change is unverified (finding G8)",
+    # Bugzilla's, not bzr's: Bug.update types dupe_of as int with no null form, and
+    # clear_resolution -- which calls _clear_dup_id -- throws unless the bug is already
+    # open (Bugzilla/Bug.pm:2933-2939, WebService/Bug.pm:3935-3942, verified against the
+    # fixture image). bzr's dupe_of: Option<u64> mirrors that exactly.
+    "duplicate_of": "Bugzilla clears a duplicate through a status transition, not by "
+                    "nulling dupe_of, so declare that status change instead",
 }
 # Both flags carry `conflicts_with = "dupe_of"` at bzr b80303b7
 # (src/cli/bug/update.rs:85 and :92), so clap rejects either pairing at parse time.
@@ -1051,6 +1053,9 @@ class BuildTest(unittest.TestCase):
             self._event("create-checkout-race"), {"id": 41})
         self.assertEqual(ids, {"bug:checkout-race": 41})
 
+    # Any test that builds a bug.update must queue a bug-view reply first: build reads
+    # the bug through _bug_object, and _FakeRun's empty-queue default of (0, {}, None)
+    # has no "id", so build would refuse before the assertion runs.
     def test_no_argument_ever_carries_the_key(self) -> None:
         for event in self.scenario.events:
             invocation = HANDLERS[event.action].build(self.context, event)
@@ -1556,6 +1561,7 @@ class EngineTest(unittest.TestCase):
     def test_an_unsupported_payload_stops_before_any_mutation(self) -> None: ...
     def test_no_journal_record_contains_an_api_key(self) -> None: ...
     def test_replay_refuses_a_record_for_an_event_the_scenario_dropped(self) -> None: ...
+    def test_resume_refuses_a_record_for_an_event_the_scenario_dropped(self) -> None: ...
     def test_pristine_sweep_refuses_a_bug_the_actor_cannot_see(self) -> None: ...
     def test_resume_refuses_a_pre_existing_alias_for_an_unjournalled_event(self) -> None: ...
 
@@ -1648,6 +1654,7 @@ class ReplayEngine:
     def _check_local_preconditions(self) -> dict[str, object]:
         for event in self._scenario.events:
             HANDLERS[event.action].check_supported(event)
+        self._require_no_stray_records()
         latest: dict[str, object] = {}
         for event in self._scenario.events:
             record = self._store.read(event.name)
@@ -1659,6 +1666,26 @@ class ReplayEngine:
                     "fixture (CONFIRM_RESET=1 make reset) and replay")
             latest[event.name] = record
         return latest
+
+    def _require_no_stray_records(self) -> None:
+        """A record the scenario's event names no longer reach is still binding.
+
+        The digest check below reads records *through* current event names, so a
+        journalled event since renamed is unreachable and its digest never compared --
+        the same blind spot `_require_empty_journal` closes for `replay`. Completion
+        criterion 4 says `resume` refuses unless the digest matches, unqualified, so
+        the scan belongs on both paths. `_ATTEMPT_FILE`'s group 1 is the event name
+        (`src/bzr_live/scenario/journal.py:45`).
+        """
+        known = {event.name for event in self._scenario.events}
+        for name in sorted(os.listdir(self._journal_dir)):
+            match = _ATTEMPT_FILE.fullmatch(name)
+            if match is not None and match.group(1) not in known:
+                raise ReplayError(
+                    f"journal record {name!r} belongs to an event this scenario no "
+                    "longer names, so its digest cannot be checked; restore the "
+                    "scenario, or reset the fixture (CONFIRM_RESET=1 make reset) and "
+                    "remove the journal directory")
 
     def _require_absent(self, event) -> None:
         """Refuse if this event's bug already exists. No-op for non-create events."""
@@ -1803,7 +1830,7 @@ here. The refusal wording exists once, in `actions.py`.
 uv run --python 3.11 python -m unittest tests.test_replay -v
 ```
 
-Expect `OK`, fifty-nine tests.
+Expect `OK`, sixty tests.
 
 ### Step 5.5 — commit
 
@@ -1930,7 +1957,9 @@ the unit suite cannot reach:
    `alias` key round-trips here rather than silently no-opping as it does on bzr's
    alias-disabled containers; and
 3. a second create declaring that same alias **fails** — proving Bugzilla enforces alias
-   uniqueness. That is the property the whole `unique-create` recovery class rests on: it is
+   uniqueness. It also uploads an attachment whose rendered summary is 256 bytes and records
+   the observed exit code and message, settling the `TINYTEXT` ceiling against the running
+   server rather than against a schema file alone. That is the property the whole `unique-create` recovery class rests on: it is
    what sends a duplicate create into reconciliation instead of quietly producing two bugs
    under one alias, and ADR 0006 records it as inferred until this assertion runs.
 
@@ -2002,8 +2031,8 @@ make test
 
 `--help` lists `replay` and `resume` and the four options. The replay run exits 1 with
 `replay failed: no API key for actor ...` on stderr, proving the precondition path reaches
-the operator. `make check` and `make test` both exit 0; `make test` reports 61 more tests
-than the 154-test baseline, i.e. 215 — the per-task figures being 9, 17, 7, 11, 15 and 2. `make replay-smoke` is operator-run against a healthy
+the operator. `make check` and `make test` both exit 0; `make test` reports 62 more tests
+than the 154-test baseline, i.e. 216 — the per-task figures being 9, 17, 7, 11, 16 and 2. `make replay-smoke` is operator-run against a healthy
 `make up` and is not part of either guardrail.
 
 ### Step 6.4 — commit

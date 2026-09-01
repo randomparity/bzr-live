@@ -55,9 +55,9 @@ scenario dir ──load_scenario──▶ ValidatedScenario ──┐
 | `src/bzr_live/replay/__main__.py` | argument parsing and error-to-exit-code mapping |
 | `tests/test_replay.py` | unit suite over mocked `subprocess.run` and URL opener |
 | `tests/fixtures/replay-scenario/` | a scenario exercising all eight actions |
-| `tests/replay_smoke.sh` | operator-run live proof: create succeeds and its alias round-trips |
+| `tests/replay_smoke.sh` | operator-run live proof: create succeeds, its alias round-trips, and a duplicate alias is rejected |
 | `src/bzr_live/provision/adapters.py` | *changed*: `BzrClient.read` gains keyword-only `absent_codes` (see **Reading absence**) |
-| `docs/bzr-findings.md` | *new*: the register of bzr limitations this work surfaced — the fixture's own deliverable |
+| `docs/bzr-findings.md` | already committed on this branch: the register of bzr limitations this work surfaced — the fixture's own deliverable |
 | `containers/bugzilla/checksetup_answers.txt` | *changed*: `defaultplatform` and `defaultopsys`, so an honest create succeeds without runner-side substitution |
 
 Every unit is testable in isolation: `ReplayContext` needs only a `ValidatedScenario` and a
@@ -89,7 +89,10 @@ offending item and the fix.
 
 1. **Digest binding.** Every journal record already present must carry
    `scenario_digest == scenario.digest`. A mismatch refuses: "the scenario changed since
-   this journal was written; run `make reset` and replay, or restore the scenario".
+   this journal was written; run `make reset` and replay, or restore the scenario". Records
+   are read *through* current event names, so `resume` first lists the journal directory and
+   refuses any record whose event the scenario no longer names — otherwise a renamed event
+   makes its record unreachable and the binding silently vacuous for it.
 2. **Payload support.** Every event is checked against the per-action supported-payload
    table below. Applies to both commands, so a scenario that cannot be replayed says so
    before it half-runs.
@@ -150,9 +153,9 @@ as refused is supported.
 | Action | Sent as | Refused, and whose limitation the message names |
 |---|---|---|
 | `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding exactly what the scenario declared: `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on` | `estimated_hours` / `remaining_hours` → bzr's create JSON has no such field, though Bugzilla accepts both ([G1]); `custom_fields` → bzr excludes `cf_*` from create by design ([G4]); `duplicate_of` → **Bugzilla's** own `Bug.create` has no `dupe_of`, so this one is not bzr's; null `version` → bzr silently substitutes `"unspecified"`, a version this fixture's products do not declare ([G9]) |
-| `bug.update` | `bzr bug update <id>` with `--summary`, `--status`, `--resolution`, `--assignee` or `--reset-assigned-to`, `--dupe-of`, `--target-milestone`, `--estimated-time`, `--remaining-time`, and `--cc-add/-remove`, `--keywords-add/-remove`, `--blocks-add/-remove`, `--depends-on-add/-remove` computed as deltas against `bzr bug view` | `groups` → `bzr bug view` does not return `groups`, so no delta can be computed and no result confirmed ([D3]); `version` → bzr's `bug update` has no version flag, though Bugzilla accepts one ([G2]); null `milestone` → bzr offers `--reset-assigned-to` but no milestone reset ([G3]); null `resolution` → **Bugzilla** clears it on transition to an open status, so declare the status change instead; null `duplicate_of` → `--dupe-of` takes an ID and bzr has no `--reset-dupe-of`, though whether Bugzilla models un-duplicating that way at all is unverified ([G8]); `duplicate_of` with `status` **or** `resolution` → both flags carry `conflicts_with = "dupe_of"`, deliberately ([G5]) |
+| `bug.update` | `bzr bug update <id>` with `--summary`, `--status`, `--resolution`, `--assignee` or `--reset-assigned-to`, `--dupe-of`, `--target-milestone`, `--estimated-time`, `--remaining-time`, and `--cc-add/-remove`, `--keywords-add/-remove`, `--blocks-add/-remove`, `--depends-on-add/-remove` computed as deltas against `bzr bug view` | `groups` → `bzr bug view` does not return `groups`, so no delta can be computed and no result confirmed ([D3]); `version` → bzr's `bug update` has no version flag, though Bugzilla accepts one ([G2]); null `milestone` → bzr offers `--reset-assigned-to` but no milestone reset ([G3]); null `resolution` → **Bugzilla** clears it on transition to an open status, so declare the status change instead; null `duplicate_of` → **Bugzilla** clears a duplicate through a status transition (`clear_resolution` calls `_clear_dup_id` and throws unless the bug is already open), and `Bug.update` types `dupe_of` as `int` with no null form, so declare that status change instead; `duplicate_of` with `status` **or** `resolution` → both flags carry `conflicts_with = "dupe_of"`, deliberately ([G5]) |
 | `bug.comment` | `bzr comment add <id> --body-file=<tmpfile> [--private]` | — |
-| `bug.attach` | `bzr attachment upload <id> <file> --summary=<description + marker + checksum> --content-type=<type> [--private]` | rendered summary longer than 255 **bytes** when UTF-8 encoded → **Bugzilla's** `attachments.description` column width, not a bzr gap, so this is the one row whose message may say what to do about it ("shorten the attachment description") |
+| `bug.attach` | `bzr attachment upload <id> <file> --summary=<description + marker + checksum> --content-type=<type> [--private]` | rendered summary longer than 255 **bytes** when UTF-8 encoded → **Bugzilla's** `attachments.description` is `TINYTEXT` (`Bugzilla/DB/Schema.pm:505`), not a bzr gap → "shorten the attachment description" |
 | `bug.worktime` | `bzr bug update <id> --work-time=<hours> --comment-file=<tmpfile>` | — |
 | `bug.custom-field-set` | `assign_bug_custom_fields(base_url, actor_key, id, {cf_<slug>: value})` | — |
 | `bug.flag` | `bzr bug update <id> --flag=<name><status>[(<requestee email>)]` | flag-type name containing `+`, `-`, `?` or `X` → bzr's flag parser takes the first of those characters as the status, so the name is unaddressable ([D1]) |
@@ -162,10 +165,16 @@ Every refusal on a **bzr** limitation names it and links its entry in
 [`docs/bzr-findings.md`](../../bzr-findings.md), which carries the source citation, the class
 — defect or deliberate design choice — and the upstream issue. The messages do not tell an
 author how to route around bzr; the point of this fixture is that the gap stays visible.
-Three rows above are not bzr's limitation at all — `duplicate_of` on create, a null
-`resolution`, and the attachment ceiling — and each of those says whose constraint it is
-instead of linking a register entry it has no business having. Charging bzr for a constraint
-it did not impose corrupts the register as surely as hiding a real gap does. The
+Four rows above are not bzr's limitation at all — `duplicate_of` on create, a null
+`resolution`, a null `duplicate_of` on update, and the attachment ceiling. Each says whose
+constraint it is instead of linking a register entry it has no business having, and each may
+name what satisfies the Bugzilla constraint, because there is no bzr gap whose evidence a
+workaround instruction would destroy. That permission keys off the *ground*, not off any
+privileged row: a bzr-grounded refusal names the limitation, cites its register entry, and
+stops there. Charging bzr for a constraint it did not impose corrupts the register as surely
+as hiding a real gap does — an earlier revision made exactly that error on the two
+`duplicate_of`/`resolution` clears, and the entry it produced (G8) was withdrawn once the
+fixture's own Bugzilla image settled the question. The
 table is expected to shrink as bzr closes gaps, and the scenario contract stays deliberately
 wider than what bzr can execute — narrowing it would erase the evidence.
 
@@ -190,7 +199,6 @@ rather than absorbed.
 [G3]: ../../bzr-findings.md#g3
 [G4]: ../../bzr-findings.md#g4
 [G5]: ../../bzr-findings.md#g5
-[G8]: ../../bzr-findings.md#g8
 [G9]: ../../bzr-findings.md#g9
 
 The attachment ceiling is `attachments.description`, declared `TINYTEXT` in Bugzilla 5.2's
@@ -407,7 +415,8 @@ Each of these is a case:
   `None`; exit 4 with `api_code` 102 raises; the default set is unchanged for provisioning;
 - pristine sweep against a group-restricted bug (`api_code` 102) → refuses rather than
   treating the bug as absent;
-- a journal holding a record for an event the scenario no longer names → `replay` refuses;
+- a journal holding a record for an event the scenario no longer names → **both** `replay`
+  and `resume` refuse;
 - asset checksum mismatch → refused;
 - a reconciliation read that itself fails writes no completed record and leaves the in-flight
   record readable for a later `resume`;
