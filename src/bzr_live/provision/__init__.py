@@ -9,6 +9,7 @@ from .adapters import (
     assign_bug_custom_fields,
     compose_project_name,
 )
+from .executor import ProvisionConflictError, Provisioner
 from .keys import KeyStore
 
 __all__ = [
@@ -17,7 +18,9 @@ __all__ = [
     "BridgeClient",
     "BzrClient",
     "KeyStore",
+    "ProvisionConflictError",
     "ProvisionError",
+    "Provisioner",
     "assign_bug_custom_fields",
     "compose_project_name",
 ]
