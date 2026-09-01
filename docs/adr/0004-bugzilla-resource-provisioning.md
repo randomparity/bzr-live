@@ -35,8 +35,11 @@ and keys never appear in ordinary output.
 
 ## Consequences
 
-- An identical rerun is a verified no-op, and a partial run converges on rerun; the
-  fixture answers existence. The key files are the one piece of durable local state:
+- An identical rerun is a verified no-op, and a partial run converges on rerun at
+  whole-resource granularity; an interrupt inside a multi-step create (actor group
+  memberships, select-field values, flag-type inclusions) instead surfaces as a
+  conflict whose message directs the operator to reset the fixture. The fixture
+  answers existence. The key files are the one piece of durable local state:
   a fixture recreated under a kept state root holds stale keys — the run-start
   `whoami` verification catches a stale admin key; stale actor key files surface only
   when event execution first uses them, or when the operator resets the state root.
