@@ -16,11 +16,19 @@ CLI.
 **Tech stack.** Python 3.11+, standard library only, run through `uv`. Tests are
 `unittest`, discovered by `python -m unittest discover -s tests`.
 
-Expected implementation size: 1350–1750 changed lines (L) — summed from the file map below,
-counting new module and test bodies plus the scenario fixture, the operator-run smoke script,
-the `adapters.py` and `checksetup_answers.txt` changes, and wiring edits. Excludes these
-design documents; `docs/bzr-findings.md` is counted, since it is a deliverable rather than a
-design artifact.
+Expected implementation size: **~2,000–2,500 changed lines (L)**, dominated by two components.
+About 900 lines of module body, summed from the inline bodies in the file map below:
+`context.py` ~145, `actions.py` ~530 (a ~158-line `check_supported` half, a ~220-line `build`
+half, and eight `reconcile` methods), `engine.py` ~180, `__main__.py` ~50, `__init__.py` ~8.
+Then ~1,050–1,525 lines of test body: 61 new tests at this repository's measured 17–25 lines
+per test, the floor being `tests/test_provision.py` at 17.1. The remainder is the eight-action
+scenario fixture (~55), `tests/replay_smoke.sh` (~100, against `provision_smoke.sh`'s 87 for
+strictly less work), the `adapters.py` and `checksetup_answers.txt` edits (~10), and the
+Makefile/CI/README wiring (~25).
+
+Excludes these design documents, and excludes `docs/bzr-findings.md` — the register is already
+committed on this branch, so it is not remaining work. An earlier draft of this line said
+1350–1750 and counted the register; both were wrong.
 
 ## Global Constraints
 
@@ -66,31 +74,30 @@ Transcribed from
 | `tests/test_replay.py` | new | unit suite over mocked `subprocess.run` and URL opener |
 | `tests/fixtures/replay-scenario/` | new | scenario exercising all eight actions (built in Task 1; every later task's tests load it) |
 | `src/bzr_live/provision/adapters.py` | changed | `BzrClient.read` gains keyword-only `absent_codes`; new `BUG_ABSENT_CODES` |
-| `docs/bzr-findings.md` | new | the register of bzr limitations this work surfaced (Task 0) |
+| `docs/bzr-findings.md` | already committed | the register of bzr limitations this work surfaced; no task changes it |
 | `containers/bugzilla/checksetup_answers.txt` | changed | `defaultplatform` / `defaultopsys`, so an honest create succeeds (Task 0) |
 | `tests/replay_smoke.sh` | new | operator-run live proof: the create succeeds and its alias round-trips |
 | `Makefile` | changed | widen `compileall` from two named test files to `tests`; add `tests/replay_smoke.sh` to the shell checks and a `replay-smoke` target |
 | `.github/workflows/scenario-contract.yml` | changed | add the new ADR, spec and plan to both `paths` lists |
 | `README.md` | changed | document `replay` and `resume` |
 
-## Task 0 — the findings register and the fixture's create defaults
+## Task 0 — the fixture's create defaults
 
-Creates `docs/bzr-findings.md`; changes `containers/bugzilla/checksetup_answers.txt`.
-No code, no tests.
+Changes `containers/bugzilla/checksetup_answers.txt`. No code, no tests.
 
-**Where this fits.** First, because every later task's refusal messages cite entries in the
-register, and because the fixture must be able to accept an honest create before any replay
-step can be verified against it.
+**Where this fits.** First, because the fixture must be able to accept an honest create before
+any replay step can be verified against it.
 
-### Step 0.1 — write the register
+**The findings register is not part of this task.** `docs/bzr-findings.md` is already complete
+and committed on this branch, and its entries have been checked against bzr's own ADRs and
+open issues, with bzr#640 and bzr#641 filed and cross-linked. Do **not** rewrite it from a
+description — that discards verified upstream work. Its set is D1, D3, D4, D5, G1–G9. There is
+no D2: that entry was reclassified to G7 once bzr's accepted ADR 0015 turned out to govern it.
+G8 (no flag clears `dupe_of`; the Bugzilla half deliberately left open and unfiled) and G9
+(bzr's silent `"unspecified"` version default) are the entries the refusal messages in Task 2
+cite, and they are already there.
 
-`docs/bzr-findings.md`, one entry per bzr limitation this design surfaced, each carrying the
-bzr source citation at `b80303b7`, whether the behaviour was **observed** or **read from
-source**, what the fixture does about it, and its upstream issue once filed. The set is
-D1–D4 (defects) and G1–G6 (gaps and deliberate design choices); `AGENTS.md`, "Purpose: prove
-`bzr`", is the rule it serves.
-
-### Step 0.2 — give the fixture create defaults
+### Step 0.1 — give the fixture create defaults
 
 `bzr` documents `op_sys` and `rep_platform` as "required by some Bugzilla installations"
 (`src/cli/bug/create.rs:138,141`) and passes both on every functional create. Bugzilla
@@ -107,26 +114,27 @@ The alternative — injecting a fixed pair into every create document — sends 
 scenario never declared so the run appears to succeed, which `AGENTS.md` forbids. Fixing the
 fixture keeps the create payload a faithful record of what the scenario asked for.
 
-### Step 0.3 — verify
+### Step 0.2 — verify
 
 ```
 make check
 ```
 
 Exit 0. The parameter change only takes effect on a fresh install, so the operator must run
-`CONFIRM_RESET=1 make reset && make up` before `make replay-smoke`; note that in the
-register entry and in Step 6.1b's preamble.
+`CONFIRM_RESET=1 make reset && make up` before `make replay-smoke`; that requirement is
+load-bearing for Step 6.1b, whose preamble repeats it.
 
-### Step 0.4 — commit
+### Step 0.3 — commit
 
 ```
-git add docs/bzr-findings.md containers/bugzilla/checksetup_answers.txt
-git commit -m "docs: register the bzr limitations this fixture surfaces"
+git add containers/bugzilla/checksetup_answers.txt
+git commit -m "fix(fixture): declare default platform and OS for bug creates"
 ```
 
-**Acceptance criteria.** Every refusal message a later task writes has a register entry to
-cite. `checksetup_answers.txt` sets `defaultplatform` and `defaultopsys`, so a create
-declaring neither succeeds without the runner substituting anything.
+**Acceptance criteria.** `checksetup_answers.txt` sets `defaultplatform` and `defaultopsys`,
+so a create declaring neither succeeds without the runner substituting anything. Every
+bzr-grounded refusal message a later task writes has a register entry to cite — satisfied by
+the committed register, not by this task.
 
 ## Task 1 — `ReplayContext`
 
@@ -286,6 +294,13 @@ class ContextTest(unittest.TestCase):
     def test_text_file_names_are_unique(self) -> None:
         context = self._context()
         self.assertNotEqual(context.text_file("body", "a"), context.text_file("body", "b"))
+
+    def test_asset_checksum_mismatch_refuses(self) -> None:
+        context = self._context()
+        with self.assertRaises(ReplayError) as caught:
+            context.asset_file("notes.txt", "0" * 64)
+        self.assertIn("notes.txt", str(caught.exception))
+        self.assertIn("hashes to", str(caught.exception))
 ```
 
 Add three tests for the boundary change Step 1.3a makes:
@@ -514,7 +529,7 @@ __all__ = ["ReplayContext", "ReplayError"]
 uv run --python 3.11 python -m unittest tests.test_replay -v
 ```
 
-Expect `OK`, eight tests.
+Expect `OK`, nine tests.
 
 ### Step 1.5 — commit
 
@@ -524,7 +539,7 @@ git add src/bzr_live/replay src/bzr_live/provision tests/test_replay.py tests/fi
 git commit -m "feat(replay): add the replay context for credentials and identity"
 ```
 
-Both guardrails exit 0. `make test` reports 162 tests.
+Both guardrails exit 0. `make test` reports 163 tests.
 
 **Acceptance criteria.** `bzr bug view` of an absent alias reads as absent while an
 access-denied answer still raises, and provisioning's default absent-code set is unchanged.
@@ -589,44 +604,49 @@ class SupportedPayloadTest(unittest.TestCase):
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.create"].check_supported(event)
         self.assertIn("custom_fields", str(caught.exception))
-        self.assertIn("bug.custom-field-set", str(caught.exception))
+        self.assertIn("finding G4", str(caught.exception))
 
     def test_create_rejects_estimated_hours(self) -> None:
         event = self._event("bug.create", version="1.0", estimated_hours="3.5")
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.create"].check_supported(event)
         self.assertIn("estimated_hours", str(caught.exception))
-        self.assertIn("bug.update", str(caught.exception))
+        self.assertIn("finding G1", str(caught.exception))
 
     def test_create_rejects_remaining_hours(self) -> None:
         event = self._event("bug.create", version="1.0", remaining_hours="1.0")
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.create"].check_supported(event)
         self.assertIn("remaining_hours", str(caught.exception))
+        self.assertIn("finding G1", str(caught.exception))
 
     def test_update_rejects_version(self) -> None:
         event = self._event("bug.update", version=object())
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.update"].check_supported(event)
         self.assertIn("version", str(caught.exception))
+        self.assertIn("finding G2", str(caught.exception))
 
     def test_update_rejects_a_null_milestone(self) -> None:
         event = self._event("bug.update", milestone=None)
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.update"].check_supported(event)
         self.assertIn("milestone", str(caught.exception))
+        self.assertIn("finding G3", str(caught.exception))
 
     def test_flag_rejects_a_hyphenated_flag_type_name(self) -> None:
         event = self._event("bug.flag", flag_type=Reference("flag-type", "needs-info"))
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.flag"].check_supported(event)
         self.assertIn("needs-info", str(caught.exception))
+        self.assertIn("finding D1", str(caught.exception))
 
     def test_create_rejects_a_null_version(self) -> None:
         event = self._event("bug.create", version=None)
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.create"].check_supported(event)
         self.assertIn("version", str(caught.exception))
+        self.assertIn("finding G9", str(caught.exception))
 
     def test_create_accepts_a_supported_payload(self) -> None:
         HANDLERS["bug.create"].check_supported(self._event("bug.create", version="1.0"))
@@ -636,32 +656,50 @@ class SupportedPayloadTest(unittest.TestCase):
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.update"].check_supported(event)
         self.assertIn("groups", str(caught.exception))
+        self.assertIn("finding D3", str(caught.exception))
 
     def test_update_rejects_a_null_resolution(self) -> None:
         event = self._event("bug.update", resolution=None)
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.update"].check_supported(event)
         self.assertIn("resolution", str(caught.exception))
+        # Bugzilla clears the resolution on transition to an open status, so the
+        # message names Bugzilla and links no findings entry.
+        self.assertIn("Bugzilla", str(caught.exception))
+        self.assertNotIn("(finding ", str(caught.exception))
 
     def test_update_rejects_status_with_duplicate_of(self) -> None:
         event = self._event("bug.update", status="RESOLVED", duplicate_of=object())
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.update"].check_supported(event)
-        self.assertIn("--status", str(caught.exception))
-        self.assertIn("--dupe-of", str(caught.exception))
+        self.assertIn("status", str(caught.exception))
+        self.assertIn("conflicts_with", str(caught.exception))
+        self.assertIn("finding G5", str(caught.exception))
 
     def test_update_rejects_resolution_with_duplicate_of(self) -> None:
         event = self._event("bug.update", resolution="DUPLICATE", duplicate_of=object())
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.update"].check_supported(event)
-        self.assertIn("--resolution", str(caught.exception))
-        self.assertIn("--dupe-of", str(caught.exception))
+        self.assertIn("resolution", str(caught.exception))
+        self.assertIn("conflicts_with", str(caught.exception))
+        self.assertIn("finding G5", str(caught.exception))
 
     def test_update_rejects_a_null_duplicate_of(self) -> None:
         event = self._event("bug.update", duplicate_of=None)
         with self.assertRaises(ReplayError) as caught:
             HANDLERS["bug.update"].check_supported(event)
         self.assertIn("duplicate_of", str(caught.exception))
+        self.assertIn("finding G8", str(caught.exception))
+
+    def test_create_rejects_duplicate_of(self) -> None:
+        event = self._event("bug.create", version="1.0", duplicate_of=object())
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.create"].check_supported(event)
+        self.assertIn("duplicate_of", str(caught.exception))
+        # Bugzilla's own Bug.create has no dupe_of, so the message names Bugzilla,
+        # not bzr, and links no findings entry.
+        self.assertIn("Bugzilla", str(caught.exception))
+        self.assertNotIn("(finding ", str(caught.exception))
 
     def test_attachment_summary_limit(self) -> None:
         event = self._event(
@@ -704,10 +742,14 @@ from .context import ReplayError
 ATTACHMENT_SUMMARY_BYTE_LIMIT = 255
 
 # Grounds for the refusals below, at bzr b80303b7: create_json.rs:150 defaults an omitted
-# version to "unspecified"; update.rs:85 and :92 both carry conflicts_with = "dupe_of".
+# version to "unspecified"; update.rs:85 and :92 both carry conflicts_with = "dupe_of";
+# update.rs:96-122 declares dupe_of: Option<u64> with no --reset-dupe-of.
 # Kept here rather than in the operator-facing messages, which outlive any line number.
-# Each message names the bzr limitation and its docs/bzr-findings.md entry. It does not tell
-# the author how to route around bzr: surfacing the gap is what this fixture is for.
+#
+# A message naming a *bzr* limitation cites its docs/bzr-findings.md entry as "(finding X)".
+# A message whose ground is Bugzilla's own model names Bugzilla and cites no entry, because
+# charging bzr for a constraint it did not impose corrupts the register as surely as hiding
+# a real gap does. Neither kind tells the author how to route around the boundary.
 _CREATE_UNSUPPORTED = {
     "custom_fields": "bzr excludes cf_* from bug create by design (finding G4)",
     "estimated_hours": "bzr bug create --from-json has no estimated_time field, "
@@ -723,9 +765,14 @@ _UPDATE_UNSUPPORTED = {
                "(finding G2)",
 }
 _UPDATE_NO_CLEAR = {
-    "resolution": "Bugzilla clears the resolution on transition to an open status",
+    "resolution": "Bugzilla clears the resolution on transition to an open status, "
+                  "so declare that status change instead",
     "milestone": "bzr offers --reset-assigned-to but no milestone reset (finding G3)",
-    "duplicate_of": "bzr offers no un-duplicate flag",
+    # bzr's half is read from source; whether Bugzilla models un-duplicating this way at
+    # all is unverified, and the message says so rather than picking a side.
+    "duplicate_of": "bzr's --dupe-of takes an ID and there is no --reset-dupe-of, "
+                    "though whether Bugzilla clears a duplicate that way rather than "
+                    "by a resolution change is unverified (finding G8)",
 }
 # Both flags carry `conflicts_with = "dupe_of"` at bzr b80303b7
 # (src/cli/bug/update.rs:85 and :92), so clap rejects either pairing at parse time.
@@ -741,9 +788,13 @@ def render_attachment_summary(description: str, marker: str, sha256: str) -> str
 
 
 def _unsupported(event: PlannedEvent, field: str, limitation: str) -> ReplayError:
+    # The register pointer is appended only for a bzr-grounded limitation, which is
+    # exactly the set that names an entry. A Bugzilla-grounded refusal has no entry to
+    # point at, and sending an operator to look for one would be its own small lie.
+    pointer = " See docs/bzr-findings.md." if "(finding " in limitation else ""
     return ReplayError(
-        f"event {event.name!r} ({event.action}) declares {field!r}, which the bzr "
-        f"boundary cannot apply: {limitation}. See docs/bzr-findings.md")
+        f"event {event.name!r} ({event.action}) declares {field!r}, which the boundary "
+        f"cannot apply: {limitation}.{pointer}")
 
 
 class ActionHandler:
@@ -768,8 +819,8 @@ class BugCreateHandler(ActionHandler):
         if values.get("version") is None:
             raise _unsupported(
                 event, "version",
-                "bzr defaults an omitted version to 'unspecified', which this "
-                "scenario's product does not declare")
+                "bzr silently substitutes the version 'unspecified', which this "
+                "fixture's products do not declare (finding G9)")
 
 
 class BugUpdateHandler(ActionHandler):
@@ -870,7 +921,7 @@ __all__ = ["HANDLERS", "ActionHandler", "ReplayContext", "ReplayError"]
 uv run --python 3.11 python -m unittest tests.test_replay -v
 ```
 
-Expect `OK`, twenty-four tests.
+Expect `OK`, twenty-six tests.
 
 ### Step 2.5 — commit
 
@@ -968,6 +1019,23 @@ class BuildTest(unittest.TestCase):
         self.assertNotIn("estimated_time", document)
         self.assertFalse([k for k in document if k.startswith("cf_")])
 
+    def test_create_json_carries_only_declared_fields(self) -> None:
+        # The regression guard for the rework AGENTS.md ("Purpose: prove bzr") forced: an
+        # earlier draft injected a fixed op_sys/rep_platform pair the scenario never
+        # declared, so the run would appear to succeed. The fixture's checksetup answers
+        # supply those defaults now, and the document carries only what was declared.
+        event = self._event("create-checkout-race")
+        invocation = HANDLERS["bug.create"].build(self.context, event)
+        path = [a for a in invocation.args if a.startswith("--from-json=")][0].split("=", 1)[1]
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+        self.assertNotIn("op_sys", document)
+        self.assertNotIn("rep_platform", document)
+        self.assertLessEqual(set(document), {
+            "alias", "product", "component", "summary", "description", "version",
+            "target_milestone", "assignee", "cc", "keywords", "groups", "blocks",
+            "depends_on",
+        })
+
     def test_update_computes_add_and_remove_deltas(self) -> None:
         # bug view reports cc [keep@x, drop@x]; the event declares [keep@x, join@x]
         ...
@@ -1036,13 +1104,18 @@ def _delta(declared: list, observed: list) -> tuple[list, list]:
 
 
 def _bug_object(payload) -> dict | None:
-    """bzr bug view returns one bug object; tolerate the batch wrapper as well."""
-    if isinstance(payload, dict):
-        if "id" in payload:
-            return payload
-        bugs = payload.get("bugs")
-        if isinstance(bugs, list) and len(bugs) == 1 and isinstance(bugs[0], dict):
-            return bugs[0]
+    """The one bug object `bzr bug view` returns for a single ID, or None.
+
+    Exactly one shape is accepted. Every read this engine issues names one bug, and
+    bzr short-circuits a single ID to `view_single` before any batch handling
+    (`src/commands/bug/view.rs:89-92` at b80303b7), so the batch wrapper is
+    unreachable here; `BzrClient._payload` has already unwrapped the `data` envelope.
+    Accepting a second shape would let a future change in bzr's reply be absorbed
+    silently instead of failing loudly, which is the accommodation this repository
+    reverted in 04c3ac7. Anything else returns None and the caller refuses.
+    """
+    if isinstance(payload, dict) and "id" in payload:
+        return payload
     return None
 ```
 
@@ -1234,7 +1307,7 @@ Export `Invocation` from `__init__.py` alongside `HANDLERS`.
 uv run --python 3.11 python -m unittest tests.test_replay -v
 ```
 
-Expect `OK`, thirty tests.
+Expect `OK`, thirty-three tests.
 
 ### Step 3.5 — commit
 
@@ -1323,6 +1396,13 @@ class ReconcileTest(unittest.TestCase):
     def test_set_retries_when_the_postcondition_differs(self) -> None: ...
     def test_set_retries_when_a_declared_field_is_unreadable(self) -> None: ...
 
+    def test_flag_clear_advances_on_absence(self) -> None:
+        # Status X is the one flag postcondition proved by absence: the declared clear
+        # committed exactly when no entry with that type name is present.
+        run = _FakeRun([(0, {"id": 41, "flags": []}, None)])
+        result = HANDLERS["bug.flag"].reconcile(self._context(run), self._flag_event("X"))
+        self.assertEqual(result.next_action, "advance")
+
     def test_attachment_update_reads_the_attachment_by_id(self) -> None:
         run = _FakeRun([(0, {"id": 7, "summary": "notes", "is_obsolete": True}, None)])
         context = self._context(run)
@@ -1368,14 +1448,13 @@ def _append_result(event, count, entry_id, output):
         f"{event.reconciliation_marker!r}; {AMBIGUOUS_HINT}")
 
 
-def _entries(payload, key: str) -> list:
-    if isinstance(payload, list):
-        return payload
-    if isinstance(payload, dict):
-        inner = payload.get(key)
-        if isinstance(inner, list):
-            return inner
-    return []
+def _entries(payload) -> list:
+    """The list `comment list` / `attachment list` returns, or an empty one.
+
+    One shape, for the same reason as `_bug_object`: a wrapper branch here would be
+    dead code that silently absorbs a reply-shape change instead of surfacing it.
+    """
+    return payload if isinstance(payload, list) else []
 ```
 
 - `BugCreateHandler.reconcile` calls `context.read_bug(event.actor, [server_alias])`, which
@@ -1384,8 +1463,9 @@ def _entries(payload, key: str) -> list:
   positive integer `id` yields `advance` plus `{f"bug:{event.creates.name}": id}`; anything
   else yields `stop` with "returned no usable bug id; " + `AMBIGUOUS_HINT`.
 - `BugCommentHandler.reconcile` and `BugWorktimeHandler.reconcile` read
-  `["comment", "list"]` positional `<bug id>`, then `_marker_count(_entries(payload,
-  "comments"), "text", event.reconciliation_marker)` and `_append_result`.
+  `["comment", "list"]` positional `<bug id>`, then
+  `_marker_count(_entries(payload), "text", event.reconciliation_marker)` and
+  `_append_result`.
 - `BugAttachHandler.reconcile` reads `["attachment", "list"]` positional `<bug id>`, matches
   on `summary`, and on a single hit returns `advance` with
   `{f"attachment:{event.creates.name}": hit_id}`.
@@ -1420,7 +1500,7 @@ Every set-class `reconcile` returns only `advance` or `retry`, never `stop`.
 uv run --python 3.11 python -m unittest tests.test_replay -v
 ```
 
-Expect `OK`, forty-one tests.
+Expect `OK`, forty-four tests.
 
 ### Step 4.5 — commit
 
@@ -1478,6 +1558,20 @@ class EngineTest(unittest.TestCase):
     def test_replay_refuses_a_record_for_an_event_the_scenario_dropped(self) -> None: ...
     def test_pristine_sweep_refuses_a_bug_the_actor_cannot_see(self) -> None: ...
     def test_resume_refuses_a_pre_existing_alias_for_an_unjournalled_event(self) -> None: ...
+
+    def test_an_exit_zero_reply_with_no_usable_id_reconciles(self) -> None:
+        """ADR 0006's third reconciliation trigger, distinct from the other two.
+
+        The create exits 0 but the reply carries no id, so `resolved_ids` raises; the
+        alias read that follows finds the bug, proving the mutation committed. The run
+        continues rather than aborting on "returned no bug id".
+        """
+        run = _FakeRun([(0, {}, None), (0, {"id": 41}, None)])
+        ...
+        self.assertEqual(engine.replay(), ...)
+        record = store.read("create-checkout-race")
+        self.assertEqual(record.next_safe_action, "advance")
+        self.assertEqual(record.resolved_ids, {"bug:checkout-race": 41})
 
     def test_a_failing_reconciliation_read_leaves_the_in_flight_record(self) -> None:
         """ADR 0006: no completed record is written over a read that failed."""
@@ -1628,16 +1722,22 @@ class ReplayEngine:
                 event.action_class, event.expected_postcondition,
                 event.reconciliation_marker),
             known_secrets=self._context.known_secrets)
+        # ADR 0006 names three triggers for an in-run reconciliation, and all three land
+        # here: a non-zero exit and an unparseable reply both raise ProvisionError out of
+        # BzrClient, and an exit-0 reply carrying no usable identifier raises ReplayError
+        # out of resolved_ids. The third is inside the `try` for that reason — leaving it
+        # out would abort the run with "returned no bug id" on a create that may well have
+        # committed, and leave the answer to the operator's next `resume`.
         try:
             output = self._context.invoke(event.actor, invocation)
-        except ProvisionError as exc:
+            ids = HANDLERS[event.action].resolved_ids(event, output)
+        except (ProvisionError, ReplayError) as exc:
             result = self._settle(event, attempt, invocation=invocation)
             if result.next_action == "advance":
                 return "reconciled"
             # One execution per event per run: the next attempt belongs to `resume`.
             raise ReplayError(
                 f"event {event.name!r} failed: {exc}. {result.detail}") from None
-        ids = HANDLERS[event.action].resolved_ids(event, output)
         self._write_completed(event, attempt, invocation, output, 0, ids, "advance")
         self._context.adopt(ids)
         return "executed"
@@ -1703,7 +1803,7 @@ here. The refusal wording exists once, in `actions.py`.
 uv run --python 3.11 python -m unittest tests.test_replay -v
 ```
 
-Expect `OK`, fifty-five tests.
+Expect `OK`, fifty-nine tests.
 
 ### Step 5.5 — commit
 
@@ -1821,14 +1921,18 @@ class MainTest(unittest.TestCase):
 
 `tests/replay_smoke.sh`, modelled on `tests/provision_smoke.sh` (same `BZR_LIVE_BZR`
 requirement, same `.env` port and admin-email fallbacks, same `mktemp -d` state root under a
-cleanup trap). It provisions the replay fixture, replays it, and then asserts the two facts
+cleanup trap). It provisions the replay fixture, replays it, and then asserts the three facts
 the unit suite cannot reach:
 
 1. the first `bug.create` succeeded while declaring no `op_sys`/`rep_platform` — proving
-   Task 0's `defaultplatform`/`defaultopsys` answers make an honest create work; and
+   Task 0's `defaultplatform`/`defaultopsys` answers make an honest create work;
 2. `bzr --json bug view <server_alias>` resolves to the id that create returned — proving the
    `alias` key round-trips here rather than silently no-opping as it does on bzr's
-   alias-disabled containers.
+   alias-disabled containers; and
+3. a second create declaring that same alias **fails** — proving Bugzilla enforces alias
+   uniqueness. That is the property the whole `unique-create` recovery class rests on: it is
+   what sends a duplicate create into reconciliation instead of quietly producing two bugs
+   under one alias, and ADR 0006 records it as inferred until this assertion runs.
 
 Read the expected `server_alias` out of the loaded scenario rather than recomputing the hash:
 
@@ -1898,8 +2002,8 @@ make test
 
 `--help` lists `replay` and `resume` and the four options. The replay run exits 1 with
 `replay failed: no API key for actor ...` on stderr, proving the precondition path reaches
-the operator. `make check` and `make test` both exit 0; `make test` reports 57 more tests
-than the 154-test baseline, i.e. 211. `make replay-smoke` is operator-run against a healthy
+the operator. `make check` and `make test` both exit 0; `make test` reports 61 more tests
+than the 154-test baseline, i.e. 215 — the per-task figures being 9, 17, 7, 11, 15 and 2. `make replay-smoke` is operator-run against a healthy
 `make up` and is not part of either guardrail.
 
 ### Step 6.4 — commit
@@ -1938,11 +2042,12 @@ plan gate the `scenario-contract` workflow.
 | Secrets absent from journal records and argv | 1, 3, 5 |
 | CLI, exit codes, journal location | 6 |
 | Create carries only what the scenario declared; fixture supplies the defaults | 0, 3, 6 |
-| Every refusal names a bzr limitation and cites its register entry | 0, 2 |
+| A bzr-grounded refusal names the limitation and cites its register entry; a Bugzilla-grounded one names Bugzilla and cites none | 2 |
 | Flag-type name refusal, and flag-clear reconciling by absence | 2, 4 |
 | Pristine check binds any first execution, not just `replay` | 5 |
 | Failing reconciliation read leaves the in-flight record | 5 |
-| Live proof of the create and the alias round-trip | 6 |
+| All three reconciliation triggers, including an exit-0 reply with no usable id | 5 |
+| Live proof of the create, the alias round-trip, and alias uniqueness | 6 |
 | Gate coverage for the new module, tests, and docs | 6 |
 
 ## Deferrals carried into this plan

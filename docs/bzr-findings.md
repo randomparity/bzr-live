@@ -26,6 +26,8 @@ already-filed one (D5).
 | [G4](#g4) | design choice | `cf_*` fields are excluded from create and update | — |
 | [G5](#g5) | design choice | `--dupe-of` conflicts with `--status` and `--resolution` | — |
 | [G6](#g6) | gap | `--permissive` is rejected for a single bug ID | — |
+| [G8](#g8) | gap (half unverified) | `bug update` has no flag that clears `dupe_of` | hold: Bugzilla half unverified |
+| [G9](#g9) | design choice | `bug create --from-json` silently defaults an omitted `version` to `unspecified` | — |
 
 ---
 
@@ -226,7 +228,56 @@ permissive mode is even computed. So the one mode that turns a per-bug failure i
 structured row with a `faultCode` — Bugzilla's own `permissive` parameter — is unavailable
 for the single-bug existence check a caller most often wants.
 
-Combined with [D2](#d2), there is no way to ask "does this bug exist?" and get a non-error
+Combined with [G7](#g7), there is no way to ask "does this bug exist?" and get a non-error
 answer for one bug.
 
-**What the fixture does.** Uses [D2](#d2)'s `absent_codes` mapping instead.
+**What the fixture does.** Uses [G7](#g7)'s `absent_codes` mapping instead.
+
+## G8
+
+**`bug update` has no flag that clears `dupe_of`.** *bzr half read from source; the Bugzilla
+half is not established here.*
+
+`UpdateArgs` (`src/cli/bug/update.rs:96-122`) declares `dupe_of: Option<u64>`, so `--dupe-of`
+can only ever *set* a duplicate to a positive bug ID. There is no `--reset-dupe-of`, although
+`--reset-assigned-to` and `--reset-qa-contact` establish the reset pattern immediately below
+it in the same struct. So a scenario declaring a null `duplicate_of` — "this bug is no longer
+a duplicate" — has no bzr flag to express it.
+
+**What is not established.** Whether Bugzilla models un-duplicating as `dupe_of: null` at all.
+Bugzilla's own documentation for `Bug.update` directs a caller to change the resolution away
+from `DUPLICATE` instead, and bzr's `--dupe-of` doc comment says "Bugzilla handles the
+status/resolution transition to RESOLVED/DUPLICATE" — which points the same way. If that is
+right, this is a Bugzilla model constraint wearing a bzr costume, and the correct scenario
+spelling is a `resolution` change, not a null `duplicate_of`. No Bugzilla source is vendored
+in this repository, so the question is open rather than answered.
+
+Recorded with the halves separated because `AGENTS.md` treats blaming bzr for someone else's
+constraint as the same class of error as routing around a real bzr gap. **Nothing is filed
+upstream until the Bugzilla half is settled** — a defect report resting on an unverified
+premise is the speculative filing `AGENTS.md` forbids.
+
+**What the fixture does.** Refuses a declared null `duplicate_of` on `bug.update` as a
+precondition, naming this entry and both halves of it.
+
+## G9
+
+**`bug create --from-json` silently defaults an omitted `version` to `"unspecified"`.**
+*Read from source. Deliberate.*
+
+`JsonCreateBug::into_payload` renders
+`version: self.version.unwrap_or_else(|| "unspecified".to_string())`
+(`src/commands/bug/create_json.rs:150`), and the struct's own doc comment declares the
+behaviour: "`component`, and `summary` are required; `version` defaults to `\"unspecified\"`"
+(`:129-130`). It is documented, so it is a design choice rather than a defect, and no issue
+is filed.
+
+It is recorded anyway, because it is the one place where **bzr itself** does what `AGENTS.md`
+forbids this fixture from doing: it sends the server a value the caller never declared. A
+Bugzilla product that declares no `unspecified` version — which the fixture's provisioned
+products do not — will reject the create, and a product that happens to declare one will
+accept a bug whose version no scenario ever stated.
+
+**What the fixture does.** Refuses a declared null `version` on `bug.create` as a
+precondition, naming this entry. An omitted `version` is a scenario-contract question rather
+than a bzr one and is settled by the loader.

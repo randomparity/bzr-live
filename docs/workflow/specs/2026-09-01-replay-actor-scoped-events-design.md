@@ -122,8 +122,9 @@ Both the sweep and the `unique-create` reconciliation need "is this alias absent
 boundary does not answer it today. Observed behaviour, from bzr's own functional suite run
 against live Bugzilla containers: `bzr --json bug view 999999999` exits **4** with
 `api_code` 101, and a group-restricted bug exits 4 with `api_code` 102
-(`tests/functional/phases/08e-bugs-restricted-access.sh:24-25,289-292` in the bzr checkout,
-verified against Bugzilla 5.0.6 and run across 5.0/5.2/5.3). The alias form of the same
+(`tests/functional/phases/08e-bugs-restricted-access.sh:289-292` and `:169,180,262`
+respectively, in the bzr checkout; the file's header comment at `:24-25` states the same
+directions in prose, verified against Bugzilla 5.0.6 and run across 5.0/5.2/5.3). The alias form of the same
 condition is `api_code` 100. `BzrClient.read` reports absent only for `api_code` 51, 105 or
 106 — the product and component codes issue #4 needed — so every one of those raises.
 
@@ -146,21 +147,25 @@ The loader accepts payload shapes that the authorized boundary cannot express in
 observable mutation. Those are refused at precondition 2 (ADR 0006). Everything not listed
 as refused is supported.
 
-| Action | Sent as | Refused, with the message's suggested fix |
+| Action | Sent as | Refused, and whose limitation the message names |
 |---|---|---|
-| `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding exactly what the scenario declared: `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on` | `estimated_hours` / `remaining_hours` → bzr's create JSON has no such field, though Bugzilla accepts both ([G1]); `custom_fields` → bzr excludes `cf_*` from create by design ([G4]); `duplicate_of` → Bugzilla's own `Bug.create` has no `dupe_of`; null `version` → bzr would default it to `unspecified`, which this scenario's product does not declare |
-| `bug.update` | `bzr bug update <id>` with `--summary`, `--status`, `--resolution`, `--assignee` or `--reset-assigned-to`, `--dupe-of`, `--target-milestone`, `--estimated-time`, `--remaining-time`, and `--cc-add/-remove`, `--keywords-add/-remove`, `--blocks-add/-remove`, `--depends-on-add/-remove` computed as deltas against `bzr bug view` | `groups` → `bzr bug view` does not return `groups`, so no delta can be computed and no result confirmed ([D3]); `version` → bzr's `bug update` has no version flag, though Bugzilla accepts one ([G2]); null `milestone` → bzr offers `--reset-assigned-to` but no milestone reset ([G3]); null `resolution` → Bugzilla clears it on transition to an open status; null `duplicate_of` → bzr offers no un-duplicate flag; `duplicate_of` with `status` **or** `resolution` → both flags carry `conflicts_with = "dupe_of"`, deliberately ([G5]) |
+| `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding exactly what the scenario declared: `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on` | `estimated_hours` / `remaining_hours` → bzr's create JSON has no such field, though Bugzilla accepts both ([G1]); `custom_fields` → bzr excludes `cf_*` from create by design ([G4]); `duplicate_of` → **Bugzilla's** own `Bug.create` has no `dupe_of`, so this one is not bzr's; null `version` → bzr silently substitutes `"unspecified"`, a version this fixture's products do not declare ([G9]) |
+| `bug.update` | `bzr bug update <id>` with `--summary`, `--status`, `--resolution`, `--assignee` or `--reset-assigned-to`, `--dupe-of`, `--target-milestone`, `--estimated-time`, `--remaining-time`, and `--cc-add/-remove`, `--keywords-add/-remove`, `--blocks-add/-remove`, `--depends-on-add/-remove` computed as deltas against `bzr bug view` | `groups` → `bzr bug view` does not return `groups`, so no delta can be computed and no result confirmed ([D3]); `version` → bzr's `bug update` has no version flag, though Bugzilla accepts one ([G2]); null `milestone` → bzr offers `--reset-assigned-to` but no milestone reset ([G3]); null `resolution` → **Bugzilla** clears it on transition to an open status, so declare the status change instead; null `duplicate_of` → `--dupe-of` takes an ID and bzr has no `--reset-dupe-of`, though whether Bugzilla models un-duplicating that way at all is unverified ([G8]); `duplicate_of` with `status` **or** `resolution` → both flags carry `conflicts_with = "dupe_of"`, deliberately ([G5]) |
 | `bug.comment` | `bzr comment add <id> --body-file=<tmpfile> [--private]` | — |
-| `bug.attach` | `bzr attachment upload <id> <file> --summary=<description + marker + checksum> --content-type=<type> [--private]` | rendered summary longer than 255 **bytes** when UTF-8 encoded → "shorten the attachment description" |
+| `bug.attach` | `bzr attachment upload <id> <file> --summary=<description + marker + checksum> --content-type=<type> [--private]` | rendered summary longer than 255 **bytes** when UTF-8 encoded → **Bugzilla's** `attachments.description` column width, not a bzr gap, so this is the one row whose message may say what to do about it ("shorten the attachment description") |
 | `bug.worktime` | `bzr bug update <id> --work-time=<hours> --comment-file=<tmpfile>` | — |
 | `bug.custom-field-set` | `assign_bug_custom_fields(base_url, actor_key, id, {cf_<slug>: value})` | — |
 | `bug.flag` | `bzr bug update <id> --flag=<name><status>[(<requestee email>)]` | flag-type name containing `+`, `-`, `?` or `X` → bzr's flag parser takes the first of those characters as the status, so the name is unaddressable ([D1]) |
 | `attachment.update` | `bzr attachment update <id> --obsolete` / `--no-obsolete`, plus `--summary=<description>` when declared | — |
 
-Every refusal names the bzr limitation and links its entry in
+Every refusal on a **bzr** limitation names it and links its entry in
 [`docs/bzr-findings.md`](../../bzr-findings.md), which carries the source citation, the class
 — defect or deliberate design choice — and the upstream issue. The messages do not tell an
-author how to route around bzr; the point of this fixture is that the gap stays visible. The
+author how to route around bzr; the point of this fixture is that the gap stays visible.
+Three rows above are not bzr's limitation at all — `duplicate_of` on create, a null
+`resolution`, and the attachment ceiling — and each of those says whose constraint it is
+instead of linking a register entry it has no business having. Charging bzr for a constraint
+it did not impose corrupts the register as surely as hiding a real gap does. The
 table is expected to shrink as bzr closes gaps, and the scenario contract stays deliberately
 wider than what bzr can execute — narrowing it would erase the evidence.
 
@@ -185,6 +190,8 @@ rather than absorbed.
 [G3]: ../../bzr-findings.md#g3
 [G4]: ../../bzr-findings.md#g4
 [G5]: ../../bzr-findings.md#g5
+[G8]: ../../bzr-findings.md#g8
+[G9]: ../../bzr-findings.md#g9
 
 The attachment ceiling is `attachments.description`, declared `TINYTEXT` in Bugzilla 5.2's
 `Bugzilla/DB/Schema.pm` — a MySQL 255-**byte** column. The check therefore measures
@@ -358,21 +365,26 @@ failing, not from any reconciliation outcome — `unique-create` has no ambiguou
 ## Testing
 
 Unit tests mock `subprocess.run` and the URL opener exactly as `tests/test_provision.py` does.
-Two facts are out of their reach because they are properties of the fixture rather than of
-this code — that a create omitting `op_sys`/`rep_platform` would be rejected, and that the
-`alias` key round-trips rather than silently no-opping — so `tests/replay_smoke.sh` carries
-them: an operator-run live proof beside `tests/provision_smoke.sh`, the same split ADR 0004
-chose. It replays the fixture scenario against a healthy `make up`, asserts that a create
-declaring no `op_sys`/`rep_platform` succeeds on the reconfigured fixture, and asserts that
-`bzr bug view <server_alias>` resolves to the id that create returned. It also probes each
+Three facts are out of their reach because they are properties of the fixture rather than of
+this code — that a create omitting `op_sys`/`rep_platform` would be rejected, that the
+`alias` key round-trips rather than silently no-opping, and that Bugzilla enforces alias
+uniqueness — so `tests/replay_smoke.sh` carries them: an operator-run live proof beside
+`tests/provision_smoke.sh`, the same split ADR 0004 chose. It replays the fixture scenario
+against a healthy `make up`, asserts that a create declaring no `op_sys`/`rep_platform`
+succeeds on the reconfigured fixture, asserts that `bzr bug view <server_alias>` resolves to
+the id that create returned, and then issues a second create declaring the same alias and
+asserts it **fails** — one more step in a script that already has the fixture up and one bug
+created, and the proof that a duplicate create lands in reconciliation rather than producing
+two bugs under one alias. It also probes each
 `docs/bzr-findings.md` entry marked *read from source* and records the observed behaviour
 there, which is how an entry is promoted from read to observed. CI runs the unit suite;
 the smoke is operator-run by decision.
 
 Each of these is a case:
 
-- full `replay` of the fixture scenario, all eight actions, asserting the argv and stdin of
-  every invocation and the resulting journal records;
+- full `replay` of the fixture scenario, all eight actions, asserting the argv of every
+  invocation and the resulting journal records. Argv is the whole of it: nothing writes to a
+  subprocess's stdin, which is why the create document and comment bodies go to temp files;
 - crash before completion, then `resume`: create found by alias → adopted, not repeated;
 - crash before completion, then `resume`: alias absent → `retry` recorded, attempt 2 executed;
 - append reconciliation: one marker → adopted; zero → retried; two → `stop` recorded and

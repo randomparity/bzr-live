@@ -17,8 +17,12 @@ store. What is undecided is how a run *uses* that journal: when reconciliation r
 authorizes adopting a result the server already holds, and what happens to a payload the
 authorized boundary cannot express in one mutation.
 
-Six facts about the boundary constrain the answer, each read from bzr at `b80303b7` and
-recorded, with its class, in `docs/bzr-findings.md`:
+Seven facts about the boundary constrain the answer, and they are not all of one kind.
+Four are bzr limitations read at `b80303b7`, each recorded with its class in
+`docs/bzr-findings.md`. A fifth is read from bzr but is a capability rather than a
+limitation, so it earns no register entry. The last two rest on this repository's own
+`containers/bugzilla/checksetup_answers.txt` — a fixture-configuration gap and a fixture
+parameter — and neither is a bzr limitation either:
 
 - `bug create --from-json` sets `deny_unknown_fields` and defines no `estimated_time` or
   `remaining_time` (finding G1) and no `cf_*` key (G4, a deliberate upstream choice);
@@ -30,8 +34,12 @@ recorded, with its class, in `docs/bzr-findings.md`:
   `parse_single_flag` takes the *first* of those characters as the status, so `needs-info?`
   parses as name `needs` (D1). Bugzilla permits such names and this repository's slugs allow
   hyphens.
-- `bug view` accepts aliases as well as numeric IDs, so a scenario-namespaced server alias
-  is a server-enforced unique handle a create can be reconciled against.
+- `bug view` accepts aliases as well as numeric IDs (`src/cli/bug/view.rs:59-62`, "Bug ID(s)
+  or alias(es)"), so a scenario-namespaced server alias is a handle a create can be
+  reconciled against. This is a bzr capability, not a limitation, so it earns no register
+  entry. That the handle is also *unique* — that Bugzilla rejects a second bug declaring an
+  alias already in use, rather than accepting it — is inferred here, not observed; see the
+  inferred-facts consequence below.
 - bzr documents `op_sys` and `rep_platform` as "required by some Bugzilla installations"
   (`src/cli/bug/create.rs:138,141`) and passes both on every functional create, and this
   fixture's `containers/bugzilla/checksetup_answers.txt` sets no `defaultplatform` or
@@ -58,9 +66,11 @@ recorded, with its class, in `docs/bzr-findings.md`:
 **Reconciliation resolves before the completed record is written; `reconcile` is never
 persisted.** A run writes the in-flight intent, invokes the boundary, and then writes
 exactly one completed record whose `next_safe_action` is `advance`, `retry`, or `stop`. A
-bzr exit of 0 with parseable output resolves to `advance` directly. Anything else — a
-non-zero exit, an unparseable reply, a partial batch result — triggers a reconciliation
-read against Bugzilla, whose answer supplies the value. If the reconciliation read itself
+bzr exit of 0 whose reply carries the identifier the event needs resolves to `advance`
+directly. Anything else — a non-zero exit, an unparseable reply, or an exit-0 reply carrying
+no usable identifier — triggers a reconciliation read against Bugzilla, whose answer supplies
+the value. Those three are the whole list: every invocation this design issues names exactly
+one target, so there is no partial-batch case. If the reconciliation read itself
 fails, no completed record is written: the in-flight record survives and a later `resume`
 reconciles it. Persisting `reconcile` would deadlock the event, because ADR 0002 admits a
 second attempt only after a recorded `retry`.
@@ -116,16 +126,29 @@ from the declared one.
 **A payload the boundary cannot express in one mutation is refused before any mutation.** A
 per-action supported-payload table runs with the pristine sweep and refuses `bug.create`
 carrying `estimated_hours` or `remaining_hours` (finding G1), `custom_fields` (G4),
-`duplicate_of`, or a null `version`; `bug.update` carrying `groups` (D3), `version` (G2), a
-null `milestone` (G3), a null `resolution`, a null `duplicate_of`, or `duplicate_of` together
-with `status` or `resolution` (G5); a `bug.flag` whose flag-type name contains `+ - ? X`
-(D1); and any attachment description whose rendered summary would exceed 255 **bytes** once
-its marker is appended. Two grounds are narrower than they look: a null `version` is refused
-because bzr silently defaults it to `"unspecified"`, a version the fixture's provisioned
-product does not declare; and the attachment ceiling is `attachments.description`, which
-Bugzilla 5.2 declares `TINYTEXT` (`Bugzilla/DB/Schema.pm`) — 255 bytes, so the check counts
-encoded bytes, not code points. That last one is a Bugzilla column width, not a bzr gap, so
-it earns no findings entry.
+`duplicate_of`, or a null `version` (G9); `bug.update` carrying `groups` (D3), `version` (G2),
+a null `milestone` (G3), a null `resolution`, a null `duplicate_of` (G8), or `duplicate_of`
+together with `status` or `resolution` (G5); a `bug.flag` whose flag-type name contains
+`+ - ? X` (D1); and any attachment description whose rendered summary would exceed 255
+**bytes** once its marker is appended.
+
+Three of those grounds are *not* bzr's, and saying so matters as much as naming the ones that
+are: blaming bzr for a constraint it did not impose corrupts the register exactly as silently
+routing around a real gap would. `duplicate_of` on create is absent from bzr because it is
+absent from Bugzilla's own `Bug.create`. A null `resolution` on update is refused because
+Bugzilla clears the resolution on a transition to an open status, so a scenario declaring the
+null is declaring a status change it should state directly. And the attachment ceiling is
+`attachments.description`, which Bugzilla 5.2 declares `TINYTEXT` (`Bugzilla/DB/Schema.pm`) —
+255 bytes, so the check counts encoded bytes, not code points. None of the three earns a
+findings entry, and each refusal says whose constraint it is.
+
+G8 is the one entry that straddles the line, and it is recorded as straddling it. What is
+verified is bzr's half: `--dupe-of` takes an ID and there is no `--reset-dupe-of`, though
+`--reset-assigned-to` and `--reset-qa-contact` establish the pattern
+(`src/cli/bug/update.rs:96-122`). Whether Bugzilla models un-duplicating as nulling `dupe_of`
+at all, or only as changing the resolution, is not verified here — so the register entry
+states the bzr half as read and the Bugzilla half as open, and nothing is filed upstream
+until the second half is settled.
 
 ## Consequences
 
@@ -143,8 +166,14 @@ it earns no findings entry.
   unreplayable. The refusal is deterministic, pre-mutation, and names its fix, but issue #3's
   validation no longer implies replayability, and a future bzr release that gains the missing
   create fields would shrink the table.
-- The pristine sweep costs one read per `bug.create` event before the first mutation, and
-  rebuilding the ID resolution table costs one `JournalStore.read` per event. That read lists
+- Under `replay` a `bug.create` alias is read **twice**: once by the up-front sweep and once
+  by the per-event check, which runs whether or not the sweep already proved that alias
+  absent. That is the price of binding the check to every first execution rather than to the
+  `replay` command, and the binding is what closes the `resume`-against-an-empty-journal hole
+  above. Deduplicating the two within a run would be a few lines, and is deliberately not
+  done: at fixture scale the saving is a handful of local round trips, and a cache of "already
+  proved absent" is one more thing that can be wrong about the server. Rebuilding the ID
+  resolution table costs one `JournalStore.read` per event. That read lists
   the journal directory each time, so table rebuild is quadratic in event count — acceptable
   at fixture scale (hundreds of events), and the reason this design does not target
   million-event scenarios.
@@ -160,9 +189,11 @@ it earns no findings entry.
   deletes a row here rather than adding one. The scenario contract stays wider than the
   engine on purpose — narrowing the contract to what bzr can do today would erase the
   evidence.
-- Two of this record's boundary facts are inferred from the fixture's configuration rather
+- Three of this record's boundary facts are inferred from the fixture's configuration rather
   than observed against it: that a create omitting `op_sys`/`rep_platform` would be rejected,
-  and that the `alias` key round-trips. The unit suite mocks the subprocess boundary and
+  that the `alias` key round-trips, and that Bugzilla enforces alias uniqueness — the last
+  being what makes a duplicate create *fail* into reconciliation rather than quietly produce a
+  second bug under one alias. The unit suite mocks the subprocess boundary and
   cannot reach either, so `tests/replay_smoke.sh` — an operator-run live proof beside
   `tests/provision_smoke.sh`, the split ADR 0004 already chose — is what discharges them.
   Until it has run, both are stated as inferences here rather than as verified grounds.
@@ -180,7 +211,8 @@ it earns no findings entry.
   multi-hundred-event scenario replayable at all.
 - **Treat any failed bug read as absent.** verified: a group-restricted bug answers exit 4
   with `api_code` 102, asserted against a live Bugzilla at
-  `tests/functional/phases/08e-bugs-restricted-access.sh:24-25` in the bzr checkout; collapsing
+  `tests/functional/phases/08e-bugs-restricted-access.sh:169,180,262` in the bzr checkout
+  (the file's header comment at `:24-25` states the same three directions in prose); collapsing
   it into absence would let the pristine sweep pass and the create then duplicate.
 - **Persist `next_safe_action: reconcile` and let `resume` resolve it.** verified: ADR 0002's
   retry transition, implemented at `src/bzr_live/scenario/journal.py:436-437`, admits attempt
