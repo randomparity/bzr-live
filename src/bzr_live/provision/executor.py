@@ -98,13 +98,15 @@ class Provisioner:
             if states[identity] == "absent":
                 self._create(resource)
                 self._verify_readback(resource)
-                report.append(("created", identity))
+                status = "created"
             else:
-                report.append(("unchanged", identity))
+                status = "unchanged"
+            report.append((status, identity))
+            # emitted as each resource is handled, so a failed run still shows
+            # what it already created
+            self._out(f"{status} {identity}")
             if resource.kind == "actor":
                 self._ensure_actor_key(resource)
-        for status, identity in report:
-            self._out(f"{status} {identity}")
         created = sum(1 for status, _ in report if status == "created")
         self._out(f"summary: {created} created, {len(report) - created} unchanged")
         return report
