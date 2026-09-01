@@ -33,13 +33,15 @@ check:
 		scripts/lifecycle \
 		containers/bugzilla/entrypoint.sh \
 		tests/lifecycle_test.sh \
-		tests/checkpoint_smoke.sh
+		tests/checkpoint_smoke.sh \
+		tests/provision_smoke.sh
 	@shellcheck \
 		scripts/lifecycle \
 		containers/bugzilla/entrypoint.sh \
 		tests/lifecycle_test.sh \
-		tests/checkpoint_smoke.sh
-	@uv run --python 3.11 python -m compileall -q src tests/test_checkpoint.py
+		tests/checkpoint_smoke.sh \
+		tests/provision_smoke.sh
+	@uv run --python 3.11 python -m compileall -q src tests/test_checkpoint.py tests/test_provision.py
 	@BZ_ADMIN_PASSWORD=check BZ_DB_PASSWORD=check MARIADB_ROOT_PASSWORD=check \
 		docker compose --file compose.yaml config --quiet
 
