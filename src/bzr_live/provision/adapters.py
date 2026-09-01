@@ -93,7 +93,12 @@ class BzrClient:
             argv += ["--", *positionals]
         env = dict(os.environ)
         env[_KEY_ENV] = self._api_key
-        return self._run(argv, capture_output=True, env=env, shell=False)
+        try:
+            return self._run(argv, capture_output=True, env=env, shell=False)
+        except OSError as exc:
+            raise ProvisionError(
+                f"cannot run bzr binary {self._bzr!r} ({exc}); point --bzr at a "
+                "bzr executable") from None
 
     def read(self, args: list[str], positionals: list[str] | None = None):
         """A read exiting 2, or exiting 4 with a not-found API code, is absent.
@@ -154,11 +159,16 @@ class BridgeClient:
     def call(self, operation: str, payload: dict) -> object:
         if operation not in self.OPERATIONS:
             raise ProvisionError(f"bridge operation {operation!r} is not allowlisted")
-        done = self._run(
-            [*self._prefix, operation],
-            input=json.dumps(payload).encode("utf-8"),
-            capture_output=True, shell=False,
-        )
+        try:
+            done = self._run(
+                [*self._prefix, operation],
+                input=json.dumps(payload).encode("utf-8"),
+                capture_output=True, shell=False,
+            )
+        except OSError as exc:
+            raise ProvisionError(
+                f"cannot run {self._prefix[0]!r} ({exc}); the bridge needs docker "
+                "compose on PATH") from None
         stderr = done.stderr.decode("utf-8", "replace")
         if any(marker in stderr.lower() for marker in _NO_CONTAINER_MARKERS):
             raise ProvisionError(
