@@ -580,5 +580,53 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(custom_field_name("risk-level"), "cf_risk_level")
 
 
+class CliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def test_cli_reports_conflict_as_exit_one(self) -> None:
+        import contextlib
+
+        from bzr_live.provision import __main__ as cli
+
+        original = Provisioner.run
+        Provisioner.run = lambda self: (_ for _ in ()).throw(
+            ProvisionError("boom message"))
+        self.addCleanup(lambda: setattr(Provisioner, "run", original))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = cli.main([
+                str(FIXTURE), "--state-root", str(self.tmp / "state"),
+                "--project-root", str(self.tmp)])
+        self.assertEqual(code, 1)
+        self.assertIn("provision failed: boom message", stderr.getvalue())
+
+    def test_cli_project_root_is_resolved(self) -> None:
+        from bzr_live.provision import __main__ as cli
+
+        real = self.tmp / "checkout"
+        real.mkdir()
+        link = self.tmp / "link"
+        link.symlink_to(real)
+        prefix, project = cli._compose_prefix(str(link))
+        resolved = os.path.realpath(str(real))
+        self.assertEqual(project, adapters.compose_project_name(resolved))
+        self.assertIn("--project-directory", prefix)
+        self.assertEqual(prefix[prefix.index("--project-directory") + 1], resolved)
+        self.assertEqual(prefix[-4:], ["--user", "www-data", "bugzilla",
+                                       "bzr-live-bridge"])
+
+    def test_cli_defaults(self) -> None:
+        from bzr_live.provision import __main__ as cli
+
+        options = cli._parse([str(FIXTURE)])
+        self.assertEqual(options.state_root, "./state")
+        self.assertEqual(options.base_url, "http://127.0.0.1:8080/")
+        self.assertEqual(options.bzr, "bzr")
+        self.assertEqual(options.project_root, ".")
+
+
 if __name__ == "__main__":
     unittest.main()
