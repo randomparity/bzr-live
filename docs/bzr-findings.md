@@ -15,9 +15,9 @@ already-filed one (D5).
 
 | ID | Class | Summary | Upstream |
 |---|---|---|---|
-| [D1](#d1) | defect | A flag type name containing `-` is unparseable by `--flag` | *proposed* |
+| [D1](#d1) | defect | A flag type name containing `-` is unparseable by `--flag` | [bzr#640](https://github.com/randomparity/bzr/issues/640) |
 | [G7](#g7) | design choice | An absent bug exits 4 with an API code, not 2 — `bzr` ADR 0015 forbids masking a server error | n/a |
-| [D3](#d3) | defect | `bug view` omits `groups`, `estimated_time` and `remaining_time` that Bugzilla returns | *proposed* |
+| [D3](#d3) | defect | `bug view` omits `groups`, `estimated_time` and `remaining_time` that Bugzilla returns | [bzr#641](https://github.com/randomparity/bzr/issues/641) |
 | [D4](#d4) | defect (unverified) | `bug create --from-json` `alias` silently no-ops where aliases are disabled | hold: unverified |
 | [D5](#d5) | defect | `rep_platform` is the wrong wire name; the field is `platform` | [bzr#621](https://github.com/randomparity/bzr/issues/621) |
 | [G1](#g1) | gap | `bug create --from-json` has no `estimated_time` / `remaining_time` | — |
@@ -46,6 +46,9 @@ both legal upstream and legal in a scenario. Affects `bug update --flag`,
 
 A name is unambiguous if the status character is taken from the **end** rather than the
 start, since the status is always the last character or immediately precedes `(`.
+
+**Upstream.** [bzr#640](https://github.com/randomparity/bzr/issues/640), with the
+end-anchored parse as the suggested fix.
 
 **What the fixture does.** Refuses the payload as a precondition, before any mutation,
 naming this entry. `tests/replay_smoke.sh` probes the live behaviour and records the exit
@@ -104,7 +107,10 @@ the two time fields via `--estimated-time`/`--remaining-time` — so each is a *
 field: no caller can read back what it wrote, and no caller can compute an add/remove delta
 for `groups` from server state.
 
-Related but distinct from the open conformance epic [bzr#616]: entry 10 (bzr#623) covers
+**Upstream.** [bzr#641](https://github.com/randomparity/bzr/issues/641), filed as part of
+the conformance epic [bzr#616].
+
+Related but distinct from that epic's own entries: entry 10 (bzr#623) covers
 `groups: []` being unexpressible on *create*, and [bzr#621](https://github.com/randomparity/bzr/issues/621)
 covers the `platform` naming on read and write. Neither covers the read-side omission of
 these three fields.
