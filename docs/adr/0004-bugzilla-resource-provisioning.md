@@ -26,17 +26,21 @@ operation allowlist, Bugzilla object layer only) for the kinds bzr cannot create
 for API-key minting; and a single stock-REST route for per-bug custom-field
 assignment. Reconciliation is two passes over the already-ordered `resource_plan`:
 read and compare every declared definition (divergence stops the run before any
-mutation), then create what is absent in plan order and read each creation back. Actor
+resource mutation or actor-key minting; only the admin API-key bootstrap precedes
+pass 1), then create what is absent in plan order and read each creation back. Actor
 and admin API keys live in `<state-root>/actor-keys/` as 0600 files in a 0700
 owner-checked directory; an existing key file is reused, and keys never appear in
 ordinary output.
 
 ## Consequences
 
-- An identical rerun is a verified no-op, and a partial run converges on rerun,
-  without any local progress state: the fixture itself is the state.
-- A divergent pre-existing resource is detected before the run mutates anything;
-  concurrent mutators are unhandled by design (single local operator).
+- An identical rerun is a verified no-op, and a partial run converges on rerun; the
+  fixture answers existence. The key files are the one piece of durable local state:
+  a fixture recreated under a kept state root holds stale keys, caught by the
+  run-start admin `whoami` verification.
+- A divergent pre-existing resource is detected before the run performs any resource
+  mutation or actor-key minting; concurrent mutators are unhandled by design (single
+  local operator).
 - The bridge is a second implementation surface inside the container image, bounded
   by its allowlist; extending provisioning to a new kind means touching the routing
   table and possibly the bridge.
