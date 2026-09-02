@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import io
 import json
 import os
 import stat
@@ -11,8 +12,19 @@ from pathlib import Path
 
 from bzr_live.provision import KeyStore, ProvisionError
 from bzr_live.provision.adapters import BUG_ABSENT_CODES, BzrClient
-from bzr_live.replay import HANDLERS, ReplayContext, ReplayError
-from bzr_live.scenario import PlannedEvent, PlannedResource, Reference, load_scenario
+from bzr_live.replay import HANDLERS, ReplayContext, ReplayEngine, ReplayError
+from bzr_live.replay.context import KEY_ENV
+from bzr_live.scenario import (
+    CompletedRecord,
+    InFlightRecord,
+    InvocationMetadata,
+    JournalStore,
+    PlannedEvent,
+    PlannedResource,
+    Reference,
+    freeze_planned,
+    load_scenario,
+)
 
 # Anchored to this file, not the CWD, matching tests/test_scenario_resources.py:13 and
 # tests/test_provision.py:29; the relative form only works from the repo root.
@@ -522,6 +534,32 @@ class ReconcileTest(unittest.TestCase):
             self._context(run), self._event("update-triage"))
         self.assertEqual(result.next_action, "retry")
 
+    def test_flag_compares_the_requestee_not_just_the_name_and_status(self) -> None:
+        # flag-review declares status "?" with requestee actor:reporter. Bugzilla emits
+        # `requestee` as the requestee's login and only when one is set
+        # (Bugzilla/WebService/Bug.pm:1425-1428 in this fixture's own image); bzr
+        # deserializes it as Option<String> (src/types/flag.rs:65 at b80303b7). A flag of
+        # the right name and status held by the *wrong* requestee is a different request,
+        # so it must not advance -- that mismatch is what this test rests on.
+        event = self._event("flag-review")
+        held_by_someone_else = {
+            "id": 41,
+            "flags": [{"name": "review", "status": "?",
+                       "requestee": "triager@example.test"}],
+        }
+        run = _FakeRun([(0, held_by_someone_else, None)])
+        result = HANDLERS["bug.flag"].reconcile(self._context(run), event)
+        self.assertEqual(result.next_action, "retry")
+        self.assertIn("review", result.detail)
+        matching = {
+            "id": 41,
+            "flags": [{"name": "review", "status": "?",
+                       "requestee": "reporter@example.test"}],
+        }
+        run = _FakeRun([(0, matching, None)])
+        result = HANDLERS["bug.flag"].reconcile(self._context(run), event)
+        self.assertEqual(result.next_action, "advance")
+
     def test_flag_clear_advances_on_absence(self) -> None:
         # Status X is the one flag postcondition proved by absence: the declared clear
         # committed exactly when no entry with that type name is present.
@@ -545,6 +583,437 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(result.next_action, "advance")
         self.assertEqual(run.calls[0]["argv"][-2:], ["--", "7"])
         self.assertIn("view", run.calls[0]["argv"])
+
+
+class _FakeOpener:
+    """Stands in for urllib.request.urlopen: records requests, returns a JSON body."""
+
+    def __init__(self, payload=None):
+        self.requests: list[dict] = []
+        self._payload = {"bugs": [{"id": 41}]} if payload is None else payload
+
+    def __call__(self, request):
+        self.requests.append({
+            "url": request.full_url,
+            "body": json.loads(request.data.decode("utf-8")),
+        })
+        return io.BytesIO(json.dumps(self._payload).encode("utf-8"))
+
+
+class _RecordingStore:
+    """Delegates to a real JournalStore, recording every write's known_secrets.
+
+    The in-flight write's `known_secrets` guards structural metadata only, so its
+    absence leaves no trace in the written file; recording the argument is the only
+    way to hold the "every journal write passes known_secrets" line for that write.
+    """
+
+    def __init__(self, store: JournalStore) -> None:
+        self._store = store
+        self.writes: list[frozenset[str]] = []
+
+    def read(self, event, attempt=None):
+        return self._store.read(event, attempt)
+
+    def write_in_flight(self, record, *, known_secrets=()):
+        self.writes.append(frozenset(known_secrets))
+        return self._store.write_in_flight(record, known_secrets=known_secrets)
+
+    def replace_completed(self, record, *, known_secrets=()):
+        self.writes.append(frozenset(known_secrets))
+        return self._store.replace_completed(record, known_secrets=known_secrets)
+
+
+class EngineTest(unittest.TestCase):
+    maxDiff = None
+
+    def setUp(self) -> None:
+        self.root = _state_root(self)
+        self.keys = KeyStore(self.root)
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        self.workspace = workspace.name
+        self.scenario = load_scenario(FIXTURE)
+        # One distinct key per actor, so a sweep for a key cannot pass by finding the
+        # other actor's value where this actor's was expected.
+        for resource in self.scenario.resources:
+            if resource.kind == "actor":
+                self.keys.store_actor_key(resource.name, f"SECRET-KEY-{resource.name}")
+        # The spec puts the journal at <state-root>/journal/<scenario name>/;
+        # JournalStore creates only the leaf, so the parent is made here.
+        self.journal_dir = self.root / "journal" / self.scenario.name
+        os.mkdir(self.journal_dir.parent, 0o700)
+        self.store = JournalStore(self.journal_dir)
+        self.addCleanup(self.store.close)
+        self.out: list[str] = []
+
+    # --- scenarios ---------------------------------------------------------
+
+    def _trimmed(self, *names: str):
+        """The fixture scenario, cut down to the named events in fixture order.
+
+        Naming no event keeps all eight. This is how the two "the scenario no longer
+        names this event" tests drop an event whose record is already journalled, and
+        how the resume tests narrow a run to the events their assertions are about.
+        """
+        events = tuple(
+            event for event in self.scenario.events
+            if not names or event.name in names)
+        return dataclasses.replace(self.scenario, events=events)
+
+    def _unsupported(self):
+        """The fixture scenario with a create bzr's --from-json cannot carry.
+
+        `estimated_hours` is finding G1: bzr's create JSON has no `estimated_time`.
+        The fixture itself declares none, because it must be replayable end to end,
+        so precondition 2's wiring needs a scenario that puts one back.
+        """
+        create = self._event(self.scenario, "create-checkout-race")
+        postcondition = dict(create.expected_postcondition)
+        postcondition["values"] = dict(
+            postcondition["values"], estimated_hours="4.5")
+        create = dataclasses.replace(
+            create, expected_postcondition=freeze_planned(postcondition))
+        return dataclasses.replace(
+            self.scenario,
+            events=(create,) + tuple(self.scenario.events[1:]))
+
+    def _engine(self, run, scenario=None, *, opener=None, store=None):
+        scenario = self._trimmed() if scenario is None else scenario
+        context = ReplayContext(
+            scenario, self.keys, bzr_path="bzr", base_url="http://127.0.0.1:8080/",
+            workspace=self.workspace, run=run, opener=opener or _FakeOpener())
+        return ReplayEngine(
+            scenario, context, self.store if store is None else store,
+            self.journal_dir, out=self.out.append)
+
+    # --- journal fixtures --------------------------------------------------
+
+    def _event(self, scenario, name: str):
+        return next(event for event in scenario.events if event.name == name)
+
+    def _in_flight(self, event, *, attempt: int = 1, digest: str | None = None):
+        """Journal an in-flight record exactly as an interrupted earlier run would."""
+        record = InFlightRecord(
+            self.scenario.digest if digest is None else digest, event.name, attempt,
+            event.actor, event.action_class, event.expected_postcondition,
+            event.reconciliation_marker)
+        self.store.write_in_flight(record)
+        return record
+
+    def _completed(self, event, next_action: str, resolved_ids=(), *,
+                   attempt: int = 1, exit_status: int = 0):
+        self._in_flight(event, attempt=attempt)
+        boundary = (
+            "bugzilla-rest-custom-field" if event.action == "bug.custom-field-set"
+            else "bzr")
+        record = CompletedRecord(
+            self.scenario.digest, event.name, attempt, event.actor, event.action_class,
+            event.expected_postcondition, event.reconciliation_marker,
+            InvocationMetadata(boundary, "earlier run", (), (KEY_ENV,)),
+            {}, exit_status, dict(resolved_ids), next_action)
+        self.store.replace_completed(record)
+        return record
+
+    # --- the full run ------------------------------------------------------
+
+    def _full_run_replies(self, create_reply=None):
+        """The ten bzr replies one clean replay of the eight-event fixture consumes."""
+        return [
+            (4, None, 100),                      # pristine sweep: the alias is absent
+            (4, None, 100),                      # the create's own pre-execution check
+            (0, create_reply or {"id": 41}, None),   # bug create
+            (0, {"id": 41}, None),               # bug view, read to compute the update
+            (0, {}, None),                       # bug update
+            (0, {"id": 5}, None),                # comment add
+            (0, {"id": 7}, None),                # attachment upload
+            (0, {}, None),                       # bug update --work-time
+            (0, {}, None),                       # bug update --flag
+            (0, {}, None),                       # attachment update
+        ]
+
+    def test_replay_executes_every_event_in_order(self) -> None:
+        run = _FakeRun(self._full_run_replies())
+        opener = _FakeOpener()
+        engine = self._engine(run, opener=opener)
+        self.assertEqual(engine.replay(), [
+            ("executed", "create-checkout-race"),
+            ("executed", "update-triage"),
+            ("executed", "comment-triage"),
+            ("executed", "attach-notes"),
+            ("executed", "worktime-triage"),
+            ("executed", "custom-field-triage"),
+            ("executed", "flag-review"),
+            ("executed", "obsolete-notes"),
+        ])
+        # Every event reached its own boundary operation, in scenario order, and the
+        # one REST event addressed the bug the create resolved.
+        self.assertEqual(
+            [self.store.read(event.name).invocation.operation
+             for event in self.scenario.events],
+            ["bug create", "bug update", "comment add", "attachment upload",
+             "bug update", "PUT rest/bug/41", "bug update", "attachment update"])
+        for event in self.scenario.events:
+            record = self.store.read(event.name)
+            self.assertIsInstance(record, CompletedRecord)
+            self.assertEqual(record.next_safe_action, "advance")
+            self.assertEqual(record.exit_status, 0)
+            self.assertEqual(record.attempt, 1)
+        self.assertEqual(len(run.calls), 10)
+        self.assertEqual(len(opener.requests), 1)
+        self.assertEqual(self.out[-1], "summary: 8 executed, 0 already complete")
+
+    # --- preconditions -----------------------------------------------------
+
+    def test_replay_refuses_a_non_empty_journal(self) -> None:
+        scenario = self._trimmed()
+        self._in_flight(self._event(scenario, "create-checkout-race"))
+        run = _FakeRun()
+        with self.assertRaises(ReplayError) as caught:
+            self._engine(run, scenario).replay()
+        self.assertIn("create-checkout-race.000001.json", str(caught.exception))
+        self.assertIn("use resume", str(caught.exception))
+        self.assertEqual(run.calls, [])
+
+    def test_replay_refuses_when_a_server_alias_already_exists(self) -> None:
+        scenario = self._trimmed()
+        alias = self._event(
+            scenario, "create-checkout-race").expected_postcondition["values"][
+                "server_alias"]
+        run = _FakeRun([(0, {"id": 41}, None)])
+        with self.assertRaises(ReplayError) as caught:
+            self._engine(run, scenario).replay()
+        self.assertIn(alias, str(caught.exception))
+        self.assertIn("scripts/checkpoint restore pristine", str(caught.exception))
+        # Refused by the up-front sweep: one read, no mutation, nothing journalled.
+        self.assertEqual(len(run.calls), 1)
+        self.assertIn("view", run.calls[0]["argv"])
+        self.assertIsNone(self.store.read("create-checkout-race"))
+
+    def test_pristine_sweep_refuses_a_bug_the_actor_cannot_see(self) -> None:
+        # api_code 102 is access denied, and BUG_ABSENT_CODES is {100, 101} only: a bug
+        # the sweeping actor cannot see is not a bug that is not there. The run stops
+        # with the boundary's own ProvisionError rather than reconciling (ADR 0006).
+        run = _FakeRun([(4, None, 102)])
+        with self.assertRaises(ProvisionError) as caught:
+            self._engine(run).replay()
+        self.assertIn("exit 4", str(caught.exception))
+        self.assertEqual(len(run.calls), 1)
+        self.assertIsNone(self.store.read("create-checkout-race"))
+
+    def test_an_unsupported_payload_stops_before_any_mutation(self) -> None:
+        # A create declaring estimated_hours, which bzr's create JSON cannot carry.
+        # Precondition 2 binds both subcommands, so neither may reach the network.
+        run = _FakeRun()
+        for replay_or_resume in ("replay", "resume"):
+            with self.assertRaises(ReplayError) as caught:
+                getattr(self._engine(run, self._unsupported()), replay_or_resume)()
+            self.assertIn("estimated_hours", str(caught.exception))
+            self.assertIn("finding G1", str(caught.exception))
+        self.assertEqual(run.calls, [])
+        self.assertIsNone(self.store.read("create-checkout-race"))
+
+    def test_replay_refuses_a_record_for_an_event_the_scenario_dropped(self) -> None:
+        # A record whose event the scenario no longer names is unreachable by the
+        # digest check, which reads records *through* current event names.
+        self._in_flight(self._event(self.scenario, "comment-triage"))
+        run = _FakeRun()
+        with self.assertRaises(ReplayError) as caught:
+            self._engine(run, self._trimmed("create-checkout-race")).replay()
+        self.assertIn("comment-triage.000001.json", str(caught.exception))
+        self.assertIn("no longer names", str(caught.exception))
+        self.assertEqual(run.calls, [])
+
+    def test_resume_refuses_a_record_for_an_event_the_scenario_dropped(self) -> None:
+        self._in_flight(self._event(self.scenario, "comment-triage"))
+        run = _FakeRun()
+        with self.assertRaises(ReplayError) as caught:
+            self._engine(run, self._trimmed("create-checkout-race")).resume()
+        self.assertIn("comment-triage.000001.json", str(caught.exception))
+        self.assertIn("no longer names", str(caught.exception))
+        self.assertEqual(run.calls, [])
+
+    def test_resume_refuses_a_changed_digest(self) -> None:
+        scenario = self._trimmed()
+        self._in_flight(
+            self._event(scenario, "create-checkout-race"), digest="b" * 64)
+        run = _FakeRun()
+        with self.assertRaises(ReplayError) as caught:
+            self._engine(run, scenario).resume()
+        self.assertIn("b" * 64, str(caught.exception))
+        self.assertIn(self.scenario.digest, str(caught.exception))
+        self.assertIn("CONFIRM_RESET=1 make reset", str(caught.exception))
+        self.assertEqual(run.calls, [])
+
+    def test_resume_refuses_a_pre_existing_alias_for_an_unjournalled_event(self) -> None:
+        # resume runs no up-front sweep, so this is the per-event check in _advance:
+        # an event with no journal record has no proof this run attempted it, so a
+        # present alias refuses instead of being adopted by a reconciliation.
+        scenario = self._trimmed("create-checkout-race")
+        alias = self._event(
+            scenario, "create-checkout-race").expected_postcondition["values"][
+                "server_alias"]
+        run = _FakeRun([(0, {"id": 41}, None)])
+        with self.assertRaises(ReplayError) as caught:
+            self._engine(run, scenario).resume()
+        self.assertIn(alias, str(caught.exception))
+        self.assertIn("already exists", str(caught.exception))
+        self.assertEqual(len(run.calls), 1)
+        self.assertIsNone(self.store.read("create-checkout-race"))
+
+    # --- resume ------------------------------------------------------------
+
+    def test_resume_adopts_a_committed_in_flight_create(self) -> None:
+        scenario = self._trimmed("create-checkout-race")
+        self._in_flight(self._event(scenario, "create-checkout-race"))
+        run = _FakeRun([(0, {"id": 41, "summary": "Checkout races"}, None)])
+        engine = self._engine(run, scenario)
+        self.assertEqual(engine.resume(), [("resumed", "create-checkout-race")])
+        record = self.store.read("create-checkout-race")
+        self.assertIsInstance(record, CompletedRecord)
+        self.assertEqual(record.next_safe_action, "advance")
+        self.assertEqual(record.resolved_ids, {"bug:checkout-race": 41})
+        # exit_status -1 means the invocation's own status was never observed.
+        self.assertEqual(record.exit_status, -1)
+        # The create is never repeated: the one call is the alias read.
+        self.assertEqual(len(run.calls), 1)
+        self.assertIn("view", run.calls[0]["argv"])
+        self.assertNotIn("create", run.calls[0]["argv"])
+        self.assertIsNone(self.store.read("create-checkout-race", 2))
+
+    def test_resume_retries_an_in_flight_create_the_server_never_saw(self) -> None:
+        scenario = self._trimmed("create-checkout-race")
+        self._in_flight(self._event(scenario, "create-checkout-race"))
+        run = _FakeRun([(4, None, 100), (0, {"id": 41}, None)])
+        self.assertEqual(
+            self._engine(run, scenario).resume(),
+            [("executed", "create-checkout-race")])
+        first = self.store.read("create-checkout-race", 1)
+        self.assertEqual(first.next_safe_action, "retry")
+        self.assertEqual(first.exit_status, -1)
+        second = self.store.read("create-checkout-race", 2)
+        self.assertIsInstance(second, CompletedRecord)
+        self.assertEqual(second.attempt, 2)
+        self.assertEqual(second.next_safe_action, "advance")
+        self.assertEqual(second.exit_status, 0)
+        self.assertEqual(second.resolved_ids, {"bug:checkout-race": 41})
+        self.assertEqual(len(run.calls), 2)
+        self.assertIn("create", run.calls[1]["argv"])
+
+    def test_resume_refuses_a_recorded_stop_without_querying(self) -> None:
+        # A stop is terminal in the journal: the refusal is durable rather than
+        # dependent on the server still looking ambiguous, so nothing is re-queried.
+        scenario = self._trimmed("comment-triage")
+        # A stop is only ever reached through reconciliation, hence exit_status -1.
+        self._completed(
+            self._event(scenario, "comment-triage"), "stop", exit_status=-1)
+        run = _FakeRun()
+        with self.assertRaises(ReplayError) as caught:
+            self._engine(run, scenario).resume()
+        self.assertIn("comment-triage", str(caught.exception))
+        self.assertIn("CONFIRM_RESET=1 make reset", str(caught.exception))
+        self.assertEqual(run.calls, [])
+
+    def test_resume_skips_completed_events_and_rebuilds_the_id_table(self) -> None:
+        scenario = self._trimmed("create-checkout-race", "comment-triage")
+        self._completed(
+            self._event(scenario, "create-checkout-race"), "advance",
+            {"bug:checkout-race": 41})
+        run = _FakeRun([(0, {"id": 5}, None)])
+        self.assertEqual(self._engine(run, scenario).resume(), [
+            ("skipped", "create-checkout-race"),
+            ("executed", "comment-triage"),
+        ])
+        # The completed create was neither re-read nor re-executed, and the comment
+        # resolved bug:checkout-race from the record's ids rather than from a read.
+        self.assertEqual(len(run.calls), 1)
+        self.assertEqual(run.calls[0]["argv"][-2:], ["--", "41"])
+        self.assertEqual(
+            self.store.read("comment-triage").invocation.arguments[-1], "41")
+        self.assertEqual(self.out[-1], "summary: 1 executed, 1 already complete")
+
+    # --- reconciliation inside a run ---------------------------------------
+
+    def test_an_exit_zero_reply_with_no_usable_id_reconciles(self) -> None:
+        """ADR 0006's third reconciliation trigger, distinct from the other two.
+
+        The create exits 0 but the reply carries no id, so `resolved_ids` raises; the
+        alias read that follows finds the bug, proving the mutation committed. The run
+        continues rather than aborting on "returned no bug id".
+        """
+        scenario = self._trimmed("create-checkout-race", "comment-triage")
+        run = _FakeRun([
+            (4, None, 100),            # pristine sweep: the alias is absent
+            (4, None, 100),            # the create's own pre-execution check
+            (0, {}, None),             # bug create exits 0 carrying no id
+            (0, {"id": 41}, None),     # the reconciliation read finds the bug
+            (0, {"id": 5}, None),      # ... and the run continues into the comment
+        ])
+        engine = self._engine(run, scenario)
+        self.assertEqual(engine.replay(), [
+            ("reconciled", "create-checkout-race"),
+            ("executed", "comment-triage"),
+        ])
+        record = self.store.read("create-checkout-race")
+        self.assertEqual(record.next_safe_action, "advance")
+        self.assertEqual(record.resolved_ids, {"bug:checkout-race": 41})
+        self.assertEqual(record.exit_status, -1)
+        # The reconciled id was adopted, so the next event addressed the right bug.
+        self.assertEqual(run.calls[-1]["argv"][-2:], ["--", "41"])
+
+    def test_a_failing_reconciliation_read_leaves_the_in_flight_record(self) -> None:
+        """ADR 0006: no completed record is written over a read that failed."""
+        scenario = self._trimmed("create-checkout-race")
+        run = _FakeRun([
+            (4, None, 100),            # pristine sweep: the alias is absent
+            (4, None, 100),            # the create's own pre-execution check
+            (1, None, None),           # the create fails
+            (1, None, None),           # and so does the reconciliation read
+        ])
+        engine = self._engine(run, scenario)
+        with self.assertRaises(ProvisionError):
+            engine.replay()
+        record = self.store.read("create-checkout-race")
+        self.assertIsInstance(record, InFlightRecord)
+        self.assertNotIsInstance(record, CompletedRecord)
+        self.assertEqual(record.attempt, 1)
+        self.assertIsNone(self.store.read("create-checkout-race", 2))
+
+    # --- secrets -----------------------------------------------------------
+
+    def test_no_journal_record_contains_an_api_key(self) -> None:
+        # The create's reply embeds the reporter's key in an ordinary field, so a
+        # journal write that dropped known_secrets would leave it in the record file.
+        run = _FakeRun(self._full_run_replies(
+            create_reply={"id": 41, "note": "created by SECRET-KEY-reporter"}))
+        opener = _FakeOpener()
+        store = _RecordingStore(self.store)
+        engine = self._engine(run, opener=opener, store=store)
+        self.assertEqual(len(engine.replay()), 8)
+        keys = {"SECRET-KEY-reporter", "SECRET-KEY-triager"}
+        written = sorted(path for path in os.listdir(self.journal_dir)
+                         if path.endswith(".json"))
+        self.assertEqual(len(written), 8)
+        for name in written:
+            content = (self.journal_dir / name).read_text(encoding="utf-8")
+            for key in keys:
+                self.assertNotIn(key, content, f"{name} carries {key}")
+        # The redaction ran rather than the key merely never arriving: the whole
+        # "SECRET-KEY-reporter" is the secret, so removing it leaves the prefix alone.
+        self.assertEqual(
+            self.store.read("create-checkout-race").handler_output["note"],
+            "created by ")
+        # Every write -- in-flight as well as completed -- carried the run's secrets.
+        self.assertEqual(len(store.writes), 16)
+        self.assertTrue(all(store.writes))
+        # The key reaches bzr only through the environment, never through argv.
+        for call in run.calls:
+            for argument in call["argv"]:
+                self.assertNotIn("SECRET-KEY", argument)
+            self.assertTrue(call["env"][KEY_ENV].startswith("SECRET-KEY-"))
+        # ... and reaches REST only in the JSON body, never the query string.
+        self.assertEqual(opener.requests[0]["body"]["api_key"], "SECRET-KEY-triager")
+        self.assertNotIn("SECRET-KEY", opener.requests[0]["url"])
 
 
 if __name__ == "__main__":

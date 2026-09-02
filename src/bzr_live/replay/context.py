@@ -140,3 +140,12 @@ class ReplayContext:
     def rest(self, actor: Reference, bug_id: int, values: dict) -> object:
         return assign_bug_custom_fields(
             self._base_url, self.actor_key(actor), bug_id, values, opener=self._opener)
+
+    # --- invoking the boundary --------------------------------------------
+
+    def invoke(self, actor: Reference, invocation):
+        """Send a built invocation to the boundary its metadata names."""
+        if invocation.metadata.mutation_boundary == REST_BOUNDARY:
+            return self.rest(actor, invocation.target_id, dict(invocation.values))
+        return self.client(actor).write(
+            list(invocation.args), list(invocation.positionals) or None)

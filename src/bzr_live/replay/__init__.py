@@ -2,8 +2,9 @@
 
 from .actions import HANDLERS, ActionHandler, Invocation, Reconciliation
 from .context import ReplayContext, ReplayError
+from .engine import ReplayEngine
 
 __all__ = [
     "HANDLERS", "ActionHandler", "Invocation", "Reconciliation",
-    "ReplayContext", "ReplayError",
+    "ReplayContext", "ReplayEngine", "ReplayError",
 ]
