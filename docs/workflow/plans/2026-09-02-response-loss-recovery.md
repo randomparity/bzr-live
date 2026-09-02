@@ -21,7 +21,7 @@ Prior decision this proves: `docs/adr/0006-actor-scoped-event-replay.md`.
 
 Expected implementation size: 560–620 changed lines (M) — counted from this plan's own
 transcribed module: imports and the shared fixture base (~150), the parser and fault
-wrappers (~100), the double (~175), and the ten tests (~185). An earlier draft of this
+wrappers (~100), the double (~175), and the eleven tests (~195). An earlier draft of this
 line guessed 290–380 before the code was transcribed; the file map is what settles it.
 
 ## Global Constraints
@@ -292,6 +292,16 @@ class ReplayThroughTheDoubleTest(_Fixture):
             server(argv)
         self.assertIn("product view", str(caught.exception))
 
+    def test_an_unmodelled_switch_fails_loudly(self) -> None:
+        """A switch carries no "=", so a flags-only check would accept it silently."""
+        server = FakeBugzilla()
+        argv = ["bzr", "--json", "--server-url", "u", "--server-api-key-env", "K",
+                "--server-email", "a@b.test", "bug", "update", "--reset-assigned-to",
+                "--", "1"]
+        with self.assertRaises(AssertionError) as caught:
+            server(argv)
+        self.assertIn("reset-assigned-to", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -484,7 +494,13 @@ class FakeBugzilla:
 
     @staticmethod
     def _require_known(command: _Command, names) -> None:
-        unknown = set(command.flags) - set(names)
+        """Refuse every flag *and switch* the double does not model.
+
+        Switches count: `--private` (actions.py:456, :494) and `--reset-assigned-to`
+        (actions.py:385) carry no `=`, so a check reading command.flags alone would
+        accept them on a default reply -- the silence this method exists to prevent.
+        """
+        unknown = (set(command.flags) | set(command.switches)) - set(names)
         if unknown:
             raise AssertionError(
                 f"FakeBugzilla does not model {sorted(unknown)} on "
@@ -859,6 +875,17 @@ committed, `bug create` reconciles to `retry` (so `resume` reports `executed`, n
 `resumed`), and each append's marker count is 0 before the resume rather than 1. Then
 **revert the edit** and re-run to green. A case that still passes with the mutation
 suppressed is asserting nothing about recovery and must be strengthened before proceeding.
+
+Both mutations above perturb the harness, so neither shows the suite constraining the
+*engine*. Make one more controlled change, this time to the shipped code: in
+`src/bzr_live/replay/actions.py`, make `_append_result` return
+`Reconciliation("retry", output, {}, "forced")` on `count == 1`, so the engine re-sends an
+append whose commit reconciliation had confirmed. Re-run the command in 2.2 and expect
+exactly three failures — `test_bug_comment_is_never_appended_twice`,
+`test_bug_attach_is_never_uploaded_twice`, `test_bug_worktime_is_never_appended_twice` —
+with the other tests green. Then **revert `actions.py`** and confirm
+`git status --short -- src/` is empty before continuing. This is the mutation that proves
+the suite constrains the engine and not just its own injector.
 
 **2.4 — run the guardrails.**
 
