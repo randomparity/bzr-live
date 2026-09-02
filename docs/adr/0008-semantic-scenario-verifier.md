@@ -117,17 +117,28 @@ comment exists on the server; a marker absent from the *insider* read therefore 
 read path cannot see it, which is a fixture gap. Reporting that as a replay defect is the
 silent-substitution failure inverted — it would file a `bzr` finding that does not exist.
 
-**Two of the five read paths move off REST when that package lands**, not one.
-`get_comments_since` (`src/client/resources/comment.rs:62`), `get_attachments`
-(`attachment.rs:151`) and `get_attachment` (`attachment.rs:180`) all call
-`dispatch_xmlrpc_first`; `bug view`, `bug history` and `bug links` do not. So `comment
-list` and `attachment list` return one shape before the rebuild and another after, and
-every payload transcribed into a test fixture must be taken from the rebuilt image. The
-consequence with teeth is on `attachment list`: the REST arm requests
-`exclude_fields=data` (`attachment.rs:163`) while the XML-RPC arm asks for `data` in
-`ATTACHMENT_LIST_FIELDS` (`src/xmlrpc/resources/attachment.rs:12-27`). Before the rebuild
-every attachment checksum would be reported `unverifiable` for a missing `data` key —
-the design would look correct and assert nothing.
+**The package is necessary but not sufficient, and this ADR previously said otherwise.**
+Task 6 established the correction against source and live reply. `get_comments_since`
+(`src/client/resources/comment.rs:62`), `get_attachments` (`attachment.rs:151`) and
+`get_attachment` (`attachment.rs:180`) do call `dispatch_xmlrpc_first` — but that helper
+(`src/client/mod.rs:262-280`) branches on the **detected `api_mode`** and never consults
+`xmlrpc.cgi`. `version_to_api_mode` (`src/client/version.rs:119-140`) maps `>= 5.1` to
+`rest`, this fixture answers `5.2+`, and `ApiMode::Rest` calls the REST closure
+unconditionally. So installing `XMLRPC::Lite` makes `xmlrpc.cgi` answer without causing
+`bzr` to call it.
+
+Observed: `attachment list 1` returns no `data` key at the default mode and the same entry
+plus `data` under `--api hybrid`; `comment list`, `bug view`, `bug history` and `bug links`
+are byte-identical across the two. Recorded as finding **D9**.
+
+Two consequences follow. The attachment-checksum criterion and the private-comment
+visibility criterion are both unreachable at the auto-detected transport — the checksum
+would report `unverifiable` for a missing key, and the design would look correct while
+asserting nothing. And the choice of transport is now an explicit decision rather than an
+inherited default: `--api hybrid` is a supported `bzr` flag and the narrowest thing that
+makes both criteria reachable, but taking it is the operator's call, because it reverses a
+premise four design reviews read and it changes what every check family reads through.
+Until that decision is recorded, this ADR states the constraint rather than resolving it.
 
 The two modelled behaviours are premises, and they now fail differently from each other. If
 a future Bugzilla stops materialising the `blocks` inverse, `verify` fails loudly and names

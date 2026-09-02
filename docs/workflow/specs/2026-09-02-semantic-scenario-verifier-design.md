@@ -396,24 +396,34 @@ re-read `comment list` as the outsider and assert that private comment's marker 
 while every public marker on that bug is present. An unauthenticated read of bug 7 already
 shows the private comment withheld; the check proves it for a named non-insider actor.
 
-**This check needs XML-RPC in the fixture image.** `bzr` reads a comment thread through
-XML-RPC `Bug.comments` first and falls back to REST only on a transport error, because
-`src/client/resources/comment.rs:51-56` documents XML-RPC as the only path returning the
-full thread — a REST read of bug 7 returns the public comment alone, so the insider check
-above cannot see the declared private comment at all. The fixture answered `xmlrpc.cgi`
-with "The XML-RPC Interface feature is not available in this Bugzilla" because
-`containers/bugzilla/Dockerfile` installed `libsoap-lite-perl` and no `XMLRPC::Lite`;
-Bugzilla's `Bugzilla/Install/Requirements.pm:303-310` requires the two separately ("Since
+**This check needs XML-RPC in the fixture image, and that is not sufficient on its own.**
+`src/client/resources/comment.rs:51-56` documents XML-RPC `Bug.comments` as the only path
+returning the full thread, and a REST read of bug 7 returns the public comment alone — so
+the insider check above cannot see the declared private comment over REST.
+
+Two things had to be true, and only one of them was addressed first.
+
+The **fixture** had to answer `xmlrpc.cgi` at all. It did not: it returned "The XML-RPC
+Interface feature is not available in this Bugzilla" because
+`containers/bugzilla/Dockerfile` installed `libsoap-lite-perl` and no `XMLRPC::Lite`, which
+Bugzilla's `Bugzilla/Install/Requirements.pm:303-310` requires separately ("Since
 SOAP::Lite 1.0, XMLRPC::Lite is no longer included and so it must be checked separately").
 Adding `libxmlrpc-lite-perl` to that apt list is the fix, and it is a fixture fix rather
 than a client-side substitution, which is what `AGENTS.md` requires. Verified live on
-2026-09-02, after the rebuild: `perl -MXMLRPC::Lite` loads inside the container, and
-`xmlrpc.cgi` answers a `Bugzilla.version` call with `5.2+` where it previously returned the
-"feature is not available" HTML error. That the full thread then reads back as
-`is_private=true` for a named insider is proven by the live tier, not asserted here. The
-image
-rebuild `make up` performs is enough — `mariadb-data` and `bugzilla-data` are top-level
-volumes, so no reset and no data loss.
+2026-09-02 after the rebuild: `perl -MXMLRPC::Lite` loads inside the container, and
+`xmlrpc.cgi` answers a `Bugzilla.version` call with `5.2+` where it previously served the
+"feature is not available" HTML error behind a 200 status. The rebuild `make up` performs
+is enough — `mariadb-data` and `bugzilla-data` are top-level volumes, so no reset and no
+data loss.
+
+The **client** then had to call it, and by default it does not. `dispatch_xmlrpc_first`
+(`src/client/mod.rs:262-280`) branches on the detected `api_mode` rather than on whether
+`xmlrpc.cgi` responds, and `version_to_api_mode` (`src/client/version.rs:119-140`) maps
+`>= 5.1` to `rest`. A fixture reporting `5.2+` therefore selects `rest`, and the XML-RPC
+arm is unreachable — the very reply that proves the package is installed is what selects
+the transport that ignores it. Recorded as finding **D9**. `--api hybrid` restores the
+preference, and whether the verifier passes it is an open decision on issue #20; until it
+is settled this criterion is not reachable.
 
 ### 5. Attachments — `attachment list`
 
@@ -432,17 +442,22 @@ Located by `[<marker>]` in `summary`, exactly once. Assert:
   costs no extra call and no temporary file. When a reply carries no `data` the checksum is
   reported `unverifiable` naming that; nothing else is weakened.
 
-**This check depends on the same fixture package check 4 does.** `attachment list` is the
-second of the five read paths to prefer XML-RPC: `get_attachments` calls
-`dispatch_xmlrpc_first` (`bzr` `src/client/resources/attachment.rs:151`), as does
-`get_attachment` (`attachment.rs:180`). The two arms disagree about `data` specifically —
-the REST arm requests `exclude_fields=data` (`attachment.rs:163`), the XML-RPC arm asks
-for it in `ATTACHMENT_LIST_FIELDS` (`src/xmlrpc/resources/attachment.rs:12-27`). Against
-an image without `XMLRPC::Lite` every checksum therefore reports `unverifiable` for a
-missing key, which is a true report of a fixture gap and not a divergence — but it means
-the strongest assertion in this family is silently vacuous until the rebuild. It is not a
-precondition: unlike the private comment, a missing `data` key is already reported
-honestly, so a refusal would buy nothing check 4's refusal does not already buy.
+**The checksum depends on the transport, and not in the way this spec first said.**
+`get_attachments` calls `dispatch_xmlrpc_first` (`bzr`
+`src/client/resources/attachment.rs:151`), as does `get_attachment` (`attachment.rs:180`),
+and the two arms disagree about `data` specifically — the REST arm requests
+`exclude_fields=data` (`attachment.rs:163`), the XML-RPC arm asks for it in
+`ATTACHMENT_LIST_FIELDS` (`src/xmlrpc/resources/attachment.rs:12-27`). But
+`dispatch_xmlrpc_first` (`src/client/mod.rs:262-280`) selects on the detected `api_mode`,
+not on whether `xmlrpc.cgi` answers, and `version_to_api_mode`
+(`src/client/version.rs:119-140`) maps `>= 5.1` to `rest`. This fixture reports `5.2+`.
+
+So the XML-RPC arm is unreachable at the default transport however the image is built, and
+`attachment list` carries no `data` key: observed live, and recorded as finding **D9**.
+Under `--api hybrid` the same entry carries `data`, decoding to the declared
+`asset_sha256`. Which transport the verifier uses is an open decision recorded on issue
+#20; until it is settled, the strongest assertion in this family reports `unverifiable`
+for a missing key — an honest report of a real limitation, and a vacuous check.
 
 ### 6. Custom fields
 

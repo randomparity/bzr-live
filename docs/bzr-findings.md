@@ -34,6 +34,7 @@ already-filed one (D5).
 | [G6](#g6) | gap | `--permissive` is rejected for a single bug ID | — |
 | [G9](#g9) | design choice | `bug create --from-json` silently defaults an omitted `version` to `unspecified` | — |
 | [D6](#d6) | defect (fixed upstream) | `component view` reports `default_assignee: null` for a component Bugzilla says has one | fixed by `5fb99362` |
+| [D9](#d9) | defect | On Bugzilla >= 5.1 the auto-detected `rest` mode never takes the XML-RPC path `bzr` documents as the only one returning a full comment thread or attachment `data` | not filed |
 
 ---
 
@@ -313,3 +314,57 @@ declares `2.0.0`. `README.md` states the distinction. This entry is why
 `tests/smoke_scenario.sh` prints
 the `bzr` revision as its first line: the same scenario passes or fails on that revision
 alone, and an entry recorded against the wrong one would be a false report.
+
+## D9
+
+**On Bugzilla 5.1 and above, `bzr`'s auto-detected `rest` mode never takes the XML-RPC path
+its own source documents as the only one that returns a full comment thread or an
+attachment body.**
+*Read from source and confirmed live at `bzr 0.8.3-dev (63abb94e)` against this fixture
+(Bugzilla `5.2+`), 2026-09-02.*
+
+`get_comments_since` (`src/client/resources/comment.rs:62`) and `get_attachments`
+(`attachment.rs:151`) both call `dispatch_xmlrpc_first`, and both carry a doc comment saying
+XML-RPC is preferred because "Bugzilla 5.0.x REST silently filters private comments under
+API-key auth (issue #125), and the truncation is not reliably detectable from the REST
+response — XML-RPC is the only path that returns the full thread", with the same wording for
+attachments and issue #133.
+
+But `dispatch_xmlrpc_first` (`src/client/mod.rs:262-280`) does not consult `xmlrpc.cgi` at
+all. It branches on the detected `api_mode`:
+
+```rust
+match self.api_mode {
+    ApiMode::Rest => rest().await,
+    ApiMode::XmlRpc => xmlrpc().await,
+    ApiMode::Hybrid => match xmlrpc().await { /* fall back to REST on transport failure */ },
+}
+```
+
+and `version_to_api_mode` (`src/client/version.rs:119-140`) maps `< 5.0` to `xmlrpc`,
+`>= 5.0 < 5.1` to `hybrid`, and **`>= 5.1` to `rest`**. This fixture answers `5.2+`, so the
+mode is `rest` and the XML-RPC arm is unreachable — the preference those doc comments
+describe is disabled on exactly the versions where the REST reply is still lossy.
+
+**Observed.** `bzr --json attachment list 1` returns an entry whose keys are `id`, `bug_id`,
+`file_name`, `summary`, `content_type`, `creator`, `creation_time`, `last_change_time`,
+`size`, `is_obsolete`, `is_private`, `is_patch`, `flags` — and **no `data`**, because the
+REST arm requests `exclude_fields=data` (`attachment.rs:163`). The same command with
+`--api hybrid` returns the identical key set **plus `data`**, whose base64 body decodes to
+622 bytes matching the attachment's reported `size` and hashing to the declared
+`asset_sha256`. `comment list`, `bug view`, `bug history` and `bug links` are byte-identical
+across the two modes on this fixture, so the divergence is confined to `attachment list`.
+
+**Defect, not design choice.** The version mapping is deliberate and reasonable on its own;
+what makes this a defect is that the two call sites document XML-RPC as the *only* correct
+path for their data and then dispatch through a gate that silently excludes it. A caller
+gets a reply that is well-formed, successful, and quietly missing the field it asked about.
+`bzr`'s own `ATTACHMENT_FIELDS` doc comment states the consequence independently: "`data` is
+only populated by `attachment download`; selecting it on `attachment list` yields empty
+objects."
+
+**What the fixture does.** Nothing yet — the transport the verifier should use is an open
+decision for the operator, recorded on issue #20. `--api hybrid` is a supported `bzr` flag
+and is the narrowest thing that makes the chartered comment-visibility and
+attachment-checksum criteria reachable; the alternative is to report both `unverifiable`
+against this entry. Filing upstream is not authorized.

@@ -44,14 +44,21 @@ and `AGENTS.md`.
 - **Disposable fixture.** Owner-only file modes and keeping secrets out of output is the
   whole security bar. No encryption, rotation, or crash-consistency work.
 - **Insider group is `admin`**, from `containers/bugzilla/checksetup_answers.txt:31`.
-- **The live tier needs an image built with `libxmlrpc-lite-perl`** (Task 0). Without it
-  `bzr` cannot read a full comment thread. The verifier **refuses this as a precondition
-  naming the missing `XMLRPC::Lite`** rather than reporting a divergence: the journal
-  already proved the comment was written, so the read path is what cannot see it, and
-  calling that a divergence would file a `bzr` defect that does not exist.
-- **Every payload transcribed into a test fixture comes from the rebuilt image** (Task 0),
-  because `comment list` and `attachment list` return different shapes on either side of
-  that rebuild. See Task 0.
+- **The live tier needs an image built with `libxmlrpc-lite-perl`** (Task 0), and needs
+  `bzr` to actually take the XML-RPC path — see the transport constraint below, which the
+  package alone does not satisfy. Where a full comment thread cannot be read, the verifier
+  **refuses as a precondition naming the missing `XMLRPC::Lite`** rather than reporting a
+  divergence: the journal already proved the comment was written, so the read path is what
+  cannot see it, and calling that a divergence would file a `bzr` defect that does not
+  exist. That refusal message is accurate for a missing package and misleading for a
+  transport that was never attempted, so it needs revisiting once the transport decision
+  lands.
+- **`bzr` selects its transport from the server version, not from what the server offers.**
+  `>= 5.1` maps to `rest` and this fixture answers `5.2+`, so the XML-RPC arm of
+  `dispatch_xmlrpc_first` is unreachable at the default transport whatever the image
+  contains. The one observable consequence is that `attachment list` carries no `data` key,
+  which makes the checksum assertion vacuous. Finding **D9**; the transport decision is
+  open on issue #20. See Task 0.
 - **`LINKS_MAX_NODES` is 1000**, from `bzr` `src/types/bug/links.rs:13`.
 - **Every live observation and the live tier use `bzr 0.8.3-dev (63abb94e)`**, the revision
   `README.md` proves `make smoke` at. Anything below it is untested by this repository's
@@ -178,24 +185,36 @@ Run `make check`; expect green. `make check` validates `compose config` and does
 the image, so it neither proves nor is affected by this change — Task 7's live tier is
 where it is proven.
 
-**This task's `make up` gates every payload transcription in Tasks 4 and 6.** Two of the
-five read paths change shape when `xmlrpc.cgi` starts answering, because they prefer
-XML-RPC and fall back to REST only on a transport error: `get_comments_since`
-(`bzr` `src/client/resources/comment.rs:62`) and `get_attachments`
-(`attachment.rs:151`), with `get_attachment` (`attachment.rs:180`) the same for
-`attachment download`. `bug view`, `bug history` and `bug links` are REST either way and
-are unaffected. A payload transcribed before the rebuild is the REST shape, which the
-rebuilt fixture no longer returns — so Step 6.1 in particular must run after this task,
-not before.
+**This task does not, on its own, change any reply shape — and the plan said it would.**
+Task 6 established the correction. `get_comments_since` (`bzr`
+`src/client/resources/comment.rs:62`), `get_attachments` (`attachment.rs:151`) and
+`get_attachment` (`attachment.rs:180`) do call `dispatch_xmlrpc_first`, but that helper
+(`src/client/mod.rs:262-280`) selects on the detected `api_mode` and never asks whether
+`xmlrpc.cgi` responds:
 
-The consequence with teeth is `attachment list`. Its REST arm requests
-`exclude_fields=data` (`attachment.rs:163`); its XML-RPC arm names `data` in
-`ATTACHMENT_LIST_FIELDS` (`src/xmlrpc/resources/attachment.rs:12-27`). Before the rebuild
-the reply carries no `data` key at all, so every attachment checksum reports
-`unverifiable` — an honest report, but a vacuous one, and the whole point of check 5 is
-the checksum. A fixture transcribed from the REST reply would bake that vacuum into the
-unit tests, where nothing would ever expose it. After the rebuild, confirm with
-`bzr --json attachment list 1` that the entry carries `data` before transcribing it.
+```rust
+match self.api_mode {
+    ApiMode::Rest => rest().await,
+    ApiMode::XmlRpc => xmlrpc().await,
+    ApiMode::Hybrid => match xmlrpc().await { /* REST on transport failure */ },
+}
+```
+
+`version_to_api_mode` (`src/client/version.rs:119-140`) maps `>= 5.1` to `rest`, and this
+fixture answers `5.2+`. So making `xmlrpc.cgi` answer is exactly what confirms the version
+that selects the transport ignoring it. Observed: `attachment list 1` carries no `data` key
+at the default mode and the same entry plus `data` under `--api hybrid`; `comment list`,
+`bug view`, `bug history` and `bug links` are byte-identical across both. Recorded as
+finding **D9**.
+
+Two consequences. The sequencing constraint this section previously imposed on Step 6.1 is
+**void** at the default transport — nothing changes shape, so Tasks 4 and 5's transcriptions
+are unaffected either way, which their live reads confirmed. And the attachment checksum,
+the strongest assertion in check 5, is unreachable at the default transport: the reply has
+no `data` to hash, so it reports `unverifiable`. `--api hybrid` is the narrowest thing that
+makes it reachable and is a supported `bzr` flag, but adopting it changes what every check
+family reads through and reverses a premise the design reviews read — so it is an operator
+decision recorded on issue #20, not one this plan takes.
 
 Commit: `fix(containers): install XMLRPC::Lite so bzr can read comment threads`.
 
@@ -1495,15 +1514,14 @@ def check_attachments(bug: ExpectedBug, attachments: list,
 
 ### Step 6.1 — the failing tests
 
-**Transcribe these payloads only from an image rebuilt by Task 0.** Both commands here are
-the two of the five read paths that prefer XML-RPC (`comment.rs:62`, `attachment.rs:151`)
-and fall back to REST when `xmlrpc.cgi` is absent, so a reply taken before the rebuild is
-a shape the shipped fixture no longer returns. The `attachment list` difference is not
-cosmetic: the REST arm sets `exclude_fields=data` (`attachment.rs:163`) and the XML-RPC arm
-requests `data` (`src/xmlrpc/resources/attachment.rs:12-27`), so a pre-rebuild transcript
-would carry no `data` key and every checksum case below would silently become the
-`unverifiable` case. Confirm `data` is present in the transcribed entry before writing the
-fixture. This is the ordering constraint Task 0 states; it binds here.
+**Confirm the transcribed `attachment list` entry carries `data` before writing the
+fixture.** At the default transport it does not — see Task 0 and finding **D9**: `bzr`
+detects `rest` on this Bugzilla and never takes the XML-RPC arm, whose
+`ATTACHMENT_LIST_FIELDS` is what asks for `data`. `--api hybrid` restores it. **This task
+is blocked until the transport decision on issue #20 is settled**, because a fixture
+transcribed from the default reply bakes a vacuous checksum into the unit tests, where
+nothing would ever expose it. `comment list` is byte-identical across both transports, so
+its payloads may be transcribed now either way.
 
 Transcribe the payloads from live replies at implementation time, as Task 4 does:
 `bzr --json --server-url <base> comment list 1`, `... comment list 12`, and
