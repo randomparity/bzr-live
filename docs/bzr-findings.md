@@ -23,7 +23,7 @@ already-filed one (D5).
 |---|---|---|---|
 | [D1](#d1) | defect | A flag type name containing `-` is unparseable by `--flag` | [bzr#640](https://github.com/randomparity/bzr/issues/640) |
 | [G7](#g7) | design choice | An absent bug exits 4 with an API code, not 2 — `bzr` ADR 0015 forbids masking a server error | n/a |
-| [D3](#d3) | defect | `bug view` omits `groups`, `estimated_time` and `remaining_time` that Bugzilla returns | [bzr#641](https://github.com/randomparity/bzr/issues/641) |
+| [D3](#d3) | defect, **fixed** | `bug view` omits `groups`, `estimated_time` and `remaining_time` that Bugzilla returns | [bzr#641](https://github.com/randomparity/bzr/issues/641), closed by `a7f6ab70` |
 | [D4](#d4) | defect (unverified) | `bug create --from-json` `alias` silently no-ops where aliases are disabled | hold: unverified |
 | [D5](#d5) | defect | `rep_platform` is the wrong wire name; the field is `platform` | [bzr#621](https://github.com/randomparity/bzr/issues/621) |
 | [G1](#g1) | gap | `bug create --from-json` has no `estimated_time` / `remaining_time` | — |
@@ -103,8 +103,9 @@ rejected this" share an exit code, separable only by reading `api_code` off stde
 
 ## D3
 
-**`bug view` does not serialize `groups`, `estimated_time` or `remaining_time`.**
-*Read from source.*
+**`bug view` did not serialize `groups`, `estimated_time` or `remaining_time`.**
+*Read from source. Fixed upstream in `a7f6ab70`; the description below is of the defect as
+found, on `0.8.2`.*
 
 The `Bug` serializer (`src/types/bug.rs`) emits `id`, `summary`, `status`, `resolution`,
 `dupe_of`, `deadline`, `product`, `component`, `version`, `assigned_to`, `priority`,
@@ -118,8 +119,21 @@ the two time fields via `--estimated-time`/`--remaining-time` — so each is a *
 field: no caller can read back what it wrote, and no caller can compute an add/remove delta
 for `groups` from server state.
 
-**Upstream.** [bzr#641](https://github.com/randomparity/bzr/issues/641), filed as part of
-the conformance epic [bzr#616].
+**Upstream. Fixed.** [bzr#641](https://github.com/randomparity/bzr/issues/641), filed as
+part of the conformance epic [bzr#616], is closed by `a7f6ab70`
+(*fix(bug): expose group and time fields in bug views*, PR #646, branch
+`feat/bug-view-read-fields-641`). It adds `Groups`, `EstimatedTime` and `RemainingTime` to
+`BugField` (`src/types/bug/fields.rs`) and to the `Bug` serializer, so all three are
+readable through `bug view --fields` from that commit on. `a7f6ab70` is an ancestor of
+`63abb94e`, the revision `README.md` proves `make smoke` at, so the defect does not
+reproduce at any revision this repository supports. It still reproduces on the `0.8.2`
+release, which is what the homebrew binary is.
+
+**What still depends on the defect.** `src/bzr_live/verify/` asserts `groups` and
+`estimated_time` rather than waiving them, because it runs at the supported revision.
+`src/bzr_live/replay/actions.py` has **not** been revisited: it still refuses a declared
+`groups` set on `bug.update` and still treats the two time fields as never-confirming, per
+ADR 0006. Narrowing that is follow-up work, not part of issue #20.
 
 Related but distinct from that epic's own entries: entry 10 (bzr#623) covers
 `groups: []` being unexpressible on *create*, and [bzr#621](https://github.com/randomparity/bzr/issues/621)

@@ -17,9 +17,9 @@ invariants against live server state through the selected `bzr` binary — field
 actor attribution and ordering in history, relationship topology, comment visibility,
 attachment presence and asset checksums, and custom-field values.
 
-Non-goals, each owned elsewhere: the `scenarios/**` CI path filter (#21),
+Non-goals, each owned elsewhere: the `scenarios/**` CI path filter (#25),
 `timetrackinggroup` provisioning (#22), fault injection and checkpoint-restore proof
-(remaining epic #7 scope).
+(#24, merged as PR #26).
 
 ## Command surface
 
@@ -153,8 +153,13 @@ each observed live against `scenarios/smoke/` on 2026-09-02 with `bzr 0.8.2 (ae3
   declaration that omits the requestee removes it again — which is what the replay
   engine does, since `BugUpdateHandler.build` computes its delta against the live server
   value and would emit `--cc-remove=<requestee>`. A union taken at the end would instead
-  assert a member the replay had removed. PR #23 lists this as one of three
-  postconditions that are not the server's final state.
+  assert a member the replay had removed.
+
+  PR #23 lists this as one of three postconditions that are not the server's final state,
+  and the charter excludes asserting against it — so the running set is used **only** to
+  compute later deltas correctly, never as an assertion. It contributes no history
+  expectation, and check 1 compares `cc` by containment. On `pay-retry-loop`, whose CC is
+  entirely server-derived, the verifier therefore asserts nothing about CC at all.
 - **A `depends_on` edge materialises `blocks` on the other bug.** `bzr bug view 12` returns
   `blocks: [1, 15]` from edges declared on bugs 1 and 15. Both endpoints get the inverse.
 - **`dupe_of` has no stock inverse.** `bug view 1` returns no `duplicates` field; the edge
@@ -207,16 +212,46 @@ prevent.
 
 | Declared field | Status | Reason |
 |---|---|---|
-| `groups` | unverifiable | `bug view` neither serializes it nor accepts it in `--fields` (finding D3, confirmed live: `warning: ignoring unknown field(s): estimated_time, remaining_time, groups`) |
-| `estimated_hours` | unverifiable | same reply and same finding D3 |
-| `remaining_hours` | unverifiable | finding D3, and Bugzilla decrements it by logged work, so the declared value is not the final state (PR #23) |
+| `remaining_hours` | unverifiable | Bugzilla decrements it by logged work, so the declared value is not the final state; PR #23 handed this issue the explicit instruction not to assert against it |
 | work-time hours | unverifiable | Bugzilla gates time-tracking fields on `timetrackinggroup`, deferred to #22; the `bug.worktime` comment is still asserted |
 
-Three of the four fire on `scenarios/smoke/`. No event there declares a non-empty
-`groups`, so that row is unexercised by the shipped scenario and a green smoke run is not
-evidence about it. Only `bug.create` can raise it: `bzr bug update` refuses a `groups`
-change outright (`src/bzr_live/replay/actions.py:32-36`), so no such event ever reaches a
-completed journal record.
+**`groups` and `estimated_hours` are asserted, not waived.** An earlier draft of this
+design waived both under finding D3 — `bug view` omitting `groups`, `estimated_time` and
+`remaining_time` — on the strength of a live reply from `bzr 0.8.2 (ae39fbd8)`. That
+revision is below the floor this repository supports: `README.md` states `make smoke` is
+proven at `63abb94e` and to treat anything below it as untested, and `ae39fbd8` is an
+ancestor of `63abb94e`. In the range between them, `a7f6ab70` (*fix(bug): expose group and
+time fields in bug views*, `bzr` PR #646 on branch `feat/bug-view-read-fields-641`) closes
+`bzr#641`, the upstream issue D3 was filed as: it adds `Groups`, `EstimatedTime` and
+`RemainingTime` to `BugField` (`src/types/bug/fields.rs`) and to the `Bug` serializer.
+
+So D3 is fixed at the revision this fixture actually supports, and waiving the two fields
+would drop a chartered criterion — declared field values on every bug the scenario names —
+while recording a `bzr` gap that no longer exists. Recording a limit `bzr` has already
+removed is the inverse of `AGENTS.md`'s rule and every bit as misleading as routing around
+a real one. `estimated_hours` is declared by `estimate-double-charge` on
+`cart-double-charge`, so this is a live assertion on the shipped scenario, not a
+hypothetical one. `remaining_hours` stays unverifiable, but on PR #23's grounds alone —
+that reason is about Bugzilla, not `bzr`, and survives the fix untouched.
+
+**Every live observation in this design is taken at `bzr 0.8.3-dev (63abb94e)`**, and the
+live tier runs against that binary. This matters beyond D3: `5a6421b9` gave the REST
+attachment arm its `exclude_fields=data`, and `9ad5ceb2` changed duplicate-link decoding,
+both inside the same range — so a payload transcribed from `ae39fbd8` is evidence about a
+revision nothing here supports.
+
+`groups` remains unexercised by `scenarios/smoke/`, which declares none, so a green smoke
+run is not evidence about it either way; the fold and the field check handle it, and the
+first scenario that declares one is what proves it. Only `bug.create` can raise it: `bzr
+bug update` refuses a `groups` change outright
+(`src/bzr_live/replay/actions.py:32-36`), so no such event ever reaches a completed
+journal record.
+
+The fixture's **replay-side** handling of these three fields is unchanged and out of this
+issue's scope. `src/bzr_live/replay/actions.py` still refuses a `groups` update and still
+treats the two time fields as never-confirming, per ADR 0006 and D3's "What the fixture
+does". Narrowing that now would be a change to a dependency this issue reads rather than
+modifies; it is reported as follow-up work, not taken here.
 
 A second consequence of a group-restricted bug is recorded rather than handled. Such a bug
 is unreadable to the outsider role, and the reader passes `absent_codes=frozenset()`
@@ -242,11 +277,29 @@ returns all three (observed live).
 
 Compared: `summary`, `status`, `resolution`, `product`, `component`, `version`,
 `target_milestone`, `assigned_to` (declared actor's email), `dupe_of` (through
-`resolved_ids`), `keywords` (set), `cc` (set, per the fold above), `depends_on` and `blocks`
-(sets, through `resolved_ids`), each declared `cf_*` (scalar equality, multi-select as a
+`resolved_ids`), `keywords` (set), `cc` (set, **by containment** — see below),
+`depends_on` and `blocks`
+(sets, through `resolved_ids`), `groups` (set) and `estimated_time` where declared,
+each declared `cf_*` (scalar equality, multi-select as a
 set), and `flags` (a declared flag matches on `name`, `status`, and `requestee`; a declared
 `X` status requires no entry with that name, mirroring
 `src/bzr_live/replay/actions.py`'s reconciler).
+
+**`cc` is the one set compared by containment rather than equality**, and the reason is a
+charter exclusion rather than a technical one. PR #23 named three declared postconditions
+that are not the server's final state, and the third is a flag requestee landing on the CC
+list; the charter excludes asserting against all three. `pay-retry-loop` declares no `cc`
+at all, so its entire observed CC set is server-derived — asserting it by equality would
+turn that excluded postcondition into this design's own premise. Containment asserts what
+the scenario declared and stays silent about what the server added. The cost is that a
+spurious extra CC member goes unreported, which is the same trade this design already
+takes deliberately for history records and for injected comments.
+
+The fold still **models** the requestee joining CC (below). Modelling and asserting are
+different acts: the model is what makes a later `cc` declaration's delta match the one the
+replay engine computed against live server state, so dropping it would make the *history*
+expectation wrong on any scenario that declares `cc` after a flag. What the exclusion
+forbids is asserting the postcondition, and no assertion now rests on it.
 
 `status` and `resolution` are skipped for a bug carrying a declared `duplicate_of` that the
 scenario never gives an explicit status: Bugzilla sets `RESOLVED`/`DUPLICATE` itself

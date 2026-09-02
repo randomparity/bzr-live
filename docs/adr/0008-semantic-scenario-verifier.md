@@ -61,6 +61,21 @@ key and a search bound only.
 and the finding citation — and does not fail the run.** The report counts divergences and
 unverifiable claims separately; the exit status follows divergences alone.
 
+**Which `bzr` a claim is measured against is part of the claim.** Every live observation
+here is taken at `bzr 0.8.3-dev (63abb94e)`, the revision `README.md` proves `make smoke`
+at and below which it tells operators to treat the fixture as untested. An earlier draft
+measured against the `0.8.2 (ae39fbd8)` build on `PATH` and waived `groups` and
+`estimated_hours` under finding D3 — but `a7f6ab70` (`bzr` PR #646, closing `bzr#641`,
+the issue D3 was filed as) adds `Groups`, `EstimatedTime` and `RemainingTime` to
+`BugField` and to the `Bug` serializer, and it is an ancestor of `63abb94e`. Both fields
+are therefore **asserted**. `remaining_hours` stays unverifiable on PR #23's grounds — that
+Bugzilla decrements it — which is a statement about Bugzilla and survives the `bzr` fix.
+
+Recording a limitation `bzr` has already removed is the same failure as routing around one
+it still has: both put something in `docs/bzr-findings.md` that the code does not support,
+and both drop a chartered assertion. So a waiver carries the revision it was observed at,
+and a revision below the supported floor is not evidence for one.
+
 **Where the fixture cannot answer a `bzr` read, the fixture is fixed — not the
 assertion.** The comment-visibility criterion was unsatisfiable because `bzr` reads a
 thread through XML-RPC `Bug.comments` first (`src/client/resources/comment.rs:51-56`
@@ -114,11 +129,15 @@ consequence with teeth is on `attachment list`: the REST arm requests
 every attachment checksum would be reported `unverifiable` for a missing `data` key —
 the design would look correct and assert nothing.
 
-The two modelled behaviours are premises. If a future Bugzilla or `bzr` stops adding the
-flag requestee to CC, or stops materialising the `blocks` inverse, `verify` fails loudly
-and names the bug and field. That is the intended failure: the premise is recorded here
-with the live reply that established it, so the failure is diagnosable rather than
-mysterious.
+The two modelled behaviours are premises, and they now fail differently from each other. If
+a future Bugzilla stops materialising the `blocks` inverse, `verify` fails loudly and names
+the bug and field — the intended failure, diagnosable because the premise is recorded here
+with the live reply that established it. The flag-requestee-joins-CC premise is deliberately
+**not** assertable: the charter excludes it, so `cc` is compared by containment and the
+model is used only to compute later deltas. If Bugzilla stops adding the requestee, nothing
+on `pay-retry-loop` fails; the first scenario declaring `cc` after a flag is what would
+surface it, through the history check. That is the cost of honouring the exclusion, and it
+is recorded here rather than left for a reader to discover.
 
 Chain-linking has three defined non-answers — no ordering links (a divergence), more than
 one links (ambiguous), and a search too large to settle (oversized) — and the last two are
@@ -128,9 +147,10 @@ reported `unverifiable` rather than guessed. Verified on the live fixture: for b
 
 `unverifiable` not failing the run means a gap can be ignored by an operator who does not
 read the summary. The alternative is a permanently red gate, which gets suppressed
-instead of read. Three claims are unverifiable on `scenarios/smoke/` today, and a fourth
-(`groups`) whenever a scenario declares one; all four are already recorded as findings or
-deferred issues.
+instead of read. Two claims are unverifiable on `scenarios/smoke/` today — `remaining_hours`
+and the work-time hours — and both are already recorded as findings or deferred issues.
+That is down from four: retargeting the design at the supported `bzr` revision turned
+`groups` and `estimated_hours` into assertions.
 
 ## Considered & rejected
 
@@ -156,7 +176,16 @@ deferred issues.
   postcondition, and inventing an assertion the handoff excluded is scope this work does
   not own.
 - **Fail the run on an unverifiable claim.** judgment: turns `make smoke` permanently red
-  for four gaps already recorded, and a gate that is always red is a gate nobody reads.
+  for gaps already recorded, and a gate that is always red is a gate nobody reads.
+- **Keep waiving `groups` and `estimated_hours` under finding D3.** verified: D3's upstream
+  issue `bzr#641` is closed by `a7f6ab70`, an ancestor of the `63abb94e` revision
+  `README.md` proves `make smoke` at. Waiving them would drop a chartered criterion and
+  record a `bzr` gap that no longer exists.
+- **Assert `cc` by set equality.** verified: `pay-retry-loop` declares no `cc`, so its
+  observed set is entirely the flag requestee Bugzilla added — one of the three
+  postconditions PR #23 told this issue not to assert against. Containment honours the
+  exclusion; the fold keeps modelling the addition, because that model is what makes a
+  later `cc` declaration's delta match the replay engine's.
 - **Fetch attachment bytes with `bzr attachment download`.** verified: `bzr attachment
   list 1` already carries the body base64-encoded in `data` against this fixture, so the
   download adds a subprocess, a temporary directory, and a cleanup path for bytes already

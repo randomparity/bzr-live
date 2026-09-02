@@ -53,6 +53,20 @@ and `AGENTS.md`.
   because `comment list` and `attachment list` return different shapes on either side of
   that rebuild. See Task 0.
 - **`LINKS_MAX_NODES` is 1000**, from `bzr` `src/types/bug/links.rs:13`.
+- **Every live observation and the live tier use `bzr 0.8.3-dev (63abb94e)`**, the revision
+  `README.md` proves `make smoke` at. Anything below it is untested by this repository's
+  own statement, and the homebrew `bzr 0.8.2 (ae39fbd8)` on `PATH` is below it — an
+  earlier draft of this design was written from that binary and got finding D3 wrong as a
+  result. A release build already exists at
+  `/Users/dave/src/bzr/target/release/bzr`; pass it as `BZR_LIVE_BZR`. Confirm with
+  `bzr --version` before transcribing any payload — the script prints the revision as its
+  first line for exactly this reason.
+- **Finding D3 is fixed at that revision.** `a7f6ab70` (`bzr` PR #646, closing `bzr#641`)
+  adds `Groups`, `EstimatedTime` and `RemainingTime` to `BugField`
+  (`src/types/bug/fields.rs`) and to the `Bug` serializer, so `groups` and
+  `estimated_hours` are **asserted**, not waived. `remaining_hours` stays unverifiable on
+  PR #23's grounds alone. The replay side (`actions.py`, ADR 0006) is unchanged and out of
+  scope.
 - **Guardrails:** `make check` (bash -n, shellcheck, compileall, compose config) and
   `make test` (lifecycle shell tests plus
   `uv run --python 3.11 python -m unittest discover -s tests -v`). Both must be green
@@ -264,11 +278,13 @@ class FoldSmokeScenarioTest(unittest.TestCase):
         self.assertIn("status", bug.unasserted)
         self.assertIn("resolution", bug.unasserted)
 
-    def test_time_fields_are_classified_unverifiable(self) -> None:
+    def test_only_remaining_hours_and_worktime_are_unverifiable(self) -> None:
+        # estimated_hours is asserted, not waived: bzr a7f6ab70 exposes estimated_time in
+        # bug view, and README pins make smoke at 63abb94e, which contains it.
         bug = self.expected.bugs["cart-double-charge"]
         fields = {name for name, _ in bug.unverifiable}
-        self.assertEqual(fields, {"estimated_hours", "remaining_hours", "worktime"})
-        self.assertNotIn("estimated_time", bug.scalars)
+        self.assertEqual(fields, {"remaining_hours", "worktime"})
+        self.assertEqual(bug.scalars["estimated_time"], "8")
 
     def test_custom_fields_carry_their_cf_names(self) -> None:
         bug = self.expected.bugs["cart-double-charge"]
@@ -303,11 +319,13 @@ class FoldSmokeScenarioTest(unittest.TestCase):
             "96a330b23f0ebeb73d94721fce926b0b49daacfc448696af2f373afb30b49681")
         self.assertIn("[bzr-live:smoke:attach-triage-notes]", attachment.summary)
 
-    def test_flag_requestee_reaches_cc_and_its_history(self) -> None:
+    def test_flag_requestee_is_modelled_in_cc_but_never_asserted(self) -> None:
+        # The running set exists to make a later cc delta correct, not to assert the
+        # postcondition PR #23 excluded. So it holds the requestee, and no ExpectedChange
+        # and no equality assertion rests on it.
         bug = self.expected.bugs["pay-retry-loop"]
         self.assertEqual(bug.names["cc"], frozenset({"releaser@example.test"}))
-        added = [c.value for c in bug.history if c.field == "cc"]
-        self.assertEqual(added, [frozenset({"releaser@example.test"})])
+        self.assertEqual([c for c in bug.history if c.field == "cc"], [])
 
     def test_flags_fold_with_their_requestee(self) -> None:
         bug = self.expected.bugs["pay-retry-loop"]
@@ -494,18 +512,14 @@ INSIDER_GROUP = "admin"
 CHAIN_FIELDS = frozenset(
     {"status", "resolution", "assigned_to", "target_milestone", "summary"})
 
-# Declared field -> the reason bzr cannot read it back. Printed verbatim by the report.
+# Declared field -> the reason it cannot be asserted. Printed verbatim by the report.
+# 'groups' and 'estimated_hours' are NOT here: bzr a7f6ab70 (PR #646, closing bzr#641)
+# exposes both in bug view, and README pins make smoke at 63abb94e, which contains it.
+# Only remaining_hours survives, and on Bugzilla's behaviour rather than on any bzr gap.
 UNVERIFIABLE_FIELDS: Mapping[str, str] = {
-    "estimated_hours":
-        "bzr bug view neither serializes 'estimated_time' nor accepts it in --fields "
-        "(finding D3)",
     "remaining_hours":
-        "bzr bug view neither serializes 'remaining_time' nor accepts it in --fields "
-        "(finding D3), and Bugzilla decrements it by logged work, so the declared value "
-        "is not the fixture's final state",
-    "groups":
-        "bzr bug view neither serializes 'groups' nor accepts it in --fields "
-        "(finding D3)",
+        "Bugzilla decrements remaining_time by logged work, so the declared value is not "
+        "the fixture's final state; PR #23 excludes asserting against it",
 }
 WORKTIME_UNVERIFIABLE = (
     "Bugzilla gates time-tracking fields on timetrackinggroup (issue #22), so logged "
@@ -694,14 +708,16 @@ observed flag.
   `names["keywords"]`; seeds `edges` from declared `depends_on` / `blocks` **and their
   inverses on the other bug**; appends comment 0 with the declared description and
   `private=False`; records the create actor as `creator`. A non-empty declared `groups`
-  appends `("groups", UNVERIFIABLE_FIELDS["groups"])` to that bug's `unverifiable` list.
-  Create is the **only** path that rule can fire on, which is why it belongs here rather
-  than beside the `bug.update` unverifiables: `_UPDATE_UNSUPPORTED` refuses a `groups`
+  seeds `names["groups"]`, which `check_fields` compares as a set against the `groups`
+  key `bug view` returns at `a7f6ab70` or later; a declared `estimated_hours` seeds
+  `scalars["estimated_time"]`, and is the one of the two that `scenarios/smoke/`
+  exercises.
+  Create is the **only** path `groups` can arrive by:
+  `_UPDATE_UNSUPPORTED` refuses a `groups`
   update outright (`src/bzr_live/replay/actions.py:32-36`), so such an event never reaches a
   completed journal record and never reaches verify at all, while `_CREATE_UNSUPPORTED`
   (`actions.py:23-31`) does not refuse it and `BugCreateHandler.build` writes the declared
-  group names into the create document (`actions.py:312-314`). Without this rule the
-  `groups` row the spec's unverifiable table promises could never be emitted by anything.
+  group names into the create document (`actions.py:312-314`).
   It appends **no** history: Bugzilla writes no `bugs_activity` row for a creation.
 - **`bug.update`** for each declared key: a `_SCALARS` key sets `scalars[view_key]` and
   appends `ExpectedChange(actor, history_field, value, chain=True)`; `assignee` projects
@@ -729,8 +745,13 @@ observed flag.
   `ExpectedChange`: Bugzilla writes no `dupe_of` row, and `bug history 5` returns only
   `triager | resolution | '' -> 'DUPLICATE'` and
   `triager | status | 'CONFIRMED' -> 'RESOLVED'`. The duplicate edge is proven by
-  `check_links` and by the `dupe_of` field in `check_fields`. `estimated_hours` and `remaining_hours`
-  append to `unverifiable` from `UNVERIFIABLE_FIELDS` and touch nothing else. A declared
+  `check_links` and by the `dupe_of` field in `check_fields`. `estimated_hours` sets
+  `scalars["estimated_time"]` and appends **no** `ExpectedChange`: the field value is what
+  the criterion asks for and is now readable, while nothing here has observed how
+  `bug history` renders an `estimated_time` row, and inventing a rendering is how a
+  correctly replayed fixture gets reported as divergent. Containment tolerates the record
+  if Bugzilla writes one. `remaining_hours`
+  appends to `unverifiable` from `UNVERIFIABLE_FIELDS` and touches nothing else. A declared
   `status` with no declared `resolution` discards `scalars["resolution"]`, because
   Bugzilla clears it on a transition to an open status.
 - **`bug.comment`** appends
@@ -762,16 +783,20 @@ observed flag.
   declaring `cc` replaces the set and drops the requestee again, which is what the replay
   does, since `BugUpdateHandler.build` would compute `--cc-remove=<requestee>` against the
   server value. A union taken at the end would assert a member the replay had removed.
-  When the requestee was not already in the running set, also append
-  `ExpectedChange(actor, "cc", frozenset({requestee_email}), chain=False)`, matching the
-  observed record `'' -> 'releaser@example.test'` beside the flag. The value is a
-  **`frozenset`, not a bare string**, because `cc` is a `_NAME_SETS` field and
-  `check_history` splits every observed `cc` value on `", "` and compares sets. A bare
-  string here would be compared against a one-member set and never match — and it would
-  bite on `pay-retry-loop`, the bug ADR 0008 names as its modelled-premise case, so the
-  verifier's first live run would report a divergence against a correctly replayed
-  fixture. One representation per field, chosen by the field, is the rule; `ExpectedChange.value`
-  is `str | frozenset[str] | None` for exactly that reason.
+  It appends **no** `cc` `ExpectedChange`, and `check_fields` compares `cc` by containment
+  rather than equality (Task 3). PR #23 named the requestee landing on CC as one of three
+  postconditions that are not the server's final state, and the charter excludes asserting
+  against all three — so the running set exists **only** to make a later `cc` declaration's
+  delta match the one `BugUpdateHandler.build` computed against live server state. Model,
+  not assertion. Dropping the model instead would be the wrong cut: on any scenario that
+  declares `cc` after a flag, the fold's `added` set would then disagree with the server's
+  record and the *history* check would fail — which is precisely what
+  `tests/fixtures/verify-cc-order/` pins.
+
+  One representation per field, chosen by the field, remains the rule for the changes that
+  do get emitted: a `_NAME_SETS` change carries a `frozenset` because `check_history`
+  splits the observed value on `", "` and compares sets, which is why
+  `ExpectedChange.value` is `str | frozenset[str] | None`.
 
 `_reader` picks a role:
 
@@ -826,8 +851,10 @@ Run `uv run --python 3.11 python -m unittest tests.test_verify_expected -v`. Exp
 tests to pass. Then run `make check` and `make test`; expect both green.
 
 **Acceptance.** The fold is pure — `expected.py` imports nothing that performs I/O — every
-test above passes, and `test_time_fields_are_classified_unverifiable` proves no time field
-reached `scalars`.
+test above passes, `test_only_remaining_hours_and_worktime_are_unverifiable` proves
+`estimated_time` reached `scalars` while `remaining_hours` did not, and
+`test_flag_requestee_is_modelled_in_cc_but_never_asserted` proves the excluded
+postcondition is modelled without being asserted.
 
 Commit: `feat(verify): fold a scenario into its expected end state`.
 
@@ -890,7 +917,10 @@ Create `tests/test_verify_journal.py` with a fake `JournalStore` (a dict of
   replay;
 - the same on a bug whose fold declares no private comment → returns without raising even
   when a public marker is missing, because that case is check 4's divergence to report and
-  not a transport gap.
+  not a transport gap;
+- every precondition refusal reaching the CLI names the scenario path: drive `Verifier.run`
+  with an absent journal record and assert the message contains the scenario directory,
+  which issue #20's *Expected* section requires of every failure.
 
 Run the module; expect `ImportError` on `bzr_live.verify.observed`.
 
@@ -914,10 +944,12 @@ LINKS_MAX_NODES = 1000
 # The explicit field list every bug read requests. Without it `bzr bug view` omits every
 # cf_* field; with it, `bug view 1 --fields id,summary,cf_risk` returns them. Requesting
 # a field bzr does not know costs only a stderr warning, so the list stays declarative.
+# groups and estimated_time need bzr a7f6ab70 or later (PR #646, closing bzr#641); below
+# that they warn and are dropped, which is finding D3 and the reason README pins 63abb94e.
 VIEW_FIELDS = (
     "id", "summary", "status", "resolution", "dupe_of", "product", "component",
     "version", "assigned_to", "keywords", "blocks", "depends_on", "cc",
-    "target_milestone", "flags",
+    "target_milestone", "flags", "groups", "estimated_time",
 )
 
 
@@ -1056,11 +1088,31 @@ tests drive directly and Step 7.2 wires to the `comment list` read check 4 alrea
 It is the one precondition that follows a read: everything it discriminates on is in that
 reply, and the discrimination is only sound because `resolve_ids` ran first.
 
+**Every refusal names the scenario path.** Issue #20 requires failures to name the scenario
+path, the symbolic alias and the observed divergence, and the divergence report line
+already carries all three — but none of the `VerifyError` messages above does, and
+`__main__.py` prints only `f"{options.command} failed: {exc}"`. An operator reading a CI
+log would get `verify failed: event 'link-chain-cart' has no completed journal record
+under this state root` with no indication of which scenario. Rather than thread the path
+through four message strings, `Verifier.run` wraps the precondition block once:
+
+```python
+        try:
+            check_reader_keys(self._expected, self._context.keys)
+            resolved = resolve_ids(self._scenario, self._store)
+            check_link_bound(self._expected)
+        except VerifyError as exc:
+            raise VerifyError(f"{self._scenario_dir}: {exc}") from exc
+```
+
+with `check_comment_transport`'s call site inside the same handler. One place to get right,
+and `tests/test_verify_journal.py` asserts a refusal message contains the scenario path.
+
 Run `uv run --python 3.11 python -m unittest tests.test_verify_journal -v`; expect all
 tests to pass. Run `make check` and `make test`; expect green.
 
 **Acceptance.** No read path constructs an id from anything but `resolved_ids`, and each
-precondition failure names the event and what the operator must do.
+precondition failure names the scenario path, the event, and what the operator must do.
 
 Commit: `feat(verify): add the journal preconditions and the bzr read paths`.
 
@@ -1091,7 +1143,11 @@ bug 1 quoted in the spec, and cases:
 - a matching payload yields no findings;
 - a differing `status` yields one `divergence` whose detail names the declared and the
   observed value;
-- a `cc` set missing a declared member yields a divergence;
+- a `cc` set missing a declared member yields a divergence, while a `cc` set carrying an
+  **extra** member the scenario never declared yields none — `cc` is containment, and
+  `pay-retry-loop`'s server-added requestee is the case that must not fail;
+- a declared `groups` set missing a member yields a divergence, and a declared
+  `estimated_hours` differing from the observed `estimated_time` yields one;
 - an `assigned_to` differing from the declared actor's email yields a divergence;
 - `depends_on` containing an id whose alias is not the declared one yields a divergence
   naming aliases, never ids;
@@ -1109,7 +1165,13 @@ Compare in this order, appending at most one finding per key:
 
 1. every `bug.unverifiable` entry → `Finding("unverifiable", alias, field, reason)`;
 2. every `bug.scalars` key not in `bug.unasserted` → equality against `observed.get(key)`;
-3. every `bug.names` key → set equality against `set(observed.get(key) or ())`;
+3. every `bug.names` key → set equality against `set(observed.get(key) or ())`, **except
+   `cc`, which is containment**: `declared <= observed`. The charter excludes asserting
+   against the flag-requestee-joins-CC postcondition PR #23 named, and `pay-retry-loop`'s
+   whole CC set is server-derived, so equality there would assert exactly the excluded
+   thing. Containment reports a declared member the replay failed to write and stays
+   silent about a member the server added — the same trade check 2 and check 4 already
+   make;
 4. every `bug.edges` key → the observed ids mapped through `alias_of`, compared as a set
    of aliases; an id absent from `alias_of` renders as `bug id <n> (not named by this
    scenario)`;
