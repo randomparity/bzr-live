@@ -91,7 +91,7 @@ any replay step can be verified against it.
 **The findings register is not part of this task.** `docs/bzr-findings.md` is already complete
 and committed on this branch, and its entries have been checked against bzr's own ADRs and
 open issues, with bzr#640 and bzr#641 filed and cross-linked. Do **not** rewrite it from a
-description — that discards verified upstream work. Its set is D1, D3, D4, D5, G1–G9. There is
+description — that discards verified upstream work. Its set is D1, D3, D4, D5, G1–G7 and G9. There is
 no D2 (reclassified to G7 once bzr's accepted ADR 0015 turned out to govern it) and no G8:
 that entry charged bzr for the absent `--reset-dupe-of`, and the fixture's own Bugzilla image
 showed the constraint is Bugzilla's, so it was withdrawn. G9 (bzr's silent `"unspecified"`
