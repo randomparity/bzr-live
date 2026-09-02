@@ -32,17 +32,32 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
 ## Decision
 
 1. **Add `scenarios/**` to both workflows on both triggers**, and add
-   `tests/smoke_scenario.sh` to `container-lifecycle.yml`. Add nothing else: not `src/**`,
-   and not this change's own ADR, spec or plan. That workflow does name ADR 0005 and its
-   spec, but a prose edit to a record cannot change what the live job proves, and charging
-   it a full live run is the same cost this decision declines to pay for `src/**`.
+   `tests/smoke_scenario.sh` to `container-lifecycle.yml`. Add nothing else there: not
+   `src/**`, and not this change's own ADR, spec or plan. That workflow does name ADR 0005
+   and its spec, but a prose edit to a record cannot change what the live job proves, and
+   charging it a full live run is the same cost this decision declines to pay for `src/**`.
+   Its existing ADR-0005 entries stay — removing them would reduce gating and they are not
+   this change's to remove.
 
-2. **Extend the existing `x86_64-linux` job.** Three new steps: install `libdbus-1-dev` and
+2. **Replace `scenario-contract.yml`'s per-record enumeration with `docs/adr/**` and
+   `docs/workflow/**`.** That list names every earlier record individually and had already,
+   silently, missed all three of issue #20's — masked because `src/**` and `tests/**` kept
+   the job running on code changes, so it would have bitten on the first docs-only edit. An
+   enumeration extended by hand per record is a defect class, not a defect.
+
+   The two workflows get opposite treatment on purpose, and the difference is cost: gating
+   a two-minute Python job on every record is nearly free, so completeness wins there; the
+   live job compiles a second repository, so precision wins and no record gates it at all.
+
+   This **amends** ADR 0003's decision clause "the issue #3 ADR/spec/plan paths". It does
+   not supersede that record, whose other decisions still govern.
+
+3. **Extend the existing `x86_64-linux` job.** Three new steps: install `libdbus-1-dev` and
    compile `bzr` at a pinned revision, `make up`, and `BZR_LIVE_BZR=… make smoke`. The
    smoke step runs before `make checkpoint-smoke`, so `make smoke` meets its documented
    fresh-fixture precondition without depending on what another test leaves behind.
 
-3. **Obtain `bzr` with `cargo +1.89.0 install --git https://github.com/randomparity/bzr
+4. **Obtain `bzr` with `cargo +1.89.0 install --git https://github.com/randomparity/bzr
    --rev 63abb94e7e14a2db79efe0ddf0011a1f32ed8640 --locked bzr`**, into a prefix under
    `$RUNNER_TEMP`, after `rustup toolchain install 1.89.0` and an apt install of
    `libdbus-1-dev pkg-config`. Three things are pinned: the source revision `README.md`
@@ -51,14 +66,14 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
    `rust-version` name. Default features stay on, matching upstream's native x86_64 Linux
    build. The runner image supplies `cargo` and `rustup`; the job installs neither.
 
-4. **Put the whole sequence in `tests/smoke_scenario.sh`**, unconditionally, so `make smoke`
+5. **Put the whole sequence in `tests/smoke_scenario.sh`**, unconditionally, so `make smoke`
    is one path that CI and operators both run. The stages after `verify` are: save a
    checkpoint over the verified fixture, mutate it, restore, re-verify, resume. That script's
    state root is canonicalized at its `mktemp`, because `src/bzr_live/checkpoint.py:155-167`
    requires every path argument to equal its own `resolve()` and macOS `TMPDIR` sits under
    the `/var` → `/private/var` symlink — `tests/checkpoint_smoke.sh:5-6` already does this.
 
-5. **Mutate by rewriting one bug's `summary`** — the first `bug.create` the scenario
+6. **Mutate by rewriting one bug's `summary`** — the first `bug.create` the scenario
    declares, filed as its own actor. Every declared summary is in `bug.scalars`, which
    `src/bzr_live/verify/checks.py:70-73` compares against `bug view`, so a restore that
    silently did nothing leaves a divergence the re-verify must report. The bug is
@@ -67,8 +82,25 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
    pinned revision) where `bug view` declares `Vec<String>` and documents aliases
    (`view.rs:60-62`). That asymmetry is recorded as finding G10.
 
-6. **Name GitHub-hosted macOS runners as unavailable** for the arm64 live proof, and keep
+7. **Name GitHub-hosted macOS runners as unavailable** for the arm64 live proof, and keep
    that proof operator-run and recorded in `README.md`.
+
+8. **Refuse to run `tests/smoke_scenario.sh` under bash older than 4.3.** Issue #29 tracks a
+   status-masking `EXIT` trap in the sibling smoke scripts, and this script carries the same
+   `trap 'rm -rf "$STATE"' EXIT` shape. Measured on this host, the shape is not the problem
+   and the trap discipline is not the fix:
+
+   | case, `set -euo pipefail` | bash 3.2.57 | bash 5.3.15 |
+   |---|---|---|
+   | `trap 'rm -rf "$D"' EXIT; false` | exits 1 | exits 1 |
+   | `trap ':' EXIT; echo "$UNSET"` | **exits 0** | exits 1 |
+   | `cleanup(){ local s=$?; …; exit "$s"; }; echo "$UNSET"` | **exits 0** | exits 1 |
+
+   An ordinary `set -e` failure — which is every failure this script's stages produce —
+   propagates through the trap on both. Only a *fatal expansion error* loses its status, and
+   on bash 3.2 it is already 0 by the time any trap runs, so `tests/checkpoint_smoke.sh`'s
+   status-preserving `cleanup` pattern does not recover it either. The one thing that does
+   is not running on that interpreter, so the script says so and exits 1.
 
 ## Consequences
 
@@ -100,6 +132,16 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
   it is reverted by the restore, and the re-verify would fail if it were not.
 - `resume` over the restored journal is a cheap final assertion — every event reads back as
   already complete — so it costs one pass over the journal and no server mutation.
+- **`Scenario contract` now runs on every edit under `docs/adr/` or `docs/workflow/`**,
+  including records that have nothing to do with the scenario contract. That is the price of
+  ending the omission class, and it is a couple of minutes of a Python-only job.
+- **`make smoke` now refuses to run under macOS's `/bin/bash`.** An operator whose `PATH`
+  puts bash 3.2 first gets an actionable message instead of the run, where before they would
+  have got the run. On a fatal expansion error that run could have exited 0 having proved
+  nothing, so the refusal replaces a silent false pass rather than a working path.
+- The gate is only worth what its failure behaviour is worth, so this change is not done
+  until a controlled fault has been shown to fail it — see the specification's *Proving the
+  gate bites*. A green first CI run is not by itself evidence that the step can go red.
 
 ## Considered & rejected
 
@@ -145,6 +187,17 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
   none of the cost the live half carries. Rejected because issue #25's second Expected
   paragraph asks for the live x86_64 path in the same breath as the filters, and issue
   #7's guarantee is the half that has no evidence.
+- **Add issue #20's three records to `scenario-contract.yml` and keep the per-record
+  enumeration.** judgment: it fixes the instance and preserves the class. The list is
+  already twelve doc entries and has been missed once without anyone noticing; the next
+  record would depend on the same manual step that just failed.
+- **Fix the `EXIT` trap in `tests/smoke_scenario.sh` with the status-preserving `cleanup(){
+  local status=$?; …; exit "$status"; }` pattern `tests/checkpoint_smoke.sh:13-18` uses.**
+  verified: it does not fix the case it is aimed at. On bash 3.2.57 (macOS `/bin/bash`),
+  `set -euo pipefail; cleanup(){ local s=$?; :; exit "$s"; }; trap cleanup EXIT; echo
+  "$NOPE"` exits **0**, identically to the plain trap, because the status is already 0 when
+  the trap runs; the same command on bash 5.3.15 exits 1. Adopting the pattern here would
+  have looked like a fix and changed nothing.
 - **Run the live tier on a GitHub-hosted arm64 macOS runner.** verified: GitHub's
   runners reference states nested virtualization is unsupported on arm64 macOS runners
   (Apple Virtualization Framework), and container operations are Linux-only

@@ -29,7 +29,17 @@ and where the manual arm64 evidence lives.
 
 R5. `make smoke` remains a single command an operator runs, and CI runs that same command.
 
-R6. No stage substitutes a value the scenario did not declare. The one value this change
+R6. `scenario-contract.yml` gates every design record on both triggers, so no record can be
+omitted from it silently again — issue #20's ADR 0008, spec and plan are the omission that
+prompted this, and the enumerate-or-glob question is decided rather than deferred.
+
+R7. `tests/smoke_scenario.sh` cannot report success for a run that failed. Issue #29 owns the
+three sibling smoke scripts; this one is assessed and fixed here.
+
+R8. The new CI step is shown to fail when the thing it checks fails, by a controlled fault,
+and how that was shown is recorded.
+
+R9. No stage substitutes a value the scenario did not declare. The one value this change
 introduces — the mutation summary — is written to the fixture *after* the scenario's own
 verification has passed, and is reverted before the re-verify.
 
@@ -37,7 +47,17 @@ verification has passed, and is reverted before the re-verify.
 
 ### Path filters (R1)
 
-`scenario-contract.yml` gains one line, `- scenarios/**`, in each of its two `paths` lists.
+`scenario-contract.yml` gains `- scenarios/**` in each of its two `paths` lists, and its
+seven per-record entries in each list — ADR 0002, 0003 and 0006 with their specs and plans —
+collapse to two:
+
+    - docs/adr/**
+    - docs/workflow/**
+
+That is R6. The enumeration had already missed issue #20's ADR 0008, spec and plan in both
+lists; the omission was masked because `src/**` and `tests/**` are listed too, so PR #28 ran
+the job on its code changes and nobody saw the gap. ADR 0010 decision 2 records the choice
+and the ADR-0003 clause it amends.
 
 `container-lifecycle.yml` gains, in each of its two `paths` lists:
 
@@ -78,7 +98,28 @@ The smoke step precedes `make checkpoint-smoke` so that the fixture `make smoke`
 one `make up` just installed, which is the fresh-fixture precondition `README.md:189-191`
 states. `CONFIRM_CLEAN=1 make clean` already runs `if: always()` and removes the volumes.
 
-### Script stages (R2, R5, R6)
+### Interpreter guard (R7)
+
+`tests/smoke_scenario.sh` carries the same `trap 'rm -rf "$STATE"' EXIT` shape issue #29
+tracks, and measurement says the shape is not the defect: an ordinary command failure — what
+every stage here produces — propagates through it on both bash 3.2 and 5.3. Only a fatal
+expansion error loses its status, only on bash 3.2, and only because `$?` is already 0 before
+any trap runs, which is why `tests/checkpoint_smoke.sh:13-18`'s status-preserving pattern does
+not fix it either. ADR 0010 decision 8 carries the measurements. The script therefore refuses
+bash older than 4.3 with an actionable message. Nothing else changes: it holds no negative
+subscript and no other bash-4-only construct, so it does not carry issue #29's actual bug.
+
+### Proving the gate bites (R8)
+
+A gate is worth what its failure behaviour is worth, and neither a green local run nor a
+green first CI run shows that this step can go red. The proof is a controlled fault: comment
+out the `scripts/checkpoint restore` call so the probe summary is never reverted, run
+`make smoke`, and require it to exit non-zero with the re-verify reporting a `summary`
+divergence on the probe bug — then restore the line and re-run to green. That fault targets
+the one stage whose failure is otherwise indistinguishable from success, since a restore that
+reverts nothing leaves a fixture that still looks replayed.
+
+### Script stages (R2, R5, R9)
 
 `tests/smoke_scenario.sh` gains six stages after the existing verify stage — R2's five,
 plus the `bug view` that resolves the mutation target's numeric id. They run in the
@@ -96,7 +137,7 @@ trap.
   alias and take the numeric `id` from the reply. `bug update` accepts `Vec<u64>` only
   (finding G10), so the alias cannot address the mutation even though it addresses this read.
 - **mutate** — send `bug update --summary=<probe text> -- <id>` as that actor with
-  `--server-api-key-env`. ADR 0010 decision 5 records why the summary is the field chosen.
+  `--server-api-key-env`. ADR 0010 decision 6 records why the summary is the field chosen.
 - **read back** — `bug view` the same alias again and require the observed summary to equal
   the probe text, so a restore that reverts nothing cannot be mistaken for one that did.
 - **restore** — `scripts/checkpoint restore smoke` with the same store and runner state.

@@ -14,9 +14,11 @@ the pinned revision, because `make check` reads no YAML.
 **Tech stack.** Bash (`set -euo pipefail`), Python 3.11 under `uv` with no runtime
 dependencies, GitHub Actions, Docker Compose, `cargo` on the runner.
 
-Expected implementation size: 290–330 changed lines (M) — summed from the embedded blocks
-below: 6 lines of path entries, ~28 lines of job steps, ~90 lines of shell stages, ~145
-lines of new test, ~35 lines of README. The `effort:S` label on issue #25 sized the two
+Expected implementation size: 320–360 changed lines (M) — summed from the embedded blocks
+below: ~24 changed lines of path entries across both workflows (the offline enumeration is
+replaced, not appended to), ~28 lines of job steps, ~100 lines of shell (the stages, the
+state-root canonicalization and the interpreter guard), ~156 lines of new test, ~35 lines of
+README. The `effort:S` label on issue #25 sized the two
 workflow edits; the test file and the script stages are what put it in M.
 
 Spec: [`docs/workflow/specs/2026-09-02-ci-scenario-gate-design.md`](../specs/2026-09-02-ci-scenario-gate-design.md).
@@ -160,6 +162,20 @@ class ScenarioTreeIsGated(unittest.TestCase):
             self.assertIn("tests/smoke_scenario.sh", entries, trigger)
         self.assertTrue((ROOT / "tests/smoke_scenario.sh").is_file())
 
+    def test_the_offline_workflow_gates_records_by_glob_not_by_name(self) -> None:
+        """The per-record enumeration this replaces had already missed all three of
+        issue #20's records, in both lists, without anyone noticing -- `src/**` and
+        `tests/**` kept the job running on code changes and masked it. A single
+        re-added named record would be the class coming back, so it fails here."""
+        for trigger, entries in path_filters(
+                WORKFLOWS / "scenario-contract.yml").items():
+            self.assertIn("docs/adr/**", entries, trigger)
+            self.assertIn("docs/workflow/**", entries, trigger)
+            named = [entry for entry in entries
+                     if entry.startswith(("docs/adr/", "docs/workflow/"))
+                     and entry.endswith(".md")]
+            self.assertEqual(named, [], f"{trigger}: enumerated records are back")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -172,15 +188,29 @@ Run:
     uv run --python 3.11 python -m unittest tests.test_ci_workflow_gates -v
 
 Expect `test_no_tabs_and_every_indent_is_even` and
-`test_the_parse_sees_the_filters_it_is_asked_about` to pass, and the other two to fail,
+`test_the_parse_sees_the_filters_it_is_asked_about` to pass, and the other three to fail,
 each naming the workflow and trigger whose list lacks the entry. A failure in the parse
 guard means the parse is wrong, not the workflow — fix the parse before continuing.
 
 ### Step 1.3 — add the entries
 
-In `.github/workflows/scenario-contract.yml`, append `      - scenarios/**` to the
-`pull_request` `paths:` list (after the last `docs/workflow/plans/…` entry, currently
-line 18) and to the `push` `paths:` list (after the last entry, currently line 34).
+In `.github/workflows/scenario-contract.yml`, in **each** of the two `paths:` lists, replace
+the seven per-record entries (currently lines 12-18 and 28-34: ADR 0002, ADR 0003, the two
+2026-08-29 versioned-scenario-contract records, ADR 0006, and the two 2026-09-01
+replay-actor-scoped-events records) with two globs, and append `scenarios/**`. Each list then
+ends:
+
+```yaml
+      - src/**
+      - tests/**
+      - "!tests/lifecycle_test.sh"
+      - docs/adr/**
+      - docs/workflow/**
+      - scenarios/**
+```
+
+Do both lists. The omission this closes — issue #20's ADR 0008, spec and plan — is present in
+both, and fixing one reproduces it on the other.
 
 In `.github/workflows/container-lifecycle.yml`, append these two lines to the
 `pull_request` `paths:` list (after `tests/test_checkpoint.py`, currently line 20) and the
@@ -199,19 +229,20 @@ decision 1 records why, and departs from the ADR-0005 precedent in the same file
 
     uv run --python 3.11 python -m unittest tests.test_ci_workflow_gates -v
 
-Expect `OK` and four tests run.
+Expect `OK` and five tests run.
 
 ### Step 1.5 — guardrails and commit
 
     make check
     make test
 
-Expect `make check` silent and exit 0, and `make test` to end `OK` with four more tests
+Expect `make check` silent and exit 0, and `make test` to end `OK` with five more tests
 than the 382 that ran before this change. Commit as
 `ci: gate the scenarios tree in both workflows`.
 
-**Acceptance criteria.** Both workflows name `scenarios/**` under both triggers; the live
-workflow also names `tests/smoke_scenario.sh`; `tests/test_ci_workflow_gates.py` fails if
+**Acceptance criteria.** Both workflows name `scenarios/**` under both triggers; the
+offline workflow gates records by glob and names none individually, so issue #20's three
+records are covered; the live workflow also names `tests/smoke_scenario.sh`; `tests/test_ci_workflow_gates.py` fails if
 either entry is later removed, if a workflow line grows a tab, or if any indent turns odd.
 
 ## Task 2 — prove the checkpoint round trip inside the smoke run
@@ -223,10 +254,31 @@ either entry is later removed, if a workflow line grows a tab, or if any indent 
 `$BASE_URL`, and `elapsed_since <start-ns>` defined at line 79. Provides nothing to later
 tasks except the stages themselves, which Task 3's job step invokes through `make smoke`.
 
-### Step 2.1 — canonicalize the state root, then append the stages
+### Step 2.1 — guard the interpreter, canonicalize the state root, then append the stages
 
-First, in `tests/smoke_scenario.sh`, insert one assignment between the existing `STATE=$(mktemp
--d …)` at line 20 and the `trap 'rm -rf "$STATE"' EXIT` at line 21, so it reads:
+First, in `tests/smoke_scenario.sh`, insert this immediately after `set -euo pipefail`
+(line 14), before the `ROOT=` assignment:
+
+```bash
+# Issue #29 tracks a status-masking EXIT trap in the sibling smoke scripts, and this script
+# has the same `trap 'rm -rf "$STATE"' EXIT` shape -- but measured on bash 3.2.57 and 5.3.15,
+# the shape is not the defect and no trap discipline is the fix. An ordinary `set -e` failure,
+# which is what every stage below produces, propagates through that trap on both. A *fatal
+# expansion error* does not: on 3.2, `set -euo pipefail; trap ':' EXIT; echo "$NOPE"` exits 0,
+# and so does the status-preserving `cleanup(){ local s=$?; ...; exit "$s"; }` pattern
+# tests/checkpoint_smoke.sh:13-18 uses, because $? is already 0 when the trap runs. bash 5.3
+# exits 1 for the same input. macOS still ships 3.2 as /bin/bash, so refuse it: a live proof
+# that can exit 0 while failing is worse than one that does not run.
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+  echo "smoke scenario: needs bash >= 4.3, found ${BASH_VERSION}." >&2
+  echo "  On bash 3.2 a fatal expansion error exits 0, so a failed run would look green." >&2
+  echo "  Install a newer bash (brew install bash) and put it ahead of /bin/bash." >&2
+  exit 1
+fi
+```
+
+Then insert one assignment between the existing `STATE=$(mktemp -d …)` at line 20 and the
+`trap 'rm -rf "$STATE"' EXIT` at line 21, so it reads:
 
 ```bash
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-smoke-scenario.XXXXXX")
@@ -296,7 +348,7 @@ PROBE_ID=$(probe_view | probe_field id)
 # A summary the scenario does not declare, written only after the scenario's own
 # verification has passed and reverted by the restore below. `summary` is the field because
 # every declared summary is one of the scalars compared against `bug view`
-# (src/bzr_live/verify/checks.py:70-73); ADR 0010 decision 5 records why, and which
+# (src/bzr_live/verify/checks.py:70-73); ADR 0010 decision 6 records why, and which
 # alternatives verify would not have caught.
 PROBE_SUMMARY="checkpoint probe: not the summary $PROBE_ALIAS declares"
 echo "smoke scenario: mutating $PROBE_ALIAS (bug $PROBE_ID) as $PROBE_ACTOR"
@@ -358,12 +410,31 @@ a `summary` divergence on `$PROBE_ALIAS` at the re-verify means the restore did 
 the probe, and a mode-0700 complaint from `verify` or `resume` means it did not preserve the
 runner tree's modes. Record either in the pull request.
 
-### Step 2.4 — commit
+### Step 2.4 — prove the gate bites
+
+A green run does not show the new stages can go red, and the restore is the stage whose
+failure is otherwise indistinguishable from success: a restore that reverts nothing leaves a
+fixture that still looks replayed. Make one controlled fault, observe red, revert it.
+
+Comment out the single `scripts/checkpoint restore smoke …` line, then:
+
+    BZR_LIVE_BZR=/Users/dave/src/bzr/target/release/bzr make smoke
+
+Expect exit 1, with the re-verify printing a `summary` divergence naming the probe bug's
+alias and the summary the scenario declares against the probe text. Record the exact finding
+line — it is the evidence for R8.
+
+Restore the line and re-run the same command; expect `smoke scenario: OK` and exit 0 again.
+Do not commit with the line commented out; `git diff` must be empty of that change before
+Step 2.5.
+
+### Step 2.5 — commit
 
 Commit as `test(smoke): prove the checkpoint round trip against the verified fixture`.
 
 **Acceptance criteria.** `make smoke` runs R2's eight stages plus the two reads around the
-mutation in one invocation and exits 0;
+mutation in one invocation and exits 0; a commented-out restore makes it exit 1 at the re-verify with
+a `summary` divergence, and the observed line is recorded;
 each stage is bare, so any failure fails the script; the mutation is reverted before the
 run ends; `make check` is green.
 
@@ -477,7 +548,7 @@ whatever `make checkpoint-smoke` leaves behind.
 
     uv run --python 3.11 python -m unittest tests.test_ci_workflow_gates -v
 
-Expect `OK` and six tests run.
+Expect `OK` and seven tests run.
 
 ### Step 3.5 — update README.md
 
@@ -505,13 +576,14 @@ In the "Smoke scenario" section:
     make check
     make test
 
-Expect both green, with `make test` reporting six more tests than the 382 on `main`.
+Expect both green, with `make test` reporting seven more tests than the 382 on `main`.
 Commit as `ci: run the live scenario smoke path in the x86_64 job`.
 
 ### Step 3.7 — measure the CI run
 
-After the pull request opens, read the `Container lifecycle / x86_64-linux` job's total
-duration and each new step's duration from the run summary, and record them in the pull
+After the pull request opens, state in the pull-request body how the gate was proven to bite
+(Step 2.4's controlled fault, with the divergence line it produced), then read the
+`Container lifecycle / x86_64-linux` job's total duration and each new step's duration from the run summary, and record them in the pull
 request body against the 45-minute budget and the 3.5-5.8 minute pre-change baseline.
 
 Never raise `timeout-minutes`: the 45-minute budget is issue #25's stated constraint. If
