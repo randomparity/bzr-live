@@ -354,8 +354,17 @@ describe is disabled on exactly the versions where the REST reply is still lossy
 REST arm requests `exclude_fields=data` (`attachment.rs:163`). The same command with
 `--api hybrid` returns the identical key set **plus `data`**, whose base64 body decodes to
 622 bytes matching the attachment's reported `size` and hashing to the declared
-`asset_sha256`. `comment list`, `bug view`, `bug history` and `bug links` are byte-identical
-across the two modes on this fixture, so the divergence is confined to `attachment list`.
+`asset_sha256`.
+
+`bug view`, `bug history` and `bug links` are byte-identical across the two modes on this
+fixture. `comment list` is byte-identical **only on a thread carrying no private comment**
+— bug 1's five-entry thread is, byte for byte. On a thread that does carry one the two
+modes differ, and that is [D8](#d8) compounding this entry rather than a second observation
+of it: reading bug 7 as the insider `admin-ops@example.test` with that actor's own valid
+key, the default `rest` mode omits the declared private comment, while `--api hybrid`
+returns it with `is_private: true`. So the divergence is not confined to `attachment list`;
+it is confined to the two reads whose doc comments name XML-RPC as their only correct path,
+which is exactly the pair this entry is about.
 
 **Defect, not design choice.** The version mapping is deliberate and reasonable on its own;
 what makes this a defect is that the two call sites document XML-RPC as the *only* correct
@@ -365,11 +374,28 @@ gets a reply that is well-formed, successful, and quietly missing the field it a
 only populated by `attachment download`; selecting it on `attachment list` yields empty
 objects."
 
-**What the fixture does.** Nothing yet — the transport the verifier should use is an open
-decision for the operator, recorded on issue #20. `--api hybrid` is a supported `bzr` flag
-and is the narrowest thing that makes the chartered comment-visibility and
-attachment-checksum criteria reachable; the alternative is to report both `unverifiable`
-against this entry. Filing upstream is not authorized.
+**What the fixture does.** The verifier passes `--api hybrid` on its `comment list` and
+`attachment list` reads and on no others (`src/bzr_live/verify/observed.py`), under an
+operator decision taken on 2026-09-02. This is not a workaround and not a substitution:
+`--api hybrid` is `bzr`'s own documented setting for this case. Its `--api` help text says
+that under `hybrid` "comments and attachments use XML-RPC first to preserve private-data
+behavior", and that the auto-detected default is "`hybrid` for 5.0.x, `rest` for >= 5.1".
+The flag configures the client for the data being read; it injects no value the scenario
+did not declare and swaps no command for another. Without it the chartered
+comment-visibility and attachment-checksum criteria are both unreachable and would have to
+be reported `unverifiable` against this entry.
+
+The three reads that keep the default do so because they are byte-identical across the two
+modes, as measured above — the records should not be read as saying every read changed.
+
+**The package and the flag are both necessary and neither is sufficient.**
+`containers/bugzilla/Dockerfile` installs `libxmlrpc-lite-perl` for this same pair of
+reads: `--api hybrid` makes `bzr` *attempt* XML-RPC, and the package makes the fixture
+*answer* it. With the flag and no package, `dispatch_xmlrpc_first`'s hybrid arm falls back
+to REST on the transport failure and the data is lost again — which is what
+`check_comment_transport` (`src/bzr_live/verify/runner.py`) refuses on, naming the package.
+
+Filing upstream on `randomparity/bzr` is not authorized; this entry is the record.
 
 ## D7
 
@@ -455,6 +481,29 @@ So the comment is on the server and visible to a properly authenticated insider,
 preferred transport is the one that does not see it. Writes are unaffected: they draw a 401,
 which triggers `bzr`'s alternate-auth retry, which is why the replay works at all.
 
+**Second observed consequence: `bug view` withholds the time-tracking fields.** Found by the
+first live run of the verify stage (`make smoke`, 2026-09-02, `bzr 0.8.3-dev (63abb94e)`),
+which reported `cart-double-charge: estimated_time: declared 8, observed (absent)`. Bugzilla
+gates `estimated_time` and `remaining_time` on the `timetrackinggroup` parameter, which this
+image sets to `editbugs` (read back from the container). `admin-ops` holds `editbugs`, but
+the read is anonymous, so the fields are withheld. With that actor's own valid key:
+
+| Path | `estimated_time` |
+|---|---|
+| `bzr bug view 1 --fields=id,estimated_time` (default) | **absent** |
+| `bzr --api hybrid bug view 1 --fields=id,estimated_time` | **absent** |
+| `bzr --api xmlrpc bug view 1 --fields=id,estimated_time` | `8.0` |
+| `GET /rest/bug/1?Bugzilla_api_key=...&include_fields=estimated_time` | `8` |
+
+`--api hybrid` does not help here and is not expected to: `bzr --help` says that under
+`hybrid` "bug search/view is generally REST-first with targeted XML-RPC fallback", so
+`bug view` stays on REST. This is why the verifier waives `estimated_hours` — see
+`UNVERIFIABLE_FIELDS` in `src/bzr_live/verify/expected.py` — rather than reporting a
+divergence against a server that holds the declared value. Moving `bug view` to
+`--api xmlrpc` would read it; that is a transport change the operator has not authorized
+and one that would invalidate the REST reply shapes ADR 0008 verified, so it is reported
+here and not taken.
+
 **Class: defect** — the probe's success signal does not discriminate, and it overrides a
 server response that was correct.
 
@@ -469,3 +518,6 @@ should". That mitigation is **false**, and [D9](#d9) is why: on this fixture `bz
 unless `--api hybrid` is passed. D8 and D9 compound — one makes REST reads anonymous, the
 other makes REST the only transport — and together they are what put the comment-visibility
 criterion out of reach at the default transport.
+
+The `bug view` consequence above is D8 acting alone: `bug view` is REST under both `rest`
+and `hybrid`, so D9's transport gate does not enter into it.

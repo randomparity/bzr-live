@@ -1517,11 +1517,16 @@ def check_attachments(bug: ExpectedBug, attachments: list,
 **Confirm the transcribed `attachment list` entry carries `data` before writing the
 fixture.** At the default transport it does not — see Task 0 and finding **D9**: `bzr`
 detects `rest` on this Bugzilla and never takes the XML-RPC arm, whose
-`ATTACHMENT_LIST_FIELDS` is what asks for `data`. `--api hybrid` restores it. **This task
-is blocked until the transport decision on issue #20 is settled**, because a fixture
+`ATTACHMENT_LIST_FIELDS` is what asks for `data`. `--api hybrid` restores it. This task was
+blocked until the transport decision on issue #20 was settled, because a fixture
 transcribed from the default reply bakes a vacuous checksum into the unit tests, where
-nothing would ever expose it. `comment list` is byte-identical across both transports, so
-its payloads may be transcribed now either way.
+nothing would ever expose it.
+
+**Settled 2026-09-02:** the operator authorized `--api hybrid` on the verifier's reads, so
+`ServerReader.comments` and `ServerReader.attachments` carry it and the payloads below are
+transcribed from replies read with it. `comment list` is byte-identical across the two
+transports on a thread with no private comment, which every payload transcribed here is;
+D9 records where it is not.
 
 Transcribe the payloads from live replies at implementation time, as Task 4 does:
 `bzr --json --server-url <base> comment list 1`, `... comment list 12`, and
@@ -1626,8 +1631,16 @@ against a **login** that `bzr` returned. Nothing else in their arguments can bri
 two. The signature blocks above originally omitted the parameter while the prose beside
 them required the projection; Tasks 3 and 4 each hit that and added it.
 
-Three reads are conditional, and every condition comes from the fold rather than from a
-reply, so nothing is skipped on the strength of what the server happened to return:
+**Amended at implementation time: there are four conditional reads, not three.** The
+outsider `comment list` is the fourth. This section treated the outsider reader as one
+scenario-level decision ("when a private comment exists"), but building the reader is free
+— it opens no connection — and the read it issues is per bug, so the condition belongs
+beside the other three: the outsider read and `check_visibility` run only for a bug whose
+fold declares at least one private comment. On `scenarios/smoke/` that is one bug of
+twenty, and it is the largest of the four skips after the attachment one.
+
+Every condition comes from the fold rather than from a reply, so nothing is skipped on the
+strength of what the server happened to return:
 
 - `attachments` runs only for a bug the fold gives at least one attachment — two of the
   smoke scenario's twenty;
@@ -1648,13 +1661,18 @@ reply, so nothing is skipped on the strength of what the server happened to retu
   containment holds vacuously and the ordering guard's second clause never fires: the
   family executes, costs a spawn, and evaluates no expectation. Skipping it is what keeps
   `<n>` honest, since the summary's whole claim is that an executed family asserted
-  something. This is the second-largest of the three skips, not the largest — the
-  attachment skip is, at eighteen bugs.
+  something. This skips fourteen bugs; the attachment skip is the largest at eighteen, and
+  the outsider skip sits between them at nineteen.
 
-The `links` read stays unconditional and is not a fourth candidate: its direct-edge check
+- the outsider `comment list` runs only for a bug whose fold declares at least one private
+  comment — **one** of the smoke scenario's twenty, `pay-token-leak` — and only when the
+  scenario declares an actor outside the insider group at all. With no outsider declared,
+  `check_roles` reports the family unverifiable and no read is issued for it.
+
+The `links` read stays unconditional and is not a fifth candidate: its direct-edge check
 reports an observed edge the scenario never declared, so it bites on a bug whose fold
 declares no edges at all. Each read is a process spawn plus an HTTP round trip, so all
-three skips are worth having on a twenty-bug scenario. No latency figure is published here: Task 7.4 measures the stage on
+four skips are worth having on a twenty-bug scenario. No latency figure is published here: Task 7.4 measures the stage on
 the run that adds it, and that measurement is the one `README.md` carries. It prints each
 finding, then the summary, and returns 1 when any finding is a `divergence`.
 

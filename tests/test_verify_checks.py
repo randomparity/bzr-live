@@ -32,7 +32,9 @@ SMOKE = ROOT / "scenarios" / "smoke"
 # bzr's serializer at the revision README pins (63abb94e) rather than guessed:
 # `component` and `version` deserialize through deserialize_optional_string_list and come
 # back as arrays (src/types/bug.rs:50-51, 225-226); `estimated_time` is an f64
-# (src/types/bug.rs:68), so the scenario's declared "8" arrives as 8.0.
+# (src/types/bug.rs:68), so the scenario's declared "8" arrives as 8.0. It is carried here
+# for fidelity with the reply and is no longer compared -- the live run showed Bugzilla
+# withholds it from bzr's unauthenticated REST read, so the fold waives it.
 BUG_VIEW_1 = {
     "id": 1,
     "summary": "Checkout charges twice when two tabs submit one cart",
@@ -94,7 +96,7 @@ class FieldCheckTest(unittest.TestCase):
         return findings[0]
 
     def test_a_matching_payload_yields_no_findings(self) -> None:
-        # The bug's two unverifiable claims are exercised on their own below; clearing
+        # The bug's three unverifiable claims are exercised on their own below; clearing
         # them leaves the seven comparison groups as the only thing this case reports.
         self.assertEqual(self._check(bug=replace(self.bug, unverifiable=())), [])
 
@@ -131,10 +133,11 @@ class FieldCheckTest(unittest.TestCase):
         self.assertEqual(finding.check, "groups")
         self.assertEqual(finding.detail, "declared restricted, observed (none)")
 
-    def test_a_differing_estimated_time_diverges(self) -> None:
-        finding = self._only(estimated_time=6.0)
-        self.assertEqual(finding.check, "estimated_time")
-        self.assertEqual(finding.detail, "declared 8, observed 6.0")
+    def test_a_differing_estimated_time_is_not_asserted(self) -> None:
+        # The fold waives estimated_hours (see UNVERIFIABLE_FIELDS), so the reply's value
+        # is not compared. The numeric-shape rule it used to exercise is pinned by the
+        # component case above, which unwraps the same way.
+        self.assertEqual(self._divergences(estimated_time=6.0), [])
 
     def test_a_differing_assignee_diverges(self) -> None:
         finding = self._only(assigned_to="triager@example.test")
@@ -217,7 +220,8 @@ class FieldCheckTest(unittest.TestCase):
     def test_each_unverifiable_entry_is_reported_with_its_reason(self) -> None:
         findings = self._check()
         self.assertTrue(all(f.kind == "unverifiable" for f in findings), findings)
-        self.assertEqual([f.check for f in findings], ["remaining_hours", "worktime"])
+        self.assertEqual([f.check for f in findings],
+                         ["estimated_hours", "remaining_hours", "worktime"])
         self.assertEqual({f.subject for f in findings}, {"cart-double-charge"})
         self.assertEqual([f.detail for f in findings],
                          [reason for _field, reason in self.bug.unverifiable])

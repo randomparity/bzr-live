@@ -63,13 +63,26 @@ class FoldSmokeScenarioTest(unittest.TestCase):
         self.assertIn("status", bug.unasserted)
         self.assertIn("resolution", bug.unasserted)
 
-    def test_only_remaining_hours_and_worktime_are_unverifiable(self) -> None:
-        # estimated_hours is asserted, not waived: bzr a7f6ab70 exposes estimated_time in
-        # bug view, and README pins make smoke at 63abb94e, which contains it.
+    def test_the_two_time_tracking_fields_and_worktime_are_unverifiable(self) -> None:
+        # estimated_hours is waived, but NOT on finding D3's grounds: bzr a7f6ab70 does
+        # expose estimated_time in bug view, and README pins make smoke at 63abb94e,
+        # which contains it. The first live run of the verify stage established that
+        # a7f6ab70 is not sufficient -- Bugzilla gates the time-tracking fields on
+        # timetrackinggroup and finding D8 leaves bzr's REST reads unauthenticated, so
+        # bug view withholds the field on the transport this verifier uses.
         bug = self.expected.bugs["cart-double-charge"]
         fields = {name for name, _ in bug.unverifiable}
-        self.assertEqual(fields, {"remaining_hours", "worktime"})
-        self.assertEqual(bug.scalars["estimated_time"], "8")
+        self.assertEqual(fields, {"estimated_hours", "remaining_hours", "worktime"})
+        self.assertNotIn("estimated_time", bug.scalars)
+        reason = dict(bug.unverifiable)["estimated_hours"]
+        self.assertIn("timetrackinggroup", reason)
+        self.assertIn("D8", reason)
+
+    def test_no_bug_declares_a_group_so_that_assertion_is_unit_covered_only(self) -> None:
+        # UNVERIFIABLE_FIELDS says so; this pins the claim rather than leaving it prose.
+        self.assertEqual(
+            [alias for alias, bug in self.expected.bugs.items() if "groups" in bug.names],
+            [])
 
     def test_custom_fields_carry_their_cf_names(self) -> None:
         bug = self.expected.bugs["cart-double-charge"]

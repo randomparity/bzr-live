@@ -21,13 +21,25 @@ CHAIN_FIELDS = frozenset(
     {"status", "resolution", "assigned_to", "target_milestone", "summary"})
 
 # Declared field -> the reason it cannot be asserted. Printed verbatim by the report.
-# 'groups' and 'estimated_hours' are NOT here: bzr a7f6ab70 (PR #646, closing bzr#641)
-# exposes both in bug view, and README pins make smoke at 63abb94e, which contains it.
-# Only remaining_hours survives, and on Bugzilla's behaviour rather than on any bzr gap.
+# 'groups' is NOT here: bzr a7f6ab70 (PR #646, closing bzr#641) exposes it in bug view,
+# README pins make smoke at 63abb94e, which contains it, and the REST reply does carry a
+# groups key. No scenarios/smoke bug declares one, so that assertion has unit coverage
+# only -- the live tier has never exercised it.
 UNVERIFIABLE_FIELDS: Mapping[str, str] = {
     "remaining_hours":
         "Bugzilla decrements remaining_time by logged work, so the declared value is not "
         "the fixture's final state; PR #23 excludes asserting against it",
+    # a7f6ab70 is necessary but not sufficient, which the first live run of this stage is
+    # what established. bzr serializes estimated_time, but Bugzilla gates the
+    # time-tracking fields on timetrackinggroup -- 'editbugs' on this image -- and finding
+    # D8 makes every bzr REST read anonymous, so the field is withheld. Measured at
+    # 63abb94e with the insider's own valid key on a freshly replayed fixture: the default
+    # transport and --api hybrid both return a bug view with no estimated_time, while
+    # `--api xmlrpc` returns 8.0 and `GET /rest/bug/1?Bugzilla_api_key=...` returns 8.
+    "estimated_hours":
+        "Bugzilla gates estimated_time on timetrackinggroup ('editbugs' here) and finding "
+        "D8 leaves bzr's REST reads unauthenticated, so bug view returns no "
+        "estimated_time on this verifier's transport; only --api xmlrpc reads it back",
 }
 WORKTIME_UNVERIFIABLE = (
     "Bugzilla gates time-tracking fields on timetrackinggroup (issue #22), so logged "
@@ -171,7 +183,7 @@ def _create(event: PlannedEvent, values: Mapping[str, object], bugs: dict[str, _
         if values[key] is not None:
             bug.scalars[view_key] = _project(values[key], emails)
     if values["estimated_hours"] is not None:
-        bug.scalars["estimated_time"] = values["estimated_hours"]
+        _unverifiable(bug, "estimated_hours")
     for key in (*_NAME_SETS, "groups"):
         if values[key]:
             bug.names[key] = {_project(ref, emails) for ref in values[key]}
@@ -222,18 +234,30 @@ def _update_edges(bug: _Bug, actor: str, key: str, raw: object,
         bug.history.append(ExpectedChange(actor, key, None, False))
 
 
+def _unverifiable(bug: _Bug, key: str) -> None:
+    row = (key, UNVERIFIABLE_FIELDS[key])
+    if row not in bug.unverifiable:
+        bug.unverifiable.append(row)
+
+
 def _update_other(bug: _Bug, key: str, raw: object,
                   declared: Mapping[str, object]) -> None:
+    """The declared update keys that are neither a scalar, a name set, nor an edge set.
+
+    Silently ignoring anything else is safe ONLY because
+    `src/bzr_live/replay/actions.py`'s `_UPDATE_UNSUPPORTED` refuses `groups` and
+    `version` before any mutation, so no journalled run can carry one. Issue #27 removes
+    that refusal; when it does, this fold has to grow an arm for each key it releases, or
+    the verifier will quietly stop asserting it.
+    """
     if key == "duplicate_of":
         bug.duplicate_of = raw.name
         # Bugzilla drives both itself on a duplicate (finding G5), and writes no dupe_of
         # activity row, so neither is the scenario's to claim.
         if "status" not in declared:
             bug.unasserted.update({"status", "resolution"})
-    elif key == "estimated_hours":
-        bug.scalars["estimated_time"] = raw
-    elif key == "remaining_hours":
-        bug.unverifiable.append((key, UNVERIFIABLE_FIELDS[key]))
+    elif key in ("estimated_hours", "remaining_hours"):
+        _unverifiable(bug, key)
 
 
 def _update(event: PlannedEvent, values: Mapping[str, object], bugs: dict[str, _Bug],

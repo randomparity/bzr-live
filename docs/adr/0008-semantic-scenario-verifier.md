@@ -67,9 +67,23 @@ at and below which it tells operators to treat the fixture as untested. An earli
 measured against the `0.8.2 (ae39fbd8)` build on `PATH` and waived `groups` and
 `estimated_hours` under finding D3 — but `a7f6ab70` (`bzr` PR #646, closing `bzr#641`,
 the issue D3 was filed as) adds `Groups`, `EstimatedTime` and `RemainingTime` to
-`BugField` and to the `Bug` serializer, and it is an ancestor of `63abb94e`. Both fields
-are therefore **asserted**. `remaining_hours` stays unverifiable on PR #23's grounds — that
+`BugField` and to the `Bug` serializer, and it is an ancestor of `63abb94e`. `groups` is
+therefore **asserted**. `remaining_hours` stays unverifiable on PR #23's grounds — that
 Bugzilla decrements it — which is a statement about Bugzilla and survives the `bzr` fix.
+
+**Amended after the first live run of the verify stage: `estimated_hours` is unverifiable
+too, and not on D3's grounds.** `a7f6ab70` is necessary and not sufficient. Bugzilla gates
+the time-tracking fields on `timetrackinggroup`, which this image sets to `editbugs`, and
+finding **D8** leaves every `bzr` REST read unauthenticated — so `bug view` withholds the
+field from a caller who is in fact a member. Measured at `63abb94e` on a freshly replayed
+fixture with the insider's own valid key: the default transport and `--api hybrid` both
+return a `bug view` carrying no `estimated_time`, `--api xmlrpc` returns `8.0`, and
+`GET /rest/bug/1?Bugzilla_api_key=...` returns `8`. The value on the server is the declared
+one, so this is not a divergence; it is a claim this verifier's transport cannot read back.
+Switching `bug view` to `--api xmlrpc` would read it, and is **not** taken here: the
+operator authorized `--api hybrid` on the reads that need it, `xmlrpc` is a different mode,
+and moving `bug view` to it would invalidate every reply shape this ADR verified under
+REST. Reported, not decided.
 
 Recording a limitation `bzr` has already removed is the same failure as routing around one
 it still has: both put something in `docs/bzr-findings.md` that the code does not support,
@@ -158,10 +172,11 @@ reported `unverifiable` rather than guessed. Verified on the live fixture: for b
 
 `unverifiable` not failing the run means a gap can be ignored by an operator who does not
 read the summary. The alternative is a permanently red gate, which gets suppressed
-instead of read. Two claims are unverifiable on `scenarios/smoke/` today — `remaining_hours`
-and the work-time hours — and both are already recorded as findings or deferred issues.
-That is down from four: retargeting the design at the supported `bzr` revision turned
-`groups` and `estimated_hours` into assertions.
+instead of read. Three claims are unverifiable on `scenarios/smoke/` today —
+`estimated_hours`, `remaining_hours` and the work-time hours — and all three are recorded
+as findings or deferred issues. That is down from four: retargeting the design at the
+supported `bzr` revision turned `groups` into an assertion, and the first live run put
+`estimated_hours` back on the other side for a different, evidenced reason.
 
 ## Considered & rejected
 
@@ -191,8 +206,9 @@ That is down from four: retargeting the design at the supported `bzr` revision t
   for gaps already recorded, and a gate that is always red is a gate nobody reads.
 - **Keep waiving `groups` and `estimated_hours` under finding D3.** verified: D3's upstream
   issue `bzr#641` is closed by `a7f6ab70`, an ancestor of the `63abb94e` revision
-  `README.md` proves `make smoke` at. Waiving them would drop a chartered criterion and
-  record a `bzr` gap that no longer exists.
+  `README.md` proves `make smoke` at. Waiving them *under D3* would record a `bzr` gap that
+  no longer exists. `estimated_hours` is waived under D8 and `timetrackinggroup` instead,
+  which is a different claim with its own live evidence; `groups` stays asserted.
 - **Assert `cc` by set equality.** verified: `pay-retry-loop` declares no `cc`, so its
   observed set is entirely the flag requestee Bugzilla added — one of the three
   postconditions PR #23 told this issue not to assert against. Containment honours the

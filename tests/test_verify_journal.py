@@ -495,6 +495,21 @@ class VerifierRunTest(_JournalFixture):
         self.assertIn("insider", self.out[0])
         self.assertIn(str(FIXTURE), self.out[0])
 
+    def test_a_journal_resolving_no_id_for_a_bug_fails_with_a_message(self) -> None:
+        # Every record is complete, so resolve_ids passes; only the create's resolved_ids
+        # are gone. A hand-edited journal must not reach the CLI as a KeyError traceback.
+        for path in sorted(self.journal_dir.glob("*.json")):
+            record = json.loads(path.read_text())
+            if record.get("resolved_ids"):
+                record["resolved_ids"] = {}
+                path.write_text(json.dumps(record))
+        with self.assertRaises(VerifyError) as caught:
+            self._run(AGREEING)
+        message = str(caught.exception)
+        self.assertIn(str(FIXTURE), message)
+        self.assertIn("'checkout-race'", message)
+        self.assertIn("resolved no server id", message)
+
     def test_no_invocation_carries_an_api_key_in_its_argv(self) -> None:
         _code, run = self._run(AGREEING)
         for call in run.calls:

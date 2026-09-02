@@ -179,8 +179,16 @@ class Verifier:
         findings: list[Finding] = []
         executed = 0
         for alias, bug in self._expected.bugs.items():
+            bug_id = resolved.get(f"bug:{alias}")
+            if bug_id is None:
+                # resolve_ids has already refused an incomplete journal, so this is a
+                # journal edited by hand rather than an unfinished replay. Say so as a
+                # verify failure, not as a KeyError traceback out of the CLI.
+                raise VerifyError(
+                    f"the journal under this state root resolved no server id for bug "
+                    f"{alias!r}; replay the scenario here before verifying it")
             found, ran = self._one_bug(
-                bug, resolved[f"bug:{alias}"], reader, outsider, alias_of, edges[alias],
+                bug, bug_id, reader, outsider, alias_of, edges[alias],
                 reachable(edges, alias))
             findings += found
             executed += ran
