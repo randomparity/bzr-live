@@ -1726,20 +1726,32 @@ fails if a bug's summary is edited in the fixture database before the verify sta
 
 Commit: `feat(verify): add the verify command and its live smoke stage`.
 
-## Task 8 — record the two `bzr` findings
+## Task 8 — record the `bzr` findings
 
-Edits `docs/bzr-findings.md`. Adds two entries; neither is filed upstream, because the
-operator declined that on 2026-09-02 for D7 and authorized recording only for both.
+**Done.** Edits `docs/bzr-findings.md`. Adds **three** entries — D7, D8 and D9 — none filed
+upstream, because the operator declined that on 2026-09-02 for D7 and authorized recording
+only for all of them.
+
+**Both D7 and D8 were re-verified at `bzr 0.8.3-dev (63abb94e)` before being written**, and
+both still reproduce. Their original evidence came from `0.8.2 (ae39fbd8)`, which is below
+the floor `README.md` states — the same condition that made the D3 waiver wrong. A citation
+taken at an untested revision does not support the claim, so each entry now names the
+revision it was observed at and carries the reply from that run.
 
 Add entry **D7** and its index row, in the shape of the existing entries: `bug history`'s
 `comment_id` correlation attributes a comment to a change that did not carry one.
 `flatten_history` (`~/src/bzr/src/commands/bug/history.rs:68-71`) documents that it "can
 miss (→ null) but never produces a wrong id", correlating on exact `who` plus a canonical
-timestamp key. Observed on `scenarios/smoke/` bug 12 with `bzr 0.8.2 (ae39fbd8)`: the
-`cf_risk` and `cf_subsystem` records at `2026-09-02T14:20:03Z` by `triager@example.test`
+timestamp key. Re-observed on `scenarios/smoke/` bug 12 with **`bzr 0.8.3-dev (63abb94e)`**:
+the
+`cf_subsystem` (`'' -> 'invoicing'`) and `cf_risk` (`'---' -> 'medium'`) records at
+`2026-09-02T14:20:03Z` by `triager@example.test`
 both carry `comment_id: 31`, and comment 31 is the `worktime-inv-tax` comment posted by
-the same actor in the same second through a different call; the custom-field write is a
-stock-REST `PUT` that posts no comment. Class: **defect**. Upstream column: `hold: ask
+the same actor in the same second through a different call — confirmed by `comment list 12`,
+where id 31 at that timestamp carries the `[bzr-live:smoke:worktime-inv-tax]` marker. The
+custom-field write is a
+stock-REST `PUT` that posts no comment, so null is the correct value for both; the three
+earlier records on the same bug do correlate to null. Class: **defect**. Upstream column: `hold: ask
 operator` — `AGENTS.md` requires the operator's word before filing on
 `randomparity/bzr`.
 
@@ -1751,17 +1763,35 @@ does not. `bzr` logs "header auth works on API endpoints despite valid_login rej
 preferring header" and prefers `X-BUGZILLA-API-KEY`, but this Bugzilla rejects that header
 for REST — `rest/valid_login` returns `{"result":false}` with the header and
 `{"result":true}` with `Bugzilla_api_key` as a query parameter. The probe cannot tell,
-because the 200 it reads from `rest/bug` is also what an anonymous caller gets. Observed
-consequence: `bzr`'s REST reads on this fixture run effectively unauthenticated; writes are
+because the 200 it reads from `rest/bug` is also what an anonymous caller gets. Re-verified
+at **`bzr 0.8.3-dev (63abb94e)`**, with the log line quoted verbatim from `RUST_LOG=debug`
+and both `valid_login` results reproduced against a freshly minted key.
+
+The consequence is now **demonstrated rather than inferred**: reading bug 7 as the insider
+`admin-ops@example.test`, with that actor's own valid key, `bzr comment list 7` omits the
+declared private comment, while `GET /rest/bug/7/comment?Bugzilla_api_key=...` and
+`bzr --api hybrid comment list 7` both return it with `is_private: true`. Writes are
 unaffected, because the 401 they draw triggers `bzr`'s alternate-auth retry, which is why
 the replay works at all. Class: **defect** — the probe's success signal does not
-discriminate. Upstream column: `hold: ask operator`.
+discriminate, and it overrides a server response that was correct. Upstream column:
+`hold: ask operator`.
 
 Note in the entry what it costs the verifier: it refutes the premise that every positive
-read observes the state the issuing actor would see, so the spec states that boundary
-rather than assuming it. Nothing in `scenarios/smoke/` is group-restricted, and the one
-check that does depend on insider identity — `comment list` — travels over XML-RPC, which
-does authenticate, so no check today reads less than it should.
+read observes the state the issuing actor would see, so the spec states that boundary rather
+than assuming it.
+
+**The mitigation this plan previously recorded is false and the entry says so.** It read:
+"the one check that does depend on insider identity — `comment list` — travels over XML-RPC,
+which does authenticate, so no check today reads less than it should." Per **D9**, `bzr`
+selects `api_mode=rest` from the server version on this fixture, so `comment list` never
+takes the XML-RPC arm without `--api hybrid`. D8 and D9 compound: one makes REST reads
+anonymous, the other makes REST the only transport. Demonstrated live at `63abb94e` with the
+insider's own valid key — `bzr comment list 7` omits the declared private comment, while
+both `GET /rest/bug/7/comment?Bugzilla_api_key=...` and `bzr --api hybrid comment list 7`
+return it with `is_private: true`.
+
+Add entry **D9** and its index row: the transport-selection defect itself, already written
+when the premise was corrected.
 
 Run `make check`; expect green.
 

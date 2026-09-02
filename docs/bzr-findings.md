@@ -34,6 +34,8 @@ already-filed one (D5).
 | [G6](#g6) | gap | `--permissive` is rejected for a single bug ID | — |
 | [G9](#g9) | design choice | `bug create --from-json` silently defaults an omitted `version` to `unspecified` | — |
 | [D6](#d6) | defect (fixed upstream) | `component view` reports `default_assignee: null` for a component Bugzilla says has one | fixed by `5fb99362` |
+| [D7](#d7) | defect | `bug history` attributes a `comment_id` to a change that carried no comment | hold: recording only, filing declined |
+| [D8](#d8) | defect | The auth probe concludes header auth works when it does not, so REST reads run effectively unauthenticated | hold: recording only |
 | [D9](#d9) | defect | On Bugzilla >= 5.1 the auto-detected `rest` mode never takes the XML-RPC path `bzr` documents as the only one returning a full comment thread or attachment `data` | not filed |
 
 ---
@@ -368,3 +370,102 @@ decision for the operator, recorded on issue #20. `--api hybrid` is a supported 
 and is the narrowest thing that makes the chartered comment-visibility and
 attachment-checksum criteria reachable; the alternative is to report both `unverifiable`
 against this entry. Filing upstream is not authorized.
+
+## D7
+
+**`bug history` attributes a `comment_id` to a change that carried no comment.**
+*Observed against the running fixture, 2026-09-02, with `bzr 0.8.3-dev (63abb94e)` — the
+revision `README.md` proves `make smoke` at. Originally observed at `0.8.2 (ae39fbd8)`,
+which is below that floor, and re-verified here because a citation taken at an untested
+revision does not support the claim.*
+
+`flatten_history` (`src/commands/bug/history.rs:68-71`) documents that its comment
+correlation "can miss (→ null) but never produces a wrong id", correlating on exact `who`
+plus a canonical timestamp key. It does produce a wrong id.
+
+Observed on `scenarios/smoke/` bug 12 (`inv-tax-mismatch`), `bzr --json bug history 12`:
+
+```
+2026-09-02T14:20:03Z | triager@example.test | cf_subsystem | '' -> 'invoicing'   | comment_id: 31
+2026-09-02T14:20:03Z | triager@example.test | cf_risk      | '---' -> 'medium'   | comment_id: 31
+```
+
+Comment 31 is the `worktime-inv-tax` comment, posted by the same actor in the same second
+through a different call — confirmed by `bzr --json comment list 12`, where id 31 at
+`2026-09-02T14:20:03Z` by `triager@example.test` carries the
+`[bzr-live:smoke:worktime-inv-tax]` marker. The custom-field write is a stock-REST `PUT`
+that posts no comment at all, so the correct `comment_id` for both rows is null. The three
+earlier records on the same bug correlate correctly to null.
+
+The correlation key is `who` plus a second-resolution timestamp, which is not unique: any
+two changes by one actor in the same second collide, and how often that happens is a
+property of how fast the replay ran rather than of the data.
+
+**Class: defect.** The doc comment states a guarantee the implementation does not provide.
+
+**Upstream.** Not filed. The operator declined filing this on `randomparity/bzr` on
+2026-09-02 and authorized recording only.
+
+**What the fixture does.** Nothing: the verifier never asserts `comment_id`, which is why
+this is a recorded finding rather than a blocker.
+
+## D8
+
+**`bzr`'s auth probe concludes header auth works when it does not, so its REST reads run
+effectively unauthenticated.**
+*Observed against the running fixture, 2026-09-02, with `bzr 0.8.3-dev (63abb94e)`.
+Originally observed at `0.8.2 (ae39fbd8)`, below `README.md`'s floor, and re-verified here.*
+
+`bzr` probes authentication, finds `rest/whoami` unavailable, falls back to
+`rest/valid_login`, is rejected, then probes `rest/bug` and concludes the rejection was
+wrong. Verbatim from `RUST_LOG=debug` at `63abb94e`:
+
+```
+DEBUG bzr::client::auth::whoami: rest/whoami not available on this server
+ INFO bzr::client::auth: falling back to rest/valid_login for older Bugzilla
+DEBUG bzr::client::auth::valid_login: valid_login returned false method=header
+DEBUG bzr::client::auth::valid_login: header auth probe on rest/bug succeeded
+ INFO bzr::client::auth: header auth works on API endpoints despite valid_login rejecting
+      it; preferring header
+ INFO bzr::client::auth: detected server settings method=header api_mode=rest version="5.2+"
+DEBUG bzr::client: created Bugzilla client auth_method=Some(Header) api_mode=rest
+```
+
+`valid_login` was right and the probe was wrong. Against this fixture, with a valid API key
+for `admin-ops@example.test`:
+
+- `GET /rest/valid_login?login=...` with an `X-BUGZILLA-API-KEY` header returns
+  `{"result":false}`;
+- the same call with `Bugzilla_api_key` as a **query parameter** returns `{"result":true}`.
+
+The probe cannot tell, because the 200 it reads from `rest/bug` is exactly what an anonymous
+caller gets — an unauthenticated read of a public bug succeeds. The success signal does not
+discriminate between "authenticated" and "readable anyway".
+
+**Observed consequence, demonstrated rather than inferred.** Reading bug 7's thread as the
+insider `admin-ops@example.test`, with that actor's own valid key:
+
+| Path | Declared private comment |
+|---|---|
+| `bzr comment list 7` (default: header auth, REST) | **absent** |
+| `GET /rest/bug/7/comment?Bugzilla_api_key=...` | present, `is_private: true` |
+| `bzr --api hybrid comment list 7` (XML-RPC) | present, `is_private: true` |
+
+So the comment is on the server and visible to a properly authenticated insider, and `bzr`'s
+preferred transport is the one that does not see it. Writes are unaffected: they draw a 401,
+which triggers `bzr`'s alternate-auth retry, which is why the replay works at all.
+
+**Class: defect** — the probe's success signal does not discriminate, and it overrides a
+server response that was correct.
+
+**Upstream.** Not filed; recording only is what the operator authorized.
+
+**What the fixture does.** It refutes the premise that a positive read observes the state the
+issuing actor would see, so the design states that boundary rather than assuming it. Note
+that an earlier draft of this entry claimed the one identity-dependent check — `comment
+list` — "travels over XML-RPC, which does authenticate, so no check today reads less than it
+should". That mitigation is **false**, and [D9](#d9) is why: on this fixture `bzr` selects
+`api_mode=rest` from the server version, so `comment list` never takes the XML-RPC arm
+unless `--api hybrid` is passed. D8 and D9 compound — one makes REST reads anonymous, the
+other makes REST the only transport — and together they are what put the comment-visibility
+criterion out of reach at the default transport.
