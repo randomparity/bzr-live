@@ -207,7 +207,7 @@ So `5fb99362` is where the D6 defect stops, not a floor this repository has evid
 `bzr` revision as its first line for this reason — the same scenario passes or fails on that
 revision alone.
 
-Observed: **47 events replayed in 72.70s**, then **69 checks verified in 56.99s**
+Observed: **47 events replayed in 72.63s**, then **69 checks verified in 56.91s**
 reporting 0 divergences and 4 unverifiable claims. Each figure covers its own stage alone,
 excluding provisioning and `make up`. Measured on Apple M5 Max, macOS (Darwin 25.6.0,
 arm64), Docker 29.7.2, with `bzr 0.8.3-dev (63abb94e)`, against a fixture reset immediately
