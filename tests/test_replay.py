@@ -902,6 +902,56 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(len(run.calls), 2)
         self.assertIn("create", run.calls[1]["argv"])
 
+    def test_resume_executes_a_completed_retry_at_the_next_attempt(self) -> None:
+        # The record an aborted run leaves behind: reconciliation settled attempt 1 as
+        # `retry`, so the operator's next resume owns attempt 2. Nothing is re-read --
+        # the journalled answer is what makes the re-execution safe.
+        scenario = self._trimmed("create-checkout-race")
+        self._completed(
+            self._event(scenario, "create-checkout-race"), "retry", exit_status=-1)
+        run = _FakeRun([(0, {"id": 41}, None)])
+        self.assertEqual(
+            self._engine(run, scenario).resume(),
+            [("executed", "create-checkout-race")])
+        second = self.store.read("create-checkout-race", 2)
+        self.assertIsInstance(second, CompletedRecord)
+        self.assertEqual(second.attempt, 2)
+        self.assertEqual(second.next_safe_action, "advance")
+        self.assertEqual(second.exit_status, 0)
+        self.assertEqual(second.resolved_ids, {"bug:checkout-race": 41})
+        self.assertEqual(len(run.calls), 1)
+        self.assertIn("create", run.calls[0]["argv"])
+
+    def test_resume_raises_the_reconciliation_detail_for_an_in_flight_stop(self) -> None:
+        # An in-flight record whose reconciliation cannot tell one commit from two:
+        # the halt has to carry the reconciliation's own detail, not a generic message,
+        # because the detail is the only place the ambiguity is described.
+        scenario = self._trimmed("create-checkout-race", "comment-triage")
+        self._completed(
+            self._event(scenario, "create-checkout-race"), "advance",
+            {"bug:checkout-race": 41})
+        comment = self._event(scenario, "comment-triage")
+        self._in_flight(comment)
+        marker = comment.reconciliation_marker
+        run = _FakeRun([
+            (0, [{"id": 5, "text": f"triaged [{marker}]"},
+                 {"id": 6, "text": f"triaged again [{marker}]"}], None),
+        ])
+        with self.assertRaises(ReplayError) as caught:
+            self._engine(run, scenario).resume()
+        message = str(caught.exception)
+        self.assertIn("comment-triage", message)
+        self.assertIn("matches 2 results", message)
+        self.assertIn(marker, message)
+        self.assertIn("CONFIRM_RESET=1 make reset", message)
+        record = self.store.read("comment-triage")
+        self.assertIsInstance(record, CompletedRecord)
+        self.assertEqual(record.next_safe_action, "stop")
+        self.assertEqual(record.exit_status, -1)
+        # The comment was reconciled, never re-sent: the one call is the list read.
+        self.assertEqual(len(run.calls), 1)
+        self.assertIn("list", run.calls[0]["argv"])
+
     def test_resume_refuses_a_recorded_stop_without_querying(self) -> None:
         # A stop is terminal in the journal: the refusal is durable rather than
         # dependent on the server still looking ambiguous, so nothing is re-queried.
@@ -962,6 +1012,34 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(record.exit_status, -1)
         # The reconciled id was adopted, so the next event addressed the right bug.
         self.assertEqual(run.calls[-1]["argv"][-2:], ["--", "41"])
+
+    def test_a_failing_mutation_aborts_the_run_and_journals_the_retry(self) -> None:
+        """One execution per event per run: attempt 2 belongs to the operator's resume.
+
+        The mutation fails, reconciliation answers "absent" (so nothing committed), and
+        the run aborts carrying both errors -- the boundary's own, which says what broke,
+        and the reconciliation's detail, which says what the fixture now holds.
+        """
+        scenario = self._trimmed("create-checkout-race")
+        run = _FakeRun([
+            (4, None, 100),            # pristine sweep: the alias is absent
+            (4, None, 100),            # the create's own pre-execution check
+            (1, None, None),           # the create fails
+            (4, None, 100),            # the reconciliation read: still absent
+        ])
+        with self.assertRaises(ReplayError) as caught:
+            self._engine(run, scenario).replay()
+        message = str(caught.exception)
+        self.assertIn("create-checkout-race", message)
+        self.assertIn("bzr boundary failure (exit 1)", message)   # the boundary's own
+        self.assertIn("did not commit", message)                  # result.detail
+        record = self.store.read("create-checkout-race")
+        self.assertIsInstance(record, CompletedRecord)
+        self.assertEqual(record.next_safe_action, "retry")
+        self.assertEqual(record.exit_status, -1)
+        # The retry is journalled, not taken: this run stops at attempt 1.
+        self.assertIsNone(self.store.read("create-checkout-race", 2))
+        self.assertEqual(len(run.calls), 4)
 
     def test_a_failing_reconciliation_read_leaves_the_in_flight_record(self) -> None:
         """ADR 0006: no completed record is written over a read that failed."""
