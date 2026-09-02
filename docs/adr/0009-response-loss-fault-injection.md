@@ -64,7 +64,11 @@ they do not. The spec's case table is the record of both.
   chooses to run it. So a bzr or Bugzilla change that invalidated the double would leave
   these tests green. That is the bargain a disposable fixture gets: the double proves
   *engine recovery*, it is kept small enough that an operator can read it against
-  `actions.py` in one sitting, and it claims nothing about bzr's behaviour.
+  `actions.py` in one sitting, and it claims nothing about bzr's behaviour. This record
+  gives the residual no owner **on purpose** — an automatic live comparison would be a
+  second CI job against a real Bugzilla, which `AGENTS.md`'s "Project scope" declines for
+  this repository. Not a deferral awaiting a tracker entry: a decision not to hold the
+  line automatically.
 - Because the double implements only what the five actions reach, a later test that
   exercises `bug.flag`, `attachment.update`, or the REST custom-field boundary through it
   fails with "does not model" rather than passing on a default. That is the intended cost

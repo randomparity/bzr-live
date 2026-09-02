@@ -117,8 +117,10 @@ refusal that inspected only `name=value` arguments would accept `--private` and
 Branches no test exercises are where a wrong model hides longest, so the double stays at
 exactly what the seven cases reach.
 
-The double proves engine recovery. It proves nothing about `bzr` or Bugzilla; that
-remains `tests/replay_smoke.sh`'s job.
+The double proves engine recovery. It proves nothing about `bzr` or Bugzilla, and nothing
+automatic re-checks it against them — `tests/replay_smoke.sh` is the only live comparison
+and it gates nothing, as above. ADR 0009 records that residual as accepted rather than
+owned.
 
 ## Cases
 
@@ -174,9 +176,21 @@ mutation would make all seven "no duplicate" assertions pass vacuously.
 Guardrails: `make check` (`compileall` covers `tests/`) and `make test`. `make smoke` and
 `make replay-smoke` need a running fixture and are unaffected by this change.
 
+## Relationship to issue #21
+
+Issue #21 states both halves of this requirement: the fault injection above, and gating
+the live x86_64 smoke path in CI. Issue #25 (`Blocked by #20`) carries that second half —
+its body names itself a sub-issue of #21 — and this issue carries the first. #21's
+fault-injection Expected is worded in terms of the five action classes and cites the same
+`engine.py` seam; it asks for no live proof of that half, so the offline suite here
+answers it. Whether #21 closes once #24 and #25 land is the operator's call, and nothing
+in this change writes to #21.
+
 ## Not in scope
 
 - Any change under `src/`. Criterion 5 forbids it, and nothing here needs it.
+- The CI half of issue #21 — `scenarios/**` path filters and the live x86_64 smoke step.
+  Owner: issue #25.
 - `src/bzr_live/verify/`, owned by concurrent issue #20.
 - The three actions outside issue #24's list (`bug.flag`, `bug.custom-field-set`,
   `attachment.update`). They are `idempotent-set` and `idempotent-set`-like and the

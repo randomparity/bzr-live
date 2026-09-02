@@ -883,9 +883,13 @@ Both mutations above perturb the harness, so neither shows the suite constrainin
 append whose commit reconciliation had confirmed. Re-run the command in 2.2 and expect
 exactly three failures — `test_bug_comment_is_never_appended_twice`,
 `test_bug_attach_is_never_uploaded_twice`, `test_bug_worktime_is_never_appended_twice` —
-with the other tests green. Then **revert `actions.py`** and confirm
+with the other tests green. Then revert with `git restore src/bzr_live/replay/actions.py`
+— never by hand-editing the file back, which can introduce drift of its own — and confirm
 `git status --short -- src/` is empty before continuing. This is the mutation that proves
-the suite constrains the engine and not just its own injector.
+the suite constrains the engine and not just its own injector. Run it only after step
+1.7's commit has landed, so a crash between the mutation and the revert costs one
+`git restore` and nothing else; this worktree shares a repository with two other live
+branches.
 
 **2.4 — run the guardrails.**
 
