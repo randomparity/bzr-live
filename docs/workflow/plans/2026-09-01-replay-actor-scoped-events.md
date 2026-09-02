@@ -1419,7 +1419,10 @@ class ReconcileTest(unittest.TestCase):
     def test_attachment_update_reads_the_attachment_by_id(self) -> None:
         run = _FakeRun([(0, {"id": 7, "summary": "notes", "is_obsolete": True}, None)])
         context = self._context(run)
-        context.adopt({"attachment:notes": 7})
+        # The id table is keyed by the *attachment alias* the attach event declares
+        # (`triage-notes`), not by the asset name (`notes`) -- the same distinction that
+        # governs asset_file's key. obsolete-notes resolves attachment:triage-notes.
+        context.adopt({"attachment:triage-notes": 7})
         result = HANDLERS["attachment.update"].reconcile(context, self._obsolete_event())
         self.assertEqual(result.next_action, "advance")
         self.assertEqual(run.calls[0]["argv"][-2:], ["--", "7"])
