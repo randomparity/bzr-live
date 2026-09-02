@@ -6,8 +6,9 @@ from dataclasses import replace
 from pathlib import Path
 
 from bzr_live.scenario import load_scenario
-from bzr_live.verify.checks import chain_order, check_fields, check_history
-from bzr_live.verify.expected import ExpectedChange, ExpectedFlag, fold
+from bzr_live.verify.checks import chain_order, check_fields, check_history, check_links
+from bzr_live.verify.expected import (
+    ExpectedChange, ExpectedFlag, fold, link_edges, reachable)
 
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / "scenarios" / "smoke"
@@ -47,11 +48,14 @@ BUG_VIEW_1 = {
 
 # The journal's resolved_ids inverted: the only route from a server id back to an alias.
 ALIAS_OF = {1: "cart-double-charge", 5: "cart-dupe-report", 8: "pay-retry-loop",
-            12: "inv-tax-mismatch"}
+            12: "inv-tax-mismatch", 15: "inv-duplicate-line", 17: "dun-retry-storm",
+            18: "dun-wrong-locale"}
 
 # The one rendering allowed to carry a number, for an id the scenario never named.
 # Stripping it must leave a detail with no digits at all.
 UNNAMED = re.compile(r"bug id \d+ \(not named by this scenario\)")
+# A hop distance in the declared graph, the only other number a detail may carry.
+DEPTH = re.compile(r"depth \d+")
 
 
 class FieldCheckTest(unittest.TestCase):
@@ -469,6 +473,157 @@ class HistoryCheckTest(unittest.TestCase):
         record = _record("2026-09-02T14:20:04Z", "developer", "cc", "",
                          "b@example.test, a@example.test")
         self.assertEqual(self._history(bug, [record]), [])
+
+
+def _link(bug_id: int, relation: str, direction: str, depth: int,
+          summary: str) -> dict:
+    """One `bug links` record, in the shape bzr's `--json` data list holds.
+
+    `summary` and `status` are carried for fidelity with the live reply; no check reads
+    either, and `summary` is the only field that distinguishes two records here.
+    """
+    return {"id": bug_id, "relation": relation, "direction": direction, "depth": depth,
+            "summary": summary, "status": "CONFIRMED"}
+
+
+TAX = "Invoice tax total disagrees with the order tax total"
+DUNNING = "Dunning retries all fire in the same minute"
+DUPLICATE_LINE = "Duplicate line item on invoices for split shipments"
+CHARGES_TWICE = "Checkout charges twice when two tabs submit one cart"
+
+# `/Users/dave/src/bzr/target/release/bzr --json --server-url http://127.0.0.1:8080/
+# bug links 1` for `cart-double-charge` on a replayed scenarios/smoke/, read live at the
+# revision README pins (63abb94e) rather than copied from the plan: bzr 9ad5ceb2 ("decode
+# object-valued duplicate links") changed src/types/bug/links.rs after the reads the
+# design docs quote, so only a read at the pinned binary is evidence for this family.
+LINKS_1 = [_link(12, "depends_on", "out", 1, TAX)]
+# `bug links 1 --recursive --depth 3`: bug 12 at one hop, and the diamond's other two
+# corners at two. Nothing reaches bug 5 -- Bugzilla materialises dupe_of on the source
+# alone, so the duplicate pair is readable only from `cart-dupe-report`.
+WALK_1 = [
+    _link(12, "depends_on", "out", 1, TAX),
+    _link(17, "depends_on", "out", 2, DUNNING),
+    _link(15, "blocks", "in", 2, DUPLICATE_LINE),
+]
+# `bug links 5` for `cart-dupe-report`: the duplicate edge, from the source endpoint.
+LINKS_5 = [_link(1, "dupe_of", "out", 1, CHARGES_TWICE)]
+
+
+class LinkCheckTest(unittest.TestCase):
+    """check_links against the transcribed link replies for bugs 1 and 5."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        expected = fold(load_scenario(str(SMOKE)))
+        cls.edges = link_edges(expected.bugs)
+        cls.hops = reachable(cls.edges, "cart-double-charge")
+
+    def _check(self, alias="cart-double-charge", *, declared_hops=None, direct=None,
+               walk=None):
+        # walk=[] is the shape Task 7 hands a skipped recursive read, and it comes with
+        # an empty declared_hops: the two arguments are one decision, never mixed.
+        if walk == []:
+            declared_hops = {}
+        return check_links(
+            alias, self.edges[alias],
+            self.hops if declared_hops is None else declared_hops,
+            LINKS_1 if direct is None else direct,
+            WALK_1 if walk is None else walk,
+            ALIAS_OF)
+
+    def _only(self, *args, **kwargs):
+        findings = self._check(*args, **kwargs)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(findings[0].kind, "divergence")
+        return findings[0]
+
+    def test_the_declared_direct_edge_is_the_one_the_reply_carries(self) -> None:
+        self.assertEqual(self.edges["cart-double-charge"],
+                         frozenset({("inv-tax-mismatch", "depends_on", "out")}))
+        self.assertEqual(self._check(), [])
+
+    def test_a_missing_direct_edge_names_both_aliases_and_the_relation(self) -> None:
+        finding = self._only(direct=[], walk=[])
+        self.assertEqual(finding.subject, "cart-double-charge")
+        self.assertEqual(finding.detail,
+                         "declared inv-tax-mismatch depends_on out, observed (absent)")
+
+    def test_an_observed_edge_the_scenario_never_named_diverges(self) -> None:
+        findings = self._check(
+            direct=[*LINKS_1, _link(99, "blocks", "in", 1, "unknown")], walk=[])
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(
+            findings[0].detail,
+            "declared (absent), observed bug id 99 (not named by this scenario) "
+            "blocks in")
+
+    def test_an_observed_edge_to_a_named_bug_the_scenario_omits_diverges(self) -> None:
+        findings = self._check(
+            direct=[*LINKS_1, _link(18, "blocks", "in", 1, "locale")], walk=[])
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(findings[0].detail,
+                         "declared (absent), observed dun-wrong-locale blocks in")
+
+    def test_the_duplicate_pair_reads_from_the_source_endpoint(self) -> None:
+        # dupe_of has no stock inverse, so bug 1's own reply carries no edge back to 5;
+        # both directions of that claim are asserted here.
+        self.assertEqual(
+            self._check("cart-dupe-report", declared_hops={}, direct=LINKS_5, walk=[]),
+            [])
+        self.assertEqual(self._check(), [])
+
+    def test_the_depth_three_walk_matches_the_declared_hop_distances(self) -> None:
+        self.assertEqual(
+            self.hops,
+            {"inv-tax-mismatch": 1, "dun-retry-storm": 2, "inv-duplicate-line": 2})
+        self.assertEqual(self._check(), [])
+
+    def test_a_node_observed_at_the_wrong_depth_names_both_depths(self) -> None:
+        walk = [WALK_1[0], dict(WALK_1[1], depth=3), WALK_1[2]]
+        finding = self._only(walk=walk)
+        self.assertEqual(finding.detail,
+                         "declared dun-retry-storm at depth 2, observed depth 3")
+
+    def test_a_declared_node_the_walk_never_reaches_diverges(self) -> None:
+        finding = self._only(walk=WALK_1[:2])
+        self.assertEqual(finding.detail,
+                         "declared inv-duplicate-line at depth 2, observed (absent)")
+
+    def test_the_walks_relation_is_not_compared(self) -> None:
+        # bzr sorts its frontier by bug id (src/commands/bug/links.rs:42), so the relation
+        # credited to a node reachable two ways depends on generated identifiers -- which
+        # is exactly what no assertion here may rest on. Depth is the graph's property.
+        walk = [WALK_1[0], WALK_1[1], dict(WALK_1[2], relation="depends_on",
+                                           direction="out")]
+        self.assertEqual(self._check(walk=walk), [])
+
+    def test_an_empty_declared_graph_still_reports_an_observed_edge(self) -> None:
+        # The one family Task 7 leaves unconditional: a bug whose fold declares no edge
+        # at all must still bite when the fixture holds one.
+        findings = check_links("pay-decline-copy", frozenset(), {},
+                               [_link(12, "blocks", "in", 1, TAX)], [], ALIAS_OF)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(findings[0].subject, "pay-decline-copy")
+        self.assertEqual(findings[0].detail,
+                         "declared (absent), observed inv-tax-mismatch blocks in")
+
+    def test_an_isolated_root_with_nothing_to_walk_yields_no_finding(self) -> None:
+        self.assertEqual(
+            check_links("pay-decline-copy", frozenset(), {}, [], [], ALIAS_OF), [])
+
+    def test_no_finding_detail_carries_a_bare_bug_id(self) -> None:
+        findings = [
+            *self._check(direct=[], walk=[]),
+            *self._check(direct=[*LINKS_1, _link(99, "blocks", "in", 1, "x")], walk=[]),
+            *self._check(walk=[*WALK_1, _link(99, "blocks", "in", 2, "x")]),
+            *self._check(walk=[WALK_1[0], dict(WALK_1[1], depth=3), WALK_1[2]]),
+        ]
+        self.assertEqual(len(findings), 4)
+        for finding in findings:
+            # A hop distance is a property of the declared graph, not a server id, so it
+            # is the one other number a detail may carry.
+            residue = DEPTH.sub("", UNNAMED.sub("", finding.detail))
+            self.assertIsNone(re.search(r"\d", residue), finding.detail)
 
 
 if __name__ == "__main__":

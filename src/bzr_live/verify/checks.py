@@ -385,3 +385,62 @@ def check_history(bug: ExpectedBug, records: list, observed_fields: Mapping[str,
     """
     return [*_attribution(bug, records, emails),
             *_ordering(bug, records, observed_fields, emails)]
+
+
+def _edge_spec(record: Mapping[str, object],
+               alias_of: Mapping[int, str]) -> tuple[str, str, str]:
+    """One `bug links` record as the (alias, relation, direction) triple it compares as."""
+    return (_alias(record["id"], alias_of), str(record["relation"]),
+            str(record["direction"]))
+
+
+def _direct(alias: str, declared: frozenset[tuple[str, str, str]], direct: list,
+            alias_of: Mapping[int, str]) -> list[Finding]:
+    seen = {_edge_spec(record, alias_of) for record in direct}
+    details = [_detail(" ".join(edge), None) for edge in sorted(declared - seen)]
+    details += [_detail(None, " ".join(edge)) for edge in sorted(seen - declared)]
+    return [Finding("divergence", alias, "links", detail) for detail in details]
+
+
+def _hop(other: str, depth: object, *, named: bool) -> str | None:
+    """One side of a reachability detail. The node is named once, not on both sides."""
+    if depth is None:
+        return None
+    return f"{other} at depth {depth}" if named else f"depth {depth}"
+
+
+def _reachability(alias: str, declared_hops: Mapping[str, int], walk: list,
+                  alias_of: Mapping[int, str]) -> list[Finding]:
+    seen = {_alias(record["id"], alias_of): record["depth"] for record in walk}
+    findings = []
+    for other in sorted(set(declared_hops) | set(seen)):
+        declared, observed = declared_hops.get(other), seen.get(other)
+        if declared == observed:
+            continue
+        findings.append(Finding("divergence", alias, "reachability", _detail(
+            _hop(other, declared, named=True),
+            _hop(other, observed, named=declared is None))))
+    return findings
+
+
+def check_links(alias: str, declared_direct: frozenset[tuple[str, str, str]],
+                declared_hops: Mapping[str, int], direct: list, walk: list,
+                alias_of: Mapping[int, str]) -> list[Finding]:
+    """The declared topology around one bug, against its two `bug links` replies.
+
+    `direct` is `bug links <id>`, compared as a set of (alias, relation, direction) with
+    the inverses `link_edges` materialises; an observed edge to a bug the scenario does
+    not name is a divergence like any other, which is why this family stays unconditional.
+
+    `walk` is `bug links <id> --recursive --depth <d>`, compared as {alias: depth} against
+    `declared_hops`. Neither `relation` nor `direction` is read from it: bzr sorts its
+    frontier by bug id (bzr src/commands/bug/links.rs:42), so the relation credited to a
+    node reachable two ways depends on generated identifiers -- exactly what no assertion
+    here may rest on. Depth is a property of the graph; the relation is proven by the
+    depth-1 direct read. The caller skips the recursive read when the root's eccentricity
+    is 1 or 0, and then passes an empty `declared_hops` with an empty `walk`: the two are
+    one decision, and a populated `declared_hops` beside an empty `walk` reads as a graph
+    the fixture does not hold.
+    """
+    return [*_direct(alias, declared_direct, direct, alias_of),
+            *_reachability(alias, declared_hops, walk, alias_of)]
