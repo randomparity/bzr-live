@@ -7,8 +7,8 @@ offline and replays against the live pinned Bugzilla fixture through a real `bzr
 carry into every task: the fixture is data validated by the existing loader, and no module
 under `src/` changes.
 
-Expected implementation size: 320–430 changed lines (M) — derived from the file map below: four
-fixture files (~120 lines), two proof files (~220), and Makefile/README edits (~40).
+Expected implementation size: 320–430 changed lines (M) — derived from the file map below: five
+fixture files (~140 lines), two proof files (~220), and Makefile/README edits (~40).
 
 Spec: [`docs/workflow/specs/2026-09-01-smoke-scenario-design.md`](../specs/2026-09-01-smoke-scenario-design.md).
 Decision record: [`docs/adr/0007-committed-smoke-scenario.md`](../../adr/0007-committed-smoke-scenario.md).
@@ -134,6 +134,15 @@ From `src/bzr_live/replay`:
    `"depends_on": [{"ref": "bug:inv-tax-mismatch"}]`, and `create-dun-grace-window` adds
    `"blocks": [{"ref": "bug:dun-silent-fail"}]`.
 
+   **No create filed by `reporter` may declare an `assignee`, a `depends_on`, or a
+   `blocks`** — `reporter` holds no `editbugs`, and Bugzilla would discard all three
+   silently while reporting success (`Bugzilla/Bug.pm:1449-1454`, `:1707-1709`). Both
+   edge-carrying creates above are filed by privileged actors for exactly that reason:
+   `create-inv-duplicate-line` by `triager`, `create-dun-grace-window` by `releaser`.
+   `create-cart-double-charge` declares **no** assignee; `confirm-double-charge` in phase 3
+   sets it from a privileged actor instead. The step-7 guard test enforces this over the
+   whole event stream, so a later edit cannot quietly reintroduce it.
+
    **Phase 2 — 5 topology updates.** Each is `bug.update` with a `set` object.
 
    | Event name | Actor | Bug | `set` |
@@ -241,12 +250,13 @@ From `src/bzr_live/replay`:
    - `test_attachment_summaries_fit` — for every `bug.attach` event,
      `len(render_attachment_summary(description, marker, asset_sha256).encode("utf-8"))` is at
      most `ATTACHMENT_SUMMARY_BYTE_LIMIT`.
-   - `test_no_server_ids_in_committed_files` — read the three committed JSON/JSONL files as
-     raw text and assert no value under a key that takes a typed reference (`product`,
-     `component`, `version`, `milestone`, `assignee`, `actor`, `bug`, `attachment`, `asset`,
-     `field`, and the list-valued `cc`, `groups`, `depends_on`, `blocks`, `keywords`) is a
-     bare integer or a string of digits. This is the property ADR 0007 relies on when it
-     prefers literal JSON to a generator; without this assertion nothing checks it.
+   - `test_creates_declaring_assignee_or_edges_are_privileged` — **guard.** For every
+     `bug.create` event whose payload declares a non-`None` `assignee`, a non-empty
+     `depends_on`, or a non-empty `blocks`, assert the event's actor resource declares
+     `group:editbugs`. Bugzilla silently substitutes the component default assignee
+     (`Bugzilla/Bug.pm:1449-1454`) and silently discards create-time edges (`:1707-1709`)
+     when the filer lacks `editbugs`, so without this assertion a mis-assigned reporter makes
+     the fixture stop proving what it declares while every gate stays green.
 
    **The shared topology graph.** The two topology tests read one directed graph, built once
    in a module-level helper and oriented consistently as `blocks` — an edge `(a, b)` means
@@ -272,18 +282,28 @@ From `src/bzr_live/replay`:
    a test that disagrees with the topology the spec declares is a test defect: fix the test,
    not the fixture.
 
-9. **Prove the tests bite.** Break the fixture deliberately, once per guard, and observe red
-   before reverting:
+9. **Prove the guards bite — one injection per guard, all three.** The spec names three
+   guard tests, and these are the assertions whose failure mode is otherwise invisible, so
+   these are the ones worth proving. Injecting against a count assertion proves nothing and
+   is not done here. Break the fixture, observe red, revert, one at a time:
 
-   - delete one `bug.create` line — expect `test_twenty_bugs_across_two_products` to fail;
-   - lengthen `attach-triage-notes`' description to 160 bytes — expect
-     `test_attachment_summaries_fit` to fail. 160 is the figure that goes red, not the
-     spec's 140-byte authoring margin: the marker `bzr-live:smoke:attach-triage-notes` is 34
-     bytes, so the fixed overhead is 109 bytes and a 140-byte description renders to 249,
-     comfortably under the 255 limit. At 160 the rendered summary is 269 bytes.
+   - **Insider guard.** Change `comment-private-token-leak`'s actor from `admin-ops` to
+     `triager` — a one-token edit; `triager` holds `editbugs` and `canconfirm` but not
+     `admin`. Expect `test_private_comment_author_is_an_insider` to fail.
+   - **Attachment ceiling guard.** Lengthen `attach-triage-notes`' description to 160 bytes.
+     Expect `test_attachment_summaries_fit` to fail. 160 is the figure that actually goes
+     red, not the spec's 140-byte authoring margin: the marker
+     `bzr-live:smoke:attach-triage-notes` is 34 bytes, so the fixed overhead is 109 and a
+     140-byte description renders to 249 — under the 255 limit. At 160 it renders to 269.
+   - **Privilege guard.** Add `"assignee": {"ref": "actor:triager"}` to
+     `create-cart-double-charge`, which `reporter` files without `editbugs`. Expect
+     `test_creates_declaring_assignee_or_edges_are_privileged` to fail. This is the exact
+     defect the guard exists for: an earlier draft of this design shipped it, and it was
+     invisible because `cart`'s default assignee is `triager` too.
 
-   Revert both edits. **If an injection stays green, the guard is at fault, not the fixture** —
-   the assertion is not measuring what it claims to. Fix the test and re-inject.
+   Revert each edit after observing red. **If an injection stays green, the guard is at
+   fault, not the fixture** — the assertion is not measuring what it claims to. Fix the test
+   and re-inject. Do not proceed with a guard that has never been seen to fail.
 
 10. **Run the guardrails and commit.**
 
@@ -295,9 +315,11 @@ From `src/bzr_live/replay`:
     Both exit 0. Commit as `feat(scenario): add the 20-bug smoke scenario and its offline proof`.
 
 **Acceptance criteria.** `scenarios/smoke/` loads with 47 events and 20 creates;
-`tests/test_smoke_scenario.py` passes with eleven tests; both guard tests were observed
-failing against a deliberate fault and passing after revert; `make check` and `make test` are
-green; no file under `src/` changed.
+`tests/test_smoke_scenario.py` passes with eleven tests; **all three** guard tests —
+`test_private_comment_author_is_an_insider`, `test_attachment_summaries_fit`, and
+`test_creates_declaring_assignee_or_edges_are_privileged` — were each observed failing
+against their own deliberate fault and passing after revert; `make check` and `make test`
+are green; no file under `src/` changed.
 
 ## Task 2 — The live proof
 
@@ -333,10 +355,20 @@ scenario. It ends at a `make smoke` that an operator can run and that reports a 
    - create the state root with `mktemp -d`, `chmod 700` it, and remove it in an `EXIT` trap;
    - fall back to the checkout's `.env` for `BZ_PORT` when the shell does not export it, and
      build `BASE_URL` as `http://127.0.0.1:${BZ_PORT:-8080}/`;
+   - print `"$BZR" --version` output as its **first** progress line. Every refusal in the
+     spec's constraint table is pinned to a `bzr` revision — `actions.py:15-16` names
+     `b80303b7` — and `BZR_LIVE_BZR` is by charter an operator-selected binary that may be a
+     different one. A run whose output does not name the revision cannot tell a live finding
+     from a stale one;
    - run provisioning, then replay, printing a progress line before each;
-   - time the replay with `SECONDS` and print
-     `smoke scenario: replayed <n> events in <SECONDS>s` — the observed duration epic #1 asks
-     for, read from the loaded scenario rather than hardcoded;
+   - time **only the replay**: set `SECONDS=0` on the line immediately before the
+     `python -m bzr_live.replay` invocation and nowhere else, then print
+     `smoke scenario: replayed <n> events in <SECONDS>s`, with `<n>` read from the loaded
+     scenario rather than hardcoded. Without that reset `SECONDS` counts from shell start,
+     so the figure would silently include provisioning twenty-eight resources — plausibly
+     the larger of the two intervals — under a label that says "replayed". `SECONDS` has
+     one-second granularity; if the replay lands under a second, report the provisioning
+     interval separately rather than publishing `0s` as a measurement;
    - print `smoke scenario: OK` on success;
    - never write to `docs/bzr-findings.md`.
 
@@ -385,15 +417,26 @@ scenario. It ends at a `make smoke` that an operator can run and that reports a 
 
    Then save a pristine baseline immediately, before anything has been provisioned into it.
    `scripts/checkpoint` requires both `--store` and `--runner-state`, exactly as
-   `tests/checkpoint_smoke.sh:100` invokes it; choose a store directory outside the repository
-   and keep both paths for the restore in step 7:
+   `tests/checkpoint_smoke.sh:100` invokes it. Two details are not optional, both established
+   by running this on the target host:
+
+   - **the paths must be canonical.** `mktemp -d` under `$TMPDIR` on macOS returns
+     `/var/folders/...`, a symlink to `/private/var/folders/...`, and the tool rejects it —
+     `paths: store must be canonical: expected /private/var/...`. Resolve with `pwd -P`, the
+     same idiom `tests/checkpoint_smoke.sh:6` uses.
+   - **the directories must already exist.** `scripts/checkpoint` does not create them;
+     it fails with `paths: cannot inspect ...: No such file or directory`.
 
    ```sh
-   CHECKPOINT_STORE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-smoke-store.XXXXXX")
-   RUNNER_STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-smoke-runner.XXXXXX")
-   scripts/checkpoint save pristine --store "$CHECKPOINT_STORE" \
-     --runner-state "$RUNNER_STATE"
+   TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-smoke.XXXXXX")
+   TEMP_ROOT=$(cd "$TEMP_ROOT" && pwd -P)
+   mkdir "$TEMP_ROOT/store" "$TEMP_ROOT/runner"
+   scripts/checkpoint save pristine --store "$TEMP_ROOT/store" \
+     --runner-state "$TEMP_ROOT/runner"
    ```
+
+   Expect `Saved checkpoint pristine at <store>/pristine`. Observed on this host: about 20
+   seconds, 228 MB.
 
    This is what makes step 7's retry loop cheap. Without it every fixture-defect iteration
    pays the full reset-and-rebuild above; with it the recovery is a restore measured in
@@ -417,15 +460,17 @@ scenario. It ends at a `make smoke` that an operator can run and that reports a 
      stops restoring ("bundle: stack fingerprint is incompatible") and must be re-saved — and
      say in the commit message that the fingerprint changed.
    - **A `bzr` limitation** — the engine refuses before mutating and names the boundary. Record
-     it in `docs/bzr-findings.md` with the `bzr` source citation, the observed behaviour, and
-     whether it is a defect or a design choice. Do not alter the declared payload to route
-     around it.
+     it in `docs/bzr-findings.md` with the `bzr` source citation, the observed behaviour,
+     **the `bzr` revision the run used**, and whether it is a defect or a design choice. The
+     revision is not optional: the existing refusals are pinned to `b80303b7`
+     (`src/bzr_live/replay/actions.py:15-16`), and an entry recorded against a different
+     binary is a different observation. Do not alter the declared payload to route around it.
    - **A defect in this fixture** — a wrong reference, a privilege the actor does not hold, a
      mistyped status. Fix the fixture, then restore the baseline rather than rebuilding:
 
      ```sh
-     scripts/checkpoint restore pristine --store "$CHECKPOINT_STORE" \
-       --runner-state "$RUNNER_STATE"
+     scripts/checkpoint restore pristine --store "$TEMP_ROOT/store" \
+       --runner-state "$TEMP_ROOT/runner"
      ```
 
      and re-run step 6. This is the common branch, and it is the one the checkpoint saved in
@@ -434,7 +479,9 @@ scenario. It ends at a `make smoke` that an operator can run and that reports a 
 8. **Record the observed duration in `README.md`.** Add a "Smoke scenario" section after
    "Scenario replay" giving what the scenario covers, the `make smoke` invocation with
    `BZR_LIVE_BZR`, the fresh-fixture prerequisite, and the duration observed in step 6. State
-   the host it was observed on — a duration with no host is not a measurement.
+   the host **and the `bzr` revision** it was observed on, and say which interval the figure
+   covers — replay only, excluding provisioning and `make up`. A duration with no host is not
+   a measurement, and a figure whose interval is unstated will be read as throughput.
 
 9. **Run the guardrails and commit.**
 

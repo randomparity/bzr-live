@@ -38,11 +38,26 @@ the loader, the replay engine, the journal, or the provisioning executor is part
 work. Where an honest payload cannot be expressed, that is recorded as a finding in
 `docs/bzr-findings.md` rather than accommodated by widening the contract.
 
-Bug topology is declared in two phases: `depends_on` and `blocks` on a `bug.create` cite
-only bugs created by earlier events, and every remaining edge — including every edge that
-would otherwise be a forward reference — is declared by a later `bug.update`. The scenario
-therefore reads as a narrative in which relationships accumulate, which is also how the
-relationships it models arise in a real tracker.
+Bug topology is declared mostly by `bug.update` rather than on the creates, for two reasons
+that are not about expressiveness. A create-only graph **is** expressible — the scenario's
+graph is acyclic, so a topological creation order exists, and since `depends_on` and `blocks`
+are inverse relations every edge can be spelled as the later bug's `depends_on`. It is
+rejected because:
+
+- **Bugzilla silently drops create-time edges from an unprivileged reporter.**
+  `_check_dependencies` returns an empty pair unless the filer holds `editbugs`
+  (`Bugzilla/Bug.pm:1707-1709` on the pinned image), with no error. A fixture whose whole
+  graph rode on the creates would lose it silently the moment a reporter without `editbugs`
+  filed one of those bugs — and this scenario deliberately keeps an unprivileged reporter.
+  Declaring edges by `bug.update` moves them onto actors that necessarily hold `editbugs`.
+- **A create-only graph never exercises the update path.** `BugUpdateHandler.build` computes
+  a list delta and emits `--depends-on-add` / `--depends-on-remove` / `--blocks-add` /
+  `--blocks-remove` (`src/bzr_live/replay/actions.py:396-405`), and `_UPDATE_COMPARE_SETS`
+  reconciles those two fields (`actions.py:69-74`). For a fixture whose purpose is
+  composition coverage, leaving both untested is a real loss.
+
+Two creates keep a backward edge, so the create-time path is covered too; both are filed by
+actors holding `editbugs`, which the offline tier asserts rather than leaves to chance.
 
 The proof is two-tier. `tests/test_smoke_scenario.py` loads and plans the committed scenario
 with no server, asserting the topology and coverage invariants; it needs no Docker and runs
@@ -71,9 +86,15 @@ stated as narrowly as it is.
   journal written against the old content. That is already the contract's behaviour
   (ADR 0006); this record makes a 20-bug fixture the thing people edit, so it will be met
   more often. `README.md` states the recovery.
-- The two-phase topology declaration means a reader cannot see a bug's complete relationship
-  set at its create event. The offline test asserts the final topology, so the invariant is
+- Declaring topology by update means a reader cannot see a bug's complete relationship set
+  at its create event. The offline test asserts the final topology, so the invariant is
   checked in one place even though it is declared across many.
+- The privilege model becomes load-bearing rather than incidental. Bugzilla's silent
+  substitution on the create path — the component default assignee when the filer lacks
+  `editbugs` (`Bugzilla/Bug.pm:1449-1454`), and dropped edges (`:1707-1709`) — means an
+  actor's group membership silently changes what a create actually writes. The offline tier
+  asserts the invariant that follows: any create declaring an assignee or an edge is filed
+  by an `editbugs` actor. Without that assertion the fixture would be correct by coincidence.
 - `scenarios/` becomes a third fixture location alongside `tests/fixtures/` and the
   checkpoint store. The distinction is by audience, not by format, and it is stated here
   because nothing in the file layout makes it evident.
@@ -90,20 +111,26 @@ stated as narrowly as it is.
   contract requires "Store each scenario under `scenarios/<name>/`", and the runner's
   `load`/`replay`/`verify` commands take a scenario path an operator types.
 - **Generate the fixture from a Python script at build time.** judgment: a generator makes
-  the committed artifact a program rather than data, so reviewing what the fixture asserts
-  means running it; the epic's requirement that generated server IDs never appear in
-  committed fixture files is easier to audit on literal JSON than on the output of a
-  generator.
+  the committed artifact a program rather than data, so reviewing what the fixture declares
+  means running it, and a 47-event stream is small enough to read. The epic's requirement
+  that generated server IDs never appear in committed fixture files needs no separate audit
+  either way — every reference position is typed, and `loader.py:162-172` refuses anything
+  that is not a `{"ref": ...}` object, so a baked-in id cannot load at all.
 - **Extend `tests/replay_smoke.sh` rather than adding a script.** verified: that script's
   header (`tests/replay_smoke.sh:1-9`) scopes it to issue #6's three specific assertions —
   an honest create with no `op_sys`/`rep_platform`, the alias round-trip, and server-side
   alias uniqueness — and it probes finding D1; folding a 20-bug composition proof into it
   would make a failure ambiguous between two issues' contracts.
 - **Declare the full topology on each `bug.create` and order creates to suit.** verified:
-  a `bug.create` citing a later-created bug is refused with
-  `events.jsonl:1:$.payload.blocks[0]: reference does not resolve` (run against
-  `load_scenario` at 27d37a4), and a diamond cannot be linearized so that every edge points
-  backwards.
+  this is expressible, not excluded — a topological creation order exists for any acyclic
+  graph, and a four-bug create-only diamond loads cleanly through `load_scenario`. The
+  loader refuses only a *forward* reference
+  (`events.jsonl:1:$.payload.blocks[0]: reference does not resolve`, run against
+  `load_scenario` at 27d37a4), which constrains which of the two inverse spellings an edge
+  uses, not which topologies are expressible; only a cycle is inexpressible. It is rejected
+  on the two grounds in Decision above — silent edge-dropping for an unprivileged filer
+  (`Bugzilla/Bug.pm:1707-1709`) and zero coverage of the update delta path
+  (`src/bzr_live/replay/actions.py:396-405`) — not because it cannot be written.
 - **Add a loader affordance for forward references.** judgment: it would trade a validation
   guarantee that currently catches typos for the convenience of declaring an edge in one
   place instead of two, on a contract this issue is explicitly not chartered to change.

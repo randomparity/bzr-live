@@ -18,7 +18,7 @@ determined by them, and none is stated in the existing docs.
 
 | # | Constraint | Source | Effect on the fixture |
 |---|---|---|---|
-| 1 | A created identity becomes resolvable only after its event validates, so no event may cite a bug a later event creates | `src/bzr_live/scenario/loader.py:810`; verified — a `bug.create` with `blocks` naming a later bug is refused with `events.jsonl:1:$.payload.blocks[0]: reference does not resolve` | Topology is declared in two phases: backward edges on create, everything else by later `bug.update` |
+| 1 | A created identity becomes resolvable only after its event validates, so no event may cite a bug a later event creates | `src/bzr_live/scenario/loader.py:810`; verified — a `bug.create` with `blocks` naming a later bug is refused with `events.jsonl:1:$.payload.blocks[0]: reference does not resolve` | An edge must be spelled as the *later* bug's `depends_on` if declared on a create. This constrains the spelling, not the topology — only a cycle is inexpressible. Why most edges are still declared by `bug.update` is a decision, not a constraint: see ADR 0007 |
 | 2 | A flag type name containing `+ - ? X` is unaddressable | `src/bzr_live/replay/actions.py:588-598` (finding D1) | Flag types are single words: `review`, `signoff` |
 | 3 | `custom_fields` is refused on `bug.create` | `src/bzr_live/replay/actions.py:24` (finding G4) | Custom-field values are separate `bug.custom-field-set` events |
 | 4 | `estimated_hours` / `remaining_hours` are refused on `bug.create` | `src/bzr_live/replay/actions.py:25-28` (finding G1) | Time estimates arrive by `bug.update` |
@@ -33,19 +33,46 @@ determined by them, and none is stated in the existing docs.
 
 ## Privilege model
 
-Bugzilla grants a new user no groups. Two consequences bind the fixture, and both are
-stated here because a missing membership surfaces as an opaque mid-replay failure rather
-than a validation error:
+Bugzilla grants a new user no groups. Three memberships bind this fixture, and the reason
+to state them here is the opposite of the obvious one: **a missing membership is silent on
+the create path, not loud.** Bugzilla substitutes or drops and reports success.
 
-- **`editbugs`** — without it a user may edit only bugs they reported or are assigned. Every
-  actor that updates a bug it did not report needs it.
+- **`editbugs`** — without it a user may edit only bugs they reported or are assigned. It
+  also gates two things on *create*, both silently:
+  `_check_assigned_to` replaces a declared assignee with the component's default assignee
+  (`Bugzilla/Bug.pm:1449-1454`), and `_check_dependencies` returns an empty pair, discarding
+  every create-time `depends_on` and `blocks` (`:1707-1709`). Both verified by reading the
+  pinned fixture image. `_check_keywords` and `_check_target_milestone` carry no such gate,
+  so those two survive an unprivileged filer.
 - **`canconfirm`** — required to move a bug out of `UNCONFIRMED`.
+- **`timetrackinggroup`** — a Bugzilla *parameter*, not a membership, defaulting to
+  `editbugs` (`Bugzilla/Config/GroupSecurity.pm:42-47` on the pinned image). It gates
+  `work_time`, `estimated_time`, and `remaining_time`, so the estimate event and both
+  work-time events depend on it. `containers/bugzilla/checksetup_answers.txt` does not set
+  it, so the fixture inherits the default and the events work because their actors hold
+  `editbugs`. On the create path a non-timetracker is silently given 0
+  (`Bug.pm:2153-2159`, "we're forgiving"); on the update path the value is refused instead.
+  Pinning it beside `insidergroup` would be the stronger fix and matches this repository's
+  own precedent, but it is a `containers/` edit that makes no currently-failing payload
+  succeed, so it falls outside this issue's permitted surface. It is recorded here and
+  raised in the pull request rather than taken.
 
-Both are Bugzilla system groups, pre-created by `checksetup` and reconciled as existing
-fixture furniture (`src/bzr_live/provision/executor.py:10-13,162-172`), so the scenario
-declares membership without creating the groups. `reporter` is deliberately left
-unprivileged: it creates and comments only, which keeps one honest non-privileged path in
-the scenario.
+`editbugs` and `canconfirm` are Bugzilla system groups, pre-created by `checksetup` and
+reconciled as existing fixture furniture
+(`src/bzr_live/provision/executor.py:10-13,162-172`), so the scenario declares membership
+without creating them. Verified against the live fixture: provisioning an actor declaring
+`admin`, `editbugs`, and `canconfirm` succeeds, and a second run reports the actor
+`unchanged`, which is `_classify_actor` confirming every declared membership read back.
+
+**The invariant this forces.** Because the failure is silent, it cannot be left to the live
+run to notice. Any create that declares an `assignee` or a `depends_on`/`blocks` edge must
+be filed by an actor holding `editbugs`, and the offline tier asserts exactly that. Without
+it the fixture would be correct only by coincidence — as an earlier draft of this design
+was, filing bug 1 through the unprivileged `reporter` with `assignee: triager` while
+`cart`'s default assignee happened to be `triager` too.
+
+`reporter` is deliberately left unprivileged, keeping one honest non-privileged path, and
+therefore declares no assignee and no edges on anything it files.
 
 If `bzr group add-user` cannot grant a system group, that is a finding for
 `docs/bzr-findings.md`, not a reason to promote every actor to admin.
@@ -90,7 +117,7 @@ Twenty bugs, created in this order. The order matters only where a create declar
 
 | # | Alias | Product/component | Reporter | Version | Notes |
 |---:|---|---|---|---|---|
-| 1 | `cart-double-charge` | checkout/cart | reporter | checkout-v1 | milestone `checkout-m1`, assignee `triager`, cc `reporter`, keyword `regression` |
+| 1 | `cart-double-charge` | checkout/cart | reporter | checkout-v1 | milestone `checkout-m1`, cc `reporter`, keyword `regression`. **No assignee**: `reporter` lacks `editbugs`, so Bugzilla would silently substitute the component default. `confirm-double-charge` sets the assignee later, from a privileged actor |
 | 2 | `cart-empty-crash` | checkout/cart | reporter | checkout-v1 | |
 | 3 | `cart-slow-render` | checkout/cart | developer | checkout-v2 | keyword `perf` |
 | 4 | `cart-stale-total` | checkout/cart | triager | checkout-v1 | |
@@ -128,19 +155,12 @@ apex and one on the sink, so each edge is declared exactly once.
 
 ## Event stream
 
-Forty-seven events in eight phases. Every event name is unique and every marker derives from
-it (`src/bzr_live/scenario/loader.py:791`).
-
-| Phase | Events | Action | Actors |
-|---|---:|---|---|
-| 1 Creates | 20 | `bug.create`, one per bug above | reporters from the table |
-| 2 Topology | 5 | `bug.update` — chain ×2, diamond ×2, duplicate ×1 | triager, admin-ops, developer |
-| 3 Lifecycle | 7 | `bug.update` — confirm ×2 (one also reassigns and extends cc), resolve, reopen, re-resolve, estimate, retarget | triager, developer, releaser |
-| 4 Comments | 5 | `bug.comment` — four public, one private | admin-ops posts the private one |
-| 5 Attachments | 3 | `bug.attach` ×2, `attachment.update` ×1 (obsolete) | triager, developer |
-| 6 Flags | 2 | `bug.flag` — one `?` with requestee, one `+` | developer, releaser |
-| 7 Work time | 2 | `bug.worktime` | developer, triager |
-| 8 Custom fields | 3 | `bug.custom-field-set` — all three field types covered | admin-ops, triager |
+Forty-seven events in eight phases — 20 creates, 5 topology updates, 7 lifecycle updates,
+5 comments, 3 attachment events, 2 flags, 2 work-time entries, and 3 custom-field
+assignments. Every event name is unique and every marker derives from it
+(`src/bzr_live/scenario/loader.py:791`). The implementation plan carries the per-event
+table: actor, target, and payload fields for all forty-seven. It is not repeated here,
+because a second copy is a second thing to keep in agreement by hand.
 
 Phase 3's estimate event declares `estimated_hours` and `remaining_hours`, which
 `bug.update` accepts but cannot read back, so its reconciliation always returns `retry`
@@ -155,24 +175,25 @@ its neighbours'. Proving what resume does with it belongs to #21.
 replaying, so a fixture defect fails under `make test` without a container. It is not yet a
 CI gate for fixture-only edits — `scenarios/**` is in neither path filter of
 `.github/workflows/scenario-contract.yml`, and adding it belongs to #21 (ADR 0007,
-Consequences). The assertions:
+Consequences). Eleven assertions cover loading and digest stability, the bug and product
+counts, the dependency chain, the diamond, the duplicate, the reopening, full `HANDLERS`
+coverage, and all three custom-field types. The implementation plan carries the method list
+with the exact predicate for each; it is not repeated here.
 
-- it loads without error, and the digest is stable across two loads;
-- exactly 20 `bug.create` events, spanning at least two products;
-- the dependency chain is three deep and crosses products;
-- the diamond's apex reaches the sink by two distinct paths;
-- exactly one `duplicate_of` assignment;
-- the status sequence on `pay-decline-copy` contains a resolved-to-open transition;
-- every action in `HANDLERS` appears at least once;
-- all three custom-field types are assigned;
-- at least one private comment, and its author is in `group:admin`;
-- every rendered attachment summary is within `ATTACHMENT_SUMMARY_BYTE_LIMIT`;
-- no committed fixture file carries a bare integer where a typed reference belongs — the
-  property ADR 0007 rests on when it prefers literal JSON to a generator, which nothing
-  would otherwise check.
+Three of the eleven are **guard tests**, and they are the reason the offline tier exists at
+all — each encodes a constraint that would otherwise fail only against a live server, late,
+or would never be noticed:
 
-The last three are guard tests: each encodes a constraint that would otherwise fail only
-against a live server, late — or, for the last, not at all.
+- **the private-comment author holds `group:admin`** — the fixture's private-comment path
+  depends on `insidergroup = admin` (constraint 9);
+- **every rendered attachment summary fits `ATTACHMENT_SUMMARY_BYTE_LIMIT`** — Bugzilla
+  truncates rather than refusing (constraint 10);
+- **every create declaring an assignee or an edge is filed by an `editbugs` actor** — the
+  invariant the privilege model above forces, guarding against silent server-side
+  substitution that no other tier can see.
+
+Each guard gets its own deliberate fault injection during implementation. A guard that
+cannot be made to fail is not a guard.
 
 **Live tier — `tests/smoke_scenario.sh`, `make smoke`.** Provisions the scenario's resources
 and replays its events against a running fixture, following the conventions
@@ -219,7 +240,8 @@ remote attacker nor a hostile local user is in the threat model.
 **Controls.** The state root is a `mktemp -d` directory set to mode 0700 and removed by an
 `EXIT` trap; keys reach `bzr` in the environment, never on a command line or in script
 output; the scenario's committed files contain no key, no server ID, and no runtime state —
-the last of these asserted by the offline tier rather than assumed.
+the last enforced by the loader, which types every reference position and refuses anything
+that is not a `{"ref": ...}` object (`src/bzr_live/scenario/loader.py:162-172`).
 
 **Out of scope.** Encryption at rest, key rotation, and credential-store integration, all
 excluded by `AGENTS.md`. Fault injection and the response-loss proofs are #21's.
