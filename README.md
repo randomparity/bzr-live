@@ -108,14 +108,26 @@ collision on any alias the scenario declares — a per-scenario proxy for the pr
 baseline rather than a check of it, since nothing here can ask whether the database
 is at that baseline (ADR 0006) — and the scenario's actors already provisioned with
 API keys under the same state root; `resume` continues a run from its journal after an
-interruption, refusing if the scenario or fixture changed underneath it. Both exit 1
-with a `replay failed: ...` message on stderr naming the precondition or `bzr`
-limitation that stopped them.
+interruption. Both exit 1 with a `replay failed: ...` message on stderr naming the
+precondition or `bzr` limitation that stopped them.
+
+`resume` refuses on three things: a scenario whose digest no longer matches the journal, a
+journal record for an event the scenario no longer names, and a create whose alias already
+exists without a journal record proving this run made it. It does **not** detect a fixture
+reset — no journal record carries a fixture identity — and Bugzilla restarts ids at 1, so a
+journal outlives the fixture it describes and its stored ids then point at whatever now
+occupies them. Treat a reset as invalidating the journal: remove the journal directory with
+it and replay from the start.
 
 Replay needs a fixture installed with the current `containers/bugzilla/checksetup_answers.txt`.
 Bugzilla reads those answers only at install, so a fixture built before them rejects every
 create — "There is no Priority named '--'", or a missing platform — with nothing pointing at
 the cause. Recreate it first: `CONFIRM_RESET=1 make reset && make up`, then re-provision.
+
+That edit also changes the checkpoint stack fingerprint — `scripts/checkpoint` hashes every
+file under `containers/` — so checkpoints saved before it no longer restore ("bundle: stack
+fingerprint is incompatible"). Save a fresh `pristine` after recreating the fixture, or the
+engine's own "restore the pristine baseline" instruction has nothing to restore.
 
 `tests/replay_smoke.sh` runs the live proof against a fresh fixture
 (`BZR_LIVE_BZR=<bzr binary> bash tests/replay_smoke.sh`).

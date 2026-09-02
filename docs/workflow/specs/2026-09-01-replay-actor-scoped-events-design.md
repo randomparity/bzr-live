@@ -22,7 +22,7 @@ eight actions the merged loader defines.
 The pristine precondition is checked per scenario, not globally: replay proves that *this*
 scenario's bugs are absent, not that the fixture holds nothing at all. Residue from a
 different scenario replayed under the same fixture is the operator's to clear with
-`scripts/checkpoint restore pristine`, which is what they are told to run.
+`scripts/checkpoint`, which is what they are told to run.
 
 Out of scope, with owners: restoring the pristine checkpoint (operator, via
 `scripts/checkpoint restore pristine`); `replay --through EVENT` (deferred, issue #17);
@@ -114,7 +114,10 @@ offending item and the fix.
 5. **`replay` only — pristine sweep.** The fail-fast form of check 3: every `bug.create`
    event's alias is read up front, before any mutation, rather than one event at a time as
    the run reaches it. A present alias refuses: "<alias> already exists in the fixture; replay
-   requires the pristine baseline (`scripts/checkpoint restore pristine`)".
+   requires the pristine baseline -- restore or re-save it with
+   `scripts/checkpoint`". Both arms are named because this change edits
+   `containers/`, which the checkpoint stack fingerprint hashes: a bundle saved before
+   it no longer restores, so "restore" alone can be a dead end.
 
 Preconditions 1, 2 and 4 are local and run first; 3 and 5 touch the network, and 3 is the
 only one that runs during the loop rather than ahead of it.
@@ -154,12 +157,12 @@ as refused is supported.
 |---|---|---|
 | `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding exactly what the scenario declared: `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on` | `estimated_hours` / `remaining_hours` → bzr's create JSON has no such field, though Bugzilla accepts both ([G1]); `custom_fields` → bzr excludes `cf_*` from create by design ([G4]); `duplicate_of` → **Bugzilla's** own `Bug.create` has no `dupe_of`, so this one is not bzr's; null `version` → bzr silently substitutes `"unspecified"`, a version this fixture's products do not declare ([G9]) |
 | `bug.update` | `bzr bug update <id>` with `--summary`, `--status`, `--resolution`, `--assignee` or `--reset-assigned-to`, `--dupe-of`, `--target-milestone`, `--estimated-time`, `--remaining-time`, and `--cc-add/-remove`, `--keywords-add/-remove`, `--blocks-add/-remove`, `--depends-on-add/-remove` computed as deltas against `bzr bug view` | `groups` → `bzr bug view` does not return `groups`, so no delta can be computed and no result confirmed ([D3]); `version` → bzr's `bug update` has no version flag, though Bugzilla accepts one ([G2]); null `milestone` → bzr offers `--reset-assigned-to` but no milestone reset ([G3]); null `resolution` → **Bugzilla** clears it on transition to an open status, so declare the status change instead; null `duplicate_of` → **Bugzilla** clears a duplicate through a status transition (`clear_resolution` calls `_clear_dup_id` and throws unless the bug is already open), and `Bug.update` types `dupe_of` as `int` with no null form, so declare that status change instead; `duplicate_of` with `status` **or** `resolution` → both flags carry `conflicts_with = "dupe_of"`, deliberately ([G5]) |
-| `bug.comment` | `bzr comment add <id> --body-file=<tmpfile> [--private]` | — |
-| `bug.attach` | `bzr attachment upload <id> <file> --summary=<description + marker + checksum> --content-type=<type> [--private]` | rendered summary longer than 255 **bytes** when UTF-8 encoded → **Bugzilla's** `attachments.description` is `TINYTEXT` (`Bugzilla/DB/Schema.pm:505`), not a bzr gap → "shorten the attachment description" |
-| `bug.worktime` | `bzr bug update <id> --work-time=<hours> --comment-file=<tmpfile>` | — |
+| `bug.comment` | `bzr comment add <id> --body-file=<tmpfile> [--private]` | declared text containing the literal `[bzr-live:` → **this engine's** own append marker; reconciliation could not tell a declared token from one it wrote, so the event is refused before it is sent |
+| `bug.attach` | `bzr attachment upload <id> <file> --summary=<description + marker + checksum> --content-type=<type> [--private]` | rendered summary longer than 255 **bytes** when UTF-8 encoded → **Bugzilla's** `attachments.description` is `TINYTEXT` (`Bugzilla/DB/Schema.pm:505`), not a bzr gap → "shorten the attachment description"; declared text containing the literal `[bzr-live:` → **this engine's** own append marker; reconciliation could not tell a declared token from one it wrote, so the event is refused before it is sent |
+| `bug.worktime` | `bzr bug update <id> --work-time=<hours> --comment-file=<tmpfile>` | declared text containing the literal `[bzr-live:` → **this engine's** own append marker; reconciliation could not tell a declared token from one it wrote, so the event is refused before it is sent |
 | `bug.custom-field-set` | `assign_bug_custom_fields(base_url, actor_key, id, {cf_<slug>: value})` | — |
 | `bug.flag` | `bzr bug update <id> --flag=<name><status>[(<requestee email>)]` | flag-type name containing `+`, `-`, `?` or `X` → bzr's flag parser takes the first of those characters as the status, so the name is unaddressable ([D1]) |
-| `attachment.update` | `bzr attachment update <id> --obsolete` / `--no-obsolete`, plus `--summary=<description>` when declared | — |
+| `attachment.update` | `bzr attachment update <id> --obsolete` / `--no-obsolete`, plus `--summary=<description>` when declared | declared `description` longer than 255 **bytes** when UTF-8 encoded → the same **Bugzilla** `attachments.description` `TINYTEXT` column as `bug.attach`, and Bugzilla applies no length validator to it (`Bugzilla/Attachment.pm:578-584`) while disabling strict `sql_mode` (`Bugzilla/DB/MariaDB.pm:87-100`), so an unchecked write is truncated by MariaDB and reported as success; declared text containing the literal `[bzr-live:` → **this engine's** own append marker; reconciliation could not tell a declared token from one it wrote, so the event is refused before it is sent |
 
 Every refusal on a **bzr** limitation names it and links its entry in
 [`docs/bzr-findings.md`](../../bzr-findings.md), which carries the source citation, the class
@@ -363,7 +366,8 @@ binary, and the local fixture's replies.
 | Scenario files → engine (existing, not widened) | in | issue #3's loader: strict typing, unknown-field rejection, reference resolution, asset checksums |
 | Key store → `bzr` subprocess (existing, reused) | out | `BzrClient` passes the key in `BZR_LIVE_API_KEY`, never in argv; `shell=False` |
 | Key store → Bugzilla REST (existing, reused) | out | `assign_bug_custom_fields` puts the key in the JSON body, never the query string (ADR 0004) |
-| Scenario values → `bzr` argv (**widened**: free text now reaches argv) | out | every option is built as a single `--name=value` token, so a value starting with `-` cannot be read as a separate flag; positionals go after `--`; `shell=False` |
+| Scenario values → `bzr` argv (**widened**: free text now reaches argv) | out | every option **this engine builds** is a single `--name=value` token, so a value starting with `-` cannot be read as a separate flag; positionals go after `--`; `shell=False` |
+| Actor email → `bzr` argv (**widened**: a scenario-declared address now reaches `--server-email`, which previously only carried the admin address from `.env`) | out | the one exception to the row above: `BzrClient._invoke` emits `--server-email` and its value as two tokens, and that client is issue #4's, outside this change's amended surface. Bounded by the loader's email pattern `[^\s@]+@[^\s@]+`, which admits no whitespace so the value is always exactly one token and cannot introduce a second flag, and by clap's default rejection of a hyphen-leading value (no `allow_hyphen_values` anywhere in bzr at `b80303b7`). Making the client emit one token would remove the dependency on bzr's parser configuration and is issue #4's to make |
 | Boundary replies → journal and resolution table (**new**) | in | `json.loads` only; an adopted ID must be a positive integer, enforced by `CompletedRecord.__post_init__` |
 | Engine → journal files (existing, reused) | out | `JournalStore` 0700 directory, 0600 records, `O_NOFOLLOW`, exclusive lock; `known_secrets` redaction on every write |
 | Assets → temp file for upload (**new**) | out | materialized inside a `TemporaryDirectory` chmod 0700, file mode 0600, SHA-256 verified against the postcondition before upload, removed on exit |

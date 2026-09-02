@@ -880,7 +880,8 @@ class EngineTest(unittest.TestCase):
         with self.assertRaises(ReplayError) as caught:
             self._engine(run, scenario).replay()
         self.assertIn(alias, str(caught.exception))
-        self.assertIn("scripts/checkpoint restore pristine", str(caught.exception))
+        self.assertIn("pristine baseline", str(caught.exception))
+        self.assertIn("scripts/checkpoint", str(caught.exception))
         # Refused by the up-front sweep: one read, no mutation, nothing journalled.
         self.assertEqual(len(run.calls), 1)
         self.assertIn("view", run.calls[0]["argv"])

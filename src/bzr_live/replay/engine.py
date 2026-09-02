@@ -109,8 +109,8 @@ class ReplayEngine:
         if self._context.read_bug(event.actor, [alias]) is not None:
             raise ReplayError(
                 f"bug alias {alias} (event {event.name!r}) already exists in the "
-                "fixture; replay requires the pristine baseline -- run "
-                "scripts/checkpoint restore pristine, then replay")
+                "fixture; replay requires the pristine baseline -- restore or re-save "
+                "it with scripts/checkpoint, then replay")
 
     def _sweep_pristine(self) -> None:
         for event in self._scenario.events:

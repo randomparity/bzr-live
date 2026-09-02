@@ -112,6 +112,17 @@ cannot see and which this scenario's namespaced aliases make harmless to it. Est
 baseline itself stays the operator's `scripts/checkpoint restore pristine`, per the exclusion
 this issue was scoped under.
 
+A second residue follows from the same absence, and it bites on `resume` rather than `replay`.
+Nothing binds a journal to a fixture *identity* — no record, manifest or field carries a
+database uuid, checkpoint id or install timestamp, and nothing compares one. So an operator who
+resets the fixture mid-run and then resumes gets every completed event skipped and its stale
+ids adopted into the resolution table, and Bugzilla restarts ids at 1 after a reset, which
+makes collision likely rather than exotic. Adding fixture-identity persistence was considered
+and rejected: it is the crash-consistency machinery `AGENTS.md` scopes out, and the charter does
+not authorize it. The honest mitigation is documentary — a reset invalidates the journal, so the
+journal directory goes with it — and `README.md` now says so rather than claiming `resume`
+detects it.
+
 **The fixture is fixed in the fixture; the runner substitutes nothing.** `checksetup_answers.txt`
 gains `defaultplatform` and `defaultopsys` so a create declaring neither succeeds on its own
 terms. Replay sends exactly what the scenario declares and nothing else. Injecting a fixed
@@ -246,9 +257,18 @@ defaults to reset *to*, and `resolution` and `dupe_of` are cleared by a status t
 
   That first run also falsified one thing this record asserted. The 255-byte attachment
   ceiling is **not** enforced by rejection: a 256-byte summary was accepted (exit 0,
-  attachment 2) and stored at exactly 255 bytes — silent truncation, with the column
-  `tinytext` and `sql_mode` `STRICT_TRANS_TABLES`, so Bugzilla truncates above the database
-  rather than the database refusing. The client-side refusal is therefore *more* necessary
+  attachment 2) and stored at exactly 255 bytes. The mechanism is the database's, not
+  Bugzilla's: the column is `TINYTEXT`, Bugzilla applies no length validator to
+  `attachments.description` (`Bugzilla/Attachment.pm:578-584` trims and rejects only an
+  empty value), and it removes `STRICT_TRANS_TABLES` from the session `sql_mode` at
+  `Bugzilla/DB/MariaDB.pm:87-100` — "Disable ANSI and strict modes, else Bugzilla will
+  crash" — while `containers/mariadb/bugzilla.cnf` sets none of its own. So MariaDB
+  truncates silently. "Bugzilla truncates over-long fields" is not a general rule:
+  `bugs.short_desc` *is* guarded, by `MAX_FREETEXT_LENGTH` at `Bugzilla/Bug.pm:2046-2049`,
+  which throws `freetext_too_long`. It is specifically the columns Bugzilla forgot to
+  validate that fall through to a non-strict database — which is why the ceiling is checked
+  per *column* here, on both `bug.attach` and `attachment.update`, rather than per marker.
+  The client-side refusal is therefore *more* necessary
   than this record argued, not less: the reconciliation marker lives in that summary, so a
   truncated summary destroys the handle append-class reconciliation matches on, and the
   server would report success while doing it.
