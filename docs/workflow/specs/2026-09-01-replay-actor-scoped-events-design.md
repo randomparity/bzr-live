@@ -384,8 +384,10 @@ the id that create returned, and then issues a second create declaring the same 
 asserts it **fails** — one more step in a script that already has the fixture up and one bug
 created, and the proof that a duplicate create lands in reconciliation rather than producing
 two bugs under one alias. It also probes each
-`docs/bzr-findings.md` entry marked *read from source* and records the observed behaviour
-there, which is how an entry is promoted from read to observed. CI runs the unit suite;
+`docs/bzr-findings.md` entry marked *read from source* and **prints** the observed behaviour;
+the operator transcribes the promotion from *read* to *observed* into the register as an
+ordinary edit. The script never writes to the register — its entries carry classifications a
+script cannot judge. CI runs the unit suite;
 the smoke is operator-run by decision.
 
 Each of these is a case:

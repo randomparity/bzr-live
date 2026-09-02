@@ -510,8 +510,11 @@ and change `BzrClient.read`'s signature and its exit-4 branch:
 ```
 
 The parameter is keyword-only with today's set as its default, so every existing
-provisioning call site is unaffected. Export `BUG_ABSENT_CODES` from
-`src/bzr_live/provision/__init__.py`'s `__all__`.
+provisioning call site is unaffected. The change stays strictly inside `adapters.py`:
+do **not** re-export `BUG_ABSENT_CODES` from `src/bzr_live/provision/__init__.py`. That
+file is issue #4's, the surface amendment names only `adapters.py`, and every consumer
+here imports from `bzr_live.provision.adapters` directly, so the re-export would be an
+unread public name added outside the approved surface.
 
 Create `src/bzr_live/replay/__init__.py`:
 
@@ -1974,9 +1977,13 @@ print(next(e.expected_postcondition['values']['server_alias']
 ```
 
 It then probes each `docs/bzr-findings.md` entry still marked *read from source* — most
-usefully D1, by attempting a hyphenated flag type — and records the observed exit code and
-message in the register, promoting the entry from read to observed. That probe is the
-fixture doing its actual job.
+usefully D1, by attempting a hyphenated flag type — and **prints** each probe's observed exit
+code and message under a `findings probe:` prefix. That probe is the fixture doing its actual
+job. The script asserts nothing about the register and never writes to it: the operator reads
+the output and transcribes the promotion from *read* to *observed* as an ordinary edit. A test
+script that rewrote a committed deliverable would dirty the tree on every run and would move
+authorship of the register — whose classifications are judgement calls, as D2→G7 and the
+withdrawal of G8 both showed — from the operator to an automated writer.
 
 The smoke requires a fixture installed **after** Task 0's checksetup change:
 `CONFIRM_RESET=1 make reset && make up` first, since Bugzilla reads those answers only at

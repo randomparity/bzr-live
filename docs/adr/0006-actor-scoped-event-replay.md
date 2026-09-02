@@ -100,9 +100,17 @@ presence refuses, wherever that event is reached from. `replay` additionally swe
 directory holds any record at all — the same check in its fail-fast form. Binding it to the
 command instead of to the event would let `resume` against an empty journal perform a
 first-time replay with no baseline proof, and, worse, adopt a pre-existing bug as its own
-create the moment the duplicate alias sent it into reconciliation. That sweep is what
-"replay begins from the keyed pristine baseline" means operationally; restoring the baseline
-stays the operator's `scripts/checkpoint restore pristine`.
+create the moment the duplicate alias sent it into reconciliation.
+
+Be exact about what that sweep proves, because issue #6's criterion is worded more strongly
+than the check: it proves *this scenario's* bugs are absent, not that the fixture is at the
+pristine baseline. It is a per-scenario proxy, and it is the strongest check available —
+`pristine` is a reserved checkpoint *name* (ADR 0005), and nothing in `bzr_live.checkpoint`
+answers "is the running database at the baseline?"; `stack_fingerprint` keys build inputs, not
+live contents. The residual case is residue from a *different* scenario, which the sweep
+cannot see and which this scenario's namespaced aliases make harmless to it. Establishing the
+baseline itself stays the operator's `scripts/checkpoint restore pristine`, per the exclusion
+this issue was scoped under.
 
 **The fixture is fixed in the fixture; the runner substitutes nothing.** `checksetup_answers.txt`
 gains `defaultplatform` and `defaultopsys` so a create declaring neither succeeds on its own
@@ -215,6 +223,14 @@ defaults to reset *to*, and `resolution` and `dupe_of` are cleared by a status t
   cannot reach either, so `tests/replay_smoke.sh` — an operator-run live proof beside
   `tests/provision_smoke.sh`, the split ADR 0004 already chose — is what discharges them.
   Until it has run, both are stated as inferences here rather than as verified grounds.
+- Replay imports two private names across package boundaries: `_ATTEMPT_FILE` from
+  `bzr_live.scenario.journal` (issue #3) and `_KEY_ENV` from `bzr_live.provision.adapters`
+  (issue #4). Both are deliberate. `JournalStore`'s public read tolerates other events'
+  record files, so the stray-record scan criterion 4 needs cannot be built on the public API,
+  and the alternative — forking the attempt-file pattern into `engine.py` — would drift
+  silently, which is worse than an import that fails loudly at startup. Expanding either
+  merged module to publish an accessor was the other option and was not taken: it is an
+  excluded module's owner's call. If issue #3 later publishes a listing accessor, switch.
 - Widening `BzrClient.read` is a change to a boundary client issue #4 owns. The new argument
   is keyword-only with today's set as its default, so no provisioning call site changes, but
   the two issues now share one not-found contract rather than one code set.
