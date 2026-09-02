@@ -5,7 +5,7 @@ things had to be true at once: a fatal error early in the body, and an exit stat
 that came back 0 anyway. This module is about the second one, because it is the half
 that made the first invisible and would hide the next fatal error identically.
 
-The mechanism, measured on this host rather than assumed:
+The mechanism, measured on the development host rather than assumed:
 
 - Under `set -u`, bash 3.2 treats a bad array subscript or an unbound variable as
   fatal. Bash 5.x exits 1 on the same fault.
@@ -14,26 +14,34 @@ The mechanism, measured on this host rather than assumed:
   that captures `$?` and re-exits with it cannot recover the failure. Bash 5.x does
   not lose the status this way.
 
-So the guarantee costs two things, and both are asserted here: a cleanup that
-preserves the status it was handed, and a completion sentinel, which is the only
-thing left that can tell "finished" from "aborted" once bash 3.2 has thrown the
-status away.
+So the guarantee costs two things: a cleanup that preserves the status it was handed,
+and a completion sentinel, which is the only thing left that can tell "finished" from
+"aborted" once bash 3.2 has thrown the status away.
 
-The two injection modes exercise those separately, on the real scripts, without
-editing them:
+Three injection modes exercise that on the real scripts, without editing them. Each
+shadows the first external command the script runs once its trap is live, so the
+marker file is proof the fault landed inside the trap's window; a script that died at
+one of the `${VAR:?}` preconditions above it would leave no marker and prove nothing.
 
 - **command failure** -- a stub earlier on `PATH` exits with a distinctive status.
-  This is the case bash reports honestly on every version, and the assertion is that
-  the cleanup hands that exact status back rather than replacing it with its own.
+  Bash reports this one honestly on every version, so it asserts the narrower thing:
+  that cleanup hands that exact status back rather than replacing it with its own.
 - **fatal expansion** -- `BASH_ENV` defines a function shadowing the same command,
   which expands an unset variable under `set -u`. This is the issue's own fault
-  class, reproduced in the script's own shell after its trap is installed, and on
-  bash 3.2 an unfixed script exits 0 here.
+  class, reproduced in the script's own shell. Note what it does **not** buy: an
+  unfixed script fails it only under bash 3.2, so on a host with no bash below 4.4 --
+  including this repository's Linux CI runners -- it passes against unfixed scripts
+  and documents the mechanism rather than guarding it.
+- **silent exit** -- the shadowing function exits 0 mid-body. That is the sentinel's
+  actual contract, stated without reference to how bash lost the status, so it is the
+  mode that bites on every interpreter and is what keeps the sentinel from being
+  deleted somewhere the fatal-expansion mode is inert.
 
-Both modes stub the first external command each script runs once its trap is live,
-so the marker file is proof the fault landed inside the trap's window; a script that
-died at one of the `${VAR:?}` preconditions above it would leave no marker and prove
-nothing.
+`test_no_script_indexes_an_array_from_the_end` covers the other half of the fix the
+same way. No behavioural test reaches the changed indexing: it sits far below the
+injection point, behind a live server and a populated journal. A syntax assertion is
+what is left, and it enforces the decision the script headers record -- these stay
+runnable on bash 3.2, so no bash 4+ syntax -- on every host.
 
 Every discovered `bash` is exercised. A fix verified only under Homebrew's bash 5.x
 fixes nothing on a host whose `/bin/bash` is 3.2 -- and `/bin/bash` is what the
@@ -46,6 +54,7 @@ owned by issue #25, in flight at the time of writing. Add its row once that land
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -58,14 +67,26 @@ ROOT = Path(__file__).resolve().parent.parent
 # cleanup preserved the failing status" from "the cleanup re-exited with a literal".
 STUB_STATUS = 3
 
-# One row per in-scope script: the command to shadow -- the first external command
-# the script runs after installing its trap -- and whatever the script needs to reach
-# it. `BZ_PORT` is supplied so no run depends on a generated `.env` in the checkout.
+# Every command these scripts reach out with. All of them are stubbed on every run,
+# not just the one being injected: each script's body is made of `make`, `docker` and
+# `uv` calls against the operator's live fixture, and the rows below rest on an
+# unenforced invariant -- that the injected command is the first one reached. Should
+# an edit break that invariant, stubbing the whole set turns a `make test` that
+# reaches the running fixture into a marker assertion that says so.
+SHADOWED_COMMANDS = ("uv", "docker", "make")
+
+# One row per in-scope script: the command to inject the fault through -- the first
+# external command the script runs after installing its trap -- and whatever the
+# script needs to reach it. `BZ_PORT` is supplied so no run depends on a generated
+# `.env` in the checkout.
 SMOKE_SCRIPTS = (
     ("replay_smoke.sh", "uv", {"BZR_LIVE_BZR": "/bin/true", "BZ_PORT": "8080"}),
     ("provision_smoke.sh", "docker", {"BZR_LIVE_BZR": "/bin/true", "BZ_PORT": "8080"}),
     ("checkpoint_smoke.sh", "make", {}),
 )
+
+# `${NAME[-1]}` and friends: valid from bash 4.3, fatal under `set -u` on bash 3.2.
+FROM_THE_END = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\[\s*-\s*\d+\s*\]")
 
 
 def discovered_bash_interpreters():
@@ -93,12 +114,23 @@ class SmokeTrapStatusTest(unittest.TestCase):
         """Guard: an empty interpreter list would make every case below vacuous."""
         self.assertTrue(discovered_bash_interpreters(), "no bash interpreter found")
 
+    def test_no_script_indexes_an_array_from_the_end(self):
+        for script, _command, _env in SMOKE_SCRIPTS:
+            with self.subTest(script=script):
+                source = (ROOT / "tests" / script).read_text()
+                found = FROM_THE_END.findall(source)
+                self.assertEqual(
+                    found, [],
+                    f"{script} indexes an array from the end ({found}), which needs "
+                    f"bash 4.3; under `set -u` bash 3.2 aborts there. Use "
+                    f"${{NAME[${{#NAME[@]}}-1]}}, per the script's header.")
+
     def test_a_command_failure_keeps_its_own_status(self):
         for script, command, extra_env in SMOKE_SCRIPTS:
             for interpreter in discovered_bash_interpreters():
                 with self.subTest(script=script, bash=interpreter):
                     completed, context = self._inject(
-                        script, command, extra_env, interpreter, fatal=False)
+                        script, command, extra_env, interpreter, "command-failure")
                     self.assertEqual(
                         completed.returncode, STUB_STATUS,
                         f"the cleanup did not hand back the failing status.\n{context}")
@@ -108,12 +140,23 @@ class SmokeTrapStatusTest(unittest.TestCase):
             for interpreter in discovered_bash_interpreters():
                 with self.subTest(script=script, bash=interpreter):
                     completed, context = self._inject(
-                        script, command, extra_env, interpreter, fatal=True)
+                        script, command, extra_env, interpreter, "fatal-expansion")
                     self.assertNotEqual(
                         completed.returncode, 0,
                         f"the script aborted mid-body and reported success.\n{context}")
 
-    def _inject(self, script, command, extra_env, interpreter, fatal):
+    def test_a_silent_exit_mid_body_does_not_report_success(self):
+        for script, command, extra_env in SMOKE_SCRIPTS:
+            for interpreter in discovered_bash_interpreters():
+                with self.subTest(script=script, bash=interpreter):
+                    completed, context = self._inject(
+                        script, command, extra_env, interpreter, "silent-exit")
+                    self.assertNotEqual(
+                        completed.returncode, 0,
+                        f"the script stopped before its last assertion and still "
+                        f"reported success.\n{context}")
+
+    def _inject(self, script, command, extra_env, interpreter, mode):
         """Run `script` under `interpreter` with `command` replaced by a failing one.
 
         Returns the completed process and a context string for assertion messages,
@@ -125,44 +168,52 @@ class SmokeTrapStatusTest(unittest.TestCase):
             marker = sandbox / "injection-ran"
             script_tmp = sandbox / "tmp"
             script_tmp.mkdir()
+            stub_dir = sandbox / "bin"
+            stub_dir.mkdir()
+
+            # Every shadowed command fails; only the injected one records that it ran,
+            # so reaching a different one fails the marker assertion rather than the
+            # operator's fixture.
+            for shadowed in SHADOWED_COMMANDS:
+                stub = stub_dir / shadowed
+                records = shadowed == command and mode == "command-failure"
+                stub.write_text(
+                    "#!/bin/sh\n"
+                    + (f"printf 'ran\\n' >>'{marker}'\n" if records else "")
+                    + f"exit {STUB_STATUS}\n")
+                stub.chmod(0o755)
 
             env = dict(os.environ)
             env.update(extra_env)
             env["TMPDIR"] = str(script_tmp)
-            if fatal:
+            env["PATH"] = os.pathsep.join([str(stub_dir), env["PATH"]])
+            if mode != "command-failure":
                 # Sourced before the script, so the function is defined by the time
-                # `set -u` is in force and the expansion inside it becomes fatal.
+                # `set -u` is in force and the expansion inside it becomes fatal. A
+                # function outranks the PATH stub of the same name.
+                fault = ('printf \'%s\\n\' "$SMOKE_TRAP_TEST_UNSET_VARIABLE"'
+                         if mode == "fatal-expansion" else "exit 0")
                 bash_env = sandbox / "inject.sh"
                 bash_env.write_text(
                     f"{command}() {{\n"
                     f"  printf 'ran\\n' >>'{marker}'\n"
-                    f"  printf '%s\\n' \"$SMOKE_TRAP_TEST_UNSET_VARIABLE\"\n"
+                    f"  {fault}\n"
                     f"}}\n")
                 env["BASH_ENV"] = str(bash_env)
-            else:
-                stub_dir = sandbox / "bin"
-                stub_dir.mkdir()
-                stub = stub_dir / command
-                stub.write_text(
-                    "#!/bin/sh\n"
-                    f"printf 'ran\\n' >>'{marker}'\n"
-                    f"exit {STUB_STATUS}\n")
-                stub.chmod(0o755)
-                env["PATH"] = os.pathsep.join([str(stub_dir), env["PATH"]])
 
             completed = subprocess.run(
                 [interpreter, str(ROOT / "tests" / script)],
                 cwd=ROOT, env=env, capture_output=True, text=True, timeout=300,
                 check=False)
-            context = (f"{script} under {interpreter} "
-                       f"({'fatal expansion' if fatal else 'command failure'}), "
+            context = (f"{script} under {interpreter} ({mode}), "
                        f"exit {completed.returncode}\n"
                        f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}")
 
             self.assertTrue(
                 marker.exists(),
-                f"the injected {command!r} never ran, so the script failed before its "
-                f"trap was installed and this case proves nothing.\n{context}")
+                f"the injected {command!r} never ran, so the script failed or reached "
+                f"another shadowed command before it, and this case proves "
+                f"nothing.\n{context}")
             self.assertEqual(
                 sorted(entry.name for entry in script_tmp.iterdir()), [],
                 f"cleanup left its temporary directory behind.\n{context}")
