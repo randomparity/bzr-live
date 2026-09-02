@@ -1,0 +1,53 @@
+{"format_version": 1, "resources": [
+  {"kind": "group", "name": "admin", "description": "Bugzilla insider group; sees and writes private comments"},
+  {"kind": "group", "name": "editbugs", "description": "Edit bugs the user did not report"},
+  {"kind": "group", "name": "canconfirm", "description": "Move a bug out of UNCONFIRMED"},
+
+  {"kind": "actor", "name": "admin-ops", "email": "admin-ops@example.test",
+   "display_name": "Avery Ops",
+   "groups": [{"ref": "group:admin"}, {"ref": "group:editbugs"}, {"ref": "group:canconfirm"}]},
+  {"kind": "actor", "name": "triager", "email": "triager@example.test",
+   "display_name": "Tessa Triager",
+   "groups": [{"ref": "group:editbugs"}, {"ref": "group:canconfirm"}]},
+  {"kind": "actor", "name": "developer", "email": "developer@example.test",
+   "display_name": "Devi Developer",
+   "groups": [{"ref": "group:editbugs"}, {"ref": "group:canconfirm"}]},
+  {"kind": "actor", "name": "releaser", "email": "releaser@example.test",
+   "display_name": "Rex Releaser",
+   "groups": [{"ref": "group:editbugs"}, {"ref": "group:canconfirm"}]},
+  {"kind": "actor", "name": "reporter", "email": "reporter@example.test",
+   "display_name": "Robin Reporter"},
+
+  {"kind": "product", "name": "checkout", "description": "Storefront checkout and payment"},
+  {"kind": "product", "name": "billing", "description": "Invoicing and dunning"},
+
+  {"kind": "component", "name": "cart", "product": {"ref": "product:checkout"},
+   "description": "Cart contents and totals", "default_assignee": {"ref": "actor:triager"}},
+  {"kind": "component", "name": "payment", "product": {"ref": "product:checkout"},
+   "description": "Payment authorisation and refunds", "default_assignee": {"ref": "actor:developer"}},
+  {"kind": "component", "name": "invoicing", "product": {"ref": "product:billing"},
+   "description": "Invoice generation and tax", "default_assignee": {"ref": "actor:triager"}},
+  {"kind": "component", "name": "dunning", "product": {"ref": "product:billing"},
+   "description": "Retry and collection notices", "default_assignee": {"ref": "actor:developer"}},
+
+  {"kind": "version", "name": "checkout-v1", "product": {"ref": "product:checkout"}},
+  {"kind": "version", "name": "checkout-v2", "product": {"ref": "product:checkout"}},
+  {"kind": "version", "name": "billing-v1", "product": {"ref": "product:billing"}},
+
+  {"kind": "milestone", "name": "checkout-m1", "product": {"ref": "product:checkout"}},
+  {"kind": "milestone", "name": "checkout-m2", "product": {"ref": "product:checkout"}},
+  {"kind": "milestone", "name": "billing-m1", "product": {"ref": "product:billing"}},
+
+  {"kind": "keyword", "name": "regression", "description": "Worked in an earlier version"},
+  {"kind": "keyword", "name": "security", "description": "Has a security impact"},
+  {"kind": "keyword", "name": "perf", "description": "Performance or throughput"},
+
+  {"kind": "custom-field", "name": "risk", "field_type": "single-select",
+   "values": ["low", "medium", "high"]},
+  {"kind": "custom-field", "name": "subsystem", "field_type": "multi-select",
+   "values": ["cart", "payment", "invoicing", "dunning"]},
+  {"kind": "custom-field", "name": "tracker", "field_type": "text"},
+
+  {"kind": "flag-type", "name": "review", "description": "Code review requested", "target": "bug"},
+  {"kind": "flag-type", "name": "signoff", "description": "Release sign-off", "target": "bug"}
+]}

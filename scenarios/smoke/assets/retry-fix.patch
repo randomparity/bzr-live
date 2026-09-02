@@ -1,0 +1,14 @@
+--- a/payment/retry.py
++++ b/payment/retry.py
+@@ -14,9 +14,12 @@ def submit_with_retry(request, attempts=5):
+     delay = INITIAL_DELAY
+     for attempt in range(attempts):
+         result = gateway.submit(request)
+-        if result.transient_failure:
++        if result.transient_failure and not result.already_authorised:
+             time.sleep(delay)
+             delay *= 2
+             continue
+         return result
+-    raise RetryExhausted(request.id)
++    raise RetryExhausted(request.id, attempts=attempts)

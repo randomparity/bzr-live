@@ -131,3 +131,61 @@ engine's own "restore the pristine baseline" instruction has nothing to restore.
 
 `tests/replay_smoke.sh` runs the live proof against a fresh fixture
 (`BZR_LIVE_BZR=<bzr binary> bash tests/replay_smoke.sh`).
+
+Smoke scenario
+--------------
+
+`scenarios/smoke/` is the committed 20-bug scenario. It spans two products and four
+components with five actors, and its 47 events exercise every supported action: a
+cross-product dependency chain three deep, a diamond spanning both products, a duplicate
+pair, a reopening cycle, public and private comments, attachments with an obsolescence,
+flags with and without a requestee, work time, keywords, milestones, and text,
+single-select and multi-select custom fields.
+
+Two tiers prove it. The offline tier needs no server and runs with the rest of the suite:
+
+    uv run --python 3.11 python -m unittest tests.test_smoke_scenario
+
+Eleven assertions cover the topology and coverage invariants, including the scenario digest,
+which is pinned so that editing the fixture is a deliberate change. Three are guards: the
+insider group behind private comments, the 255-byte attachment summary ceiling, and the rule
+that any create declaring an assignee or a dependency edge is filed by an actor declaring
+`editbugs`. The first two move failures that a live replay would raise anyway into a
+container-free run; only the third targets a substitution Bugzilla makes silently, and on
+this image even that is unreachable, because stock Bugzilla grants `editbugs` to every
+account by regexp. The offline tier's value is speed and no Docker, not extra reach.
+
+The live tier provisions and replays the scenario against the running fixture:
+
+    CONFIRM_RESET=1 make reset && make up
+    BZR_LIVE_BZR=/path/to/bzr make smoke
+
+Start from a fresh fixture: Bugzilla reads `containers/bugzilla/checksetup_answers.txt` only
+at install, and an existing fixture may already hold conflicting definitions of the products
+and components the scenario declares.
+
+**`make smoke` has been proven at `bzr` `63abb94e` and nowhere else.** Two separate
+requirements bear on the revision, and only one of them is a measurement:
+
+- Before `5fb99362`, `bzr` reports a component's `default_assignee` as null even when Bugzilla
+  has stored one, so provisioning cannot confirm what it wrote and refuses. That is finding
+  [D6](docs/bzr-findings.md); the scenario keeps declaring the field rather than dropping it.
+- `src/bzr_live/replay/actions.py` is written against `b80303b7` and refuses a reply shape it
+  does not recognise rather than absorbing it. `b80303b7` declares output schema `2.0.0`;
+  `5fb99362` declares `0.6.1`, the same major as the `0.8.2` release D6 was found on. Whether
+  the engine accepts `bug view`, `comment list`, and `attachment list` at `0.6.1` is not known
+  here, because no run has established it.
+
+So `5fb99362` is where the D6 defect stops, not a floor this repository has evidence for. Use
+`b80303b7` or later, and treat anything below `63abb94e` as untested. The script prints the
+`bzr` revision as its first line for this reason — the same scenario passes or fails on that
+revision alone.
+
+Observed: **47 events replayed in 78.14s**, replay only, excluding provisioning and
+`make up`. Measured on Apple M5 Max, macOS (Darwin 25.6.0, arm64), Docker 29.7.2, with
+`bzr 0.8.3-dev (63abb94e)`, against a fixture reset immediately beforehand. Provisioning the
+28 resources and `make up` are each separate intervals and are not included.
+
+The live tier proves the parts compose; it asserts no semantic invariants about the
+replayed state. That verifier is issue #20, and fault injection plus x86_64 CI wiring is
+issue #21, so `make smoke` is operator-run rather than a merge gate today.

@@ -1,0 +1,8 @@
+{"format_version": 1, "name": "smoke",
+ "description": "Smoke scenario: 20 bugs across two products, covering cross-product dependency chains, a diamond, a duplicate pair, a reopening, and every supported action",
+ "assets": [
+   {"name": "notes", "path": "assets/triage-notes.txt",
+    "sha256": "96a330b23f0ebeb73d94721fce926b0b49daacfc448696af2f373afb30b49681"},
+   {"name": "patch", "path": "assets/retry-fix.patch",
+    "sha256": "fb3d2c961bd4d1214d4e2b260185694986af8dbcc30ce7ac4c794d6b3523f5e5"}
+ ]}
