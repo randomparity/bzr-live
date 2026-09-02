@@ -12,71 +12,65 @@ and the getter when it classifies one, refusing before any mutation where the de
 cannot hold.
 
 **Tech stack.** Python 3.11+ via `uv`, no runtime dependencies. Perl 5 inside the pinned
-Bugzilla image. `unittest` for tests. Docker Compose for the fixture.
+Bugzilla image. `unittest`. Docker Compose.
 
 Design: [spec](../specs/2026-09-02-settable-bug-group-design.md),
 [ADR 0013](../../adr/0013-scenario-declared-bug-group-product-controls.md).
 Issue: [#34](https://github.com/randomparity/bzr-live/issues/34).
 
-Expected implementation size: 250–330 changed lines (M) — derived from the file map below: four source files at roughly 100 lines total, two JSON fixtures at 4, one findings entry at 30, and three test files at roughly 150.
+Expected implementation size: 250–330 changed lines (M) — from the file map below: four source files at ~95 lines, two JSON fixtures at ~6, one findings entry at ~32, three test files at ~120.
 
 ## Global constraints
 
 - **Never raw SQL in the bridge.** `containers/bugzilla/bridge.pl:5`: *"Bugzilla object
-  layer only — never raw SQL."* Reach the end state through `Bugzilla::Product`.
+  layer only — never raw SQL."*
 - **Never silently substitute.** Where a declaration cannot be executed, refuse it as a
   precondition and name the reason (`AGENTS.md`, "Purpose: prove `bzr`").
 - **Bugzilla is pinned** at `644c66f45ce0b1b2746a31a061fbd96886278225`
-  (`containers/bugzilla/Dockerfile`). Every Bugzilla line citation is against that SHA.
-- **`bzr` is used at the documented floor**, `0.8.3-dev (63abb94e)`. Use the binary at
-  `/Volumes/Source Code Volume/src/bzr/target/release/bzr`. Raising the floor belongs to
-  issue #35 and is out of scope here.
-- **`format_version` stays 1.** `products` is optional on `group`; a scenario omitting it
-  parses and provisions exactly as before.
+  (`containers/bugzilla/Dockerfile`); every Bugzilla citation is against that SHA.
+- **`bzr` at the documented floor** `0.8.3-dev (63abb94e)`:
+  `/Volumes/Source Code Volume/src/bzr/target/release/bzr`. Raising it is issue #35's.
+- **`format_version` stays 1.** `products` is optional; a scenario omitting it is unaffected.
 - **Control values are fixed**: `entry = 0`, `membercontrol = CONTROLMAPSHOWN`,
-  `othercontrol = CONTROLMAPSHOWN`. No privilege-granting column is set (ADR 0013).
-- **Do not touch**, they belong to concurrent issues: `src/bzr_live/replay/actions.py`,
+  `othercontrol = CONTROLMAPSHOWN`, no privilege column (ADR 0013).
+- **Do not touch** (concurrent issues own them): `src/bzr_live/replay/actions.py`,
   `src/bzr_live/verify/expected.py`, `.github/workflows/**`, `tests/smoke_scenario.sh`,
   `scripts/lifecycle`, `tests/lifecycle_test.sh`, `tests/test_smoke_trap_status.py`,
   `README.md`, `docs/adr/0008-*`.
-- **Guardrails**, run bare — no pipes, no `|| true`, no `>/dev/null`:
-  `make check`, `make test`, `make replay-smoke`, `make smoke`, `make checkpoint-smoke`.
-- Python style follows the files being edited: `from __future__ import annotations`, 100-char
-  lines, no new dependencies.
+- **Guardrails, run bare** — no pipes, no `|| true`, no `>/dev/null`: `make check`,
+  `make test`, `make replay-smoke`, `make smoke`, `make checkpoint-smoke`.
+- Match the style of each file edited: `from __future__ import annotations`, 100-char lines,
+  no new dependencies.
 
 ## File map
 
-| File | Change | Answerable for |
-|---|---|---|
-| `src/bzr_live/scenario/loader.py` | modify | Parsing and validating `group.products` |
-| `containers/bugzilla/bridge.pl` | modify | The two object-layer group-control operations |
-| `src/bzr_live/provision/adapters.py` | modify | Allowlisting them on `BridgeClient` |
-| `src/bzr_live/provision/executor.py` | modify | Preflight refusal, create, classify |
-| `scenarios/smoke/resources.json` | modify | Declaring the `restricted` bug group |
-| `tests/test_smoke_scenario.py` | modify | The pinned digest |
-| `tests/test_scenario_resources.py` | modify | Contract tests for `products` |
-| `tests/test_provision.py` | modify | Provisioner tests and the bridge fake |
-| `docs/bzr-findings.md` | modify | Finding G11 |
+| File | Answerable for |
+|---|---|
+| `src/bzr_live/scenario/loader.py` | Parsing and validating `group.products` |
+| `containers/bugzilla/bridge.pl` | The two object-layer group-control operations |
+| `src/bzr_live/provision/adapters.py` | Allowlisting them on `BridgeClient` |
+| `src/bzr_live/provision/executor.py` | Preflight refusal, create, classify |
+| `scenarios/smoke/resources.json` | Declaring the `restricted` bug group |
+| `tests/test_smoke_scenario.py` | The pinned digest |
+| `tests/test_scenario_resources.py` | Contract tests for `products` |
+| `tests/test_provision.py` | Provisioner tests and the bridge fake |
+| `docs/bzr-findings.md` | Finding G11 |
 
 ## Task 1 — the scenario contract accepts `group.products`
 
-**Files:** modifies `src/bzr_live/scenario/loader.py`; tests in
-`tests/test_scenario_resources.py`.
+**Files:** `src/bzr_live/scenario/loader.py`, `tests/test_scenario_resources.py`.
 
-**Interfaces.** Consumes nothing from earlier tasks. Later tasks rely on:
-`PlannedResource.data["products"]` being a `tuple[Reference, ...]` of `product:` references
-on every `group` resource — an empty tuple when the field is omitted — and those references
-also appearing in `PlannedResource.dependencies`, so `ValidatedScenario.resource_plan` orders
-the group after each product it names.
+**Interfaces.** Provides, for later tasks: `PlannedResource.data["products"]` is a
+`tuple[Reference, ...]` of `product:` references on every `group` — `()` when omitted — and
+those references also appear in `PlannedResource.dependencies`, so
+`ValidatedScenario.resource_plan` orders the group after each product it names.
 
-**Where it fits.** Everything downstream reads this field; nothing works without it.
+### 1.1 Write the failing tests
 
-### Step 1.1 — write the failing tests
-
-Append these four methods to `ScenarioResourceTests` in `tests/test_scenario_resources.py`.
-They use the class's existing `write_json`, `assert_invalid` and `self.root` members and the
-module-level `load_scenario`, `Reference` and `ScenarioValidationError` imports, all of which
-are already present — add no imports and change no existing test.
+Append these methods to `ScenarioResourceTests` in `tests/test_scenario_resources.py`. They
+use its existing `write_json`, `assert_invalid` and `self.root`, and the module's existing
+`load_scenario`, `Reference`, `ScenarioValidationError` imports. Add no imports; change no
+existing test.
 
 ```python
     def test_group_products_resolve_and_order_the_plan(self) -> None:
@@ -96,8 +90,7 @@ are already present — add no imports and change no existing test.
     def test_group_without_products_carries_an_empty_tuple(self) -> None:
         self.write_json("resources.json", {"format_version": 1, "resources": [
             {"kind": "group", "name": "plain", "description": "Plain"}]})
-        scenario = load_scenario(self.root)
-        self.assertEqual(scenario.resources[0].data["products"], ())
+        self.assertEqual(load_scenario(self.root).resources[0].data["products"], ())
 
     def test_group_products_must_name_a_declared_product(self) -> None:
         self.write_json("resources.json", {"format_version": 1, "resources": [
@@ -115,41 +108,20 @@ are already present — add no imports and change no existing test.
         self.assertIn("duplicate reference", message)
 ```
 
-### Step 1.2 — run them and confirm they fail
+### 1.2 Confirm they fail
 
-```sh
-uv run --python 3.11 python -m unittest tests.test_scenario_resources -v
-```
+`uv run --python 3.11 python -m unittest tests.test_scenario_resources -v` — four failures:
+the three declaring `products` raise an unexpected-field error naming
+`$.resources[N].products`; the empty-tuple test raises `KeyError: 'products'`.
 
-Expect four failures. The three that declare `products` fail with an unexpected-field
-error naming `$.resources[N].products`; the empty-tuple test fails with
-`KeyError: 'products'`.
+### 1.3 Allow and parse the field
 
-### Step 1.3 — allow the field
+In `_RESOURCE_FIELDS`, the `group` row's optional set changes from `set()` to
+`{"products"}`, giving `"group": ({"kind", "name", "description"}, {"products"}),`.
 
-In `src/bzr_live/scenario/loader.py`, change the `group` row of `_RESOURCE_FIELDS` from
-
-```python
-    "group": ({"kind", "name", "description"}, set()),
-```
-
-to
-
-```python
-    "group": ({"kind", "name", "description"}, {"products"}),
-```
-
-### Step 1.4 — parse it
-
-In `_parse_resource`, replace
-
-```python
-    if kind in {"group", "product", "keyword"}:
-        data["description"] = _text(obj["description"], source, f"{field}.description")
-    elif kind == "actor":
-```
-
-with
+In `_parse_resource`, the first branch of the kind chain currently sets only `description`
+for `group`, `product` and `keyword`. Extend it, leaving the `elif kind == "actor":` that
+follows untouched:
 
 ```python
     if kind in {"group", "product", "keyword"}:
@@ -161,50 +133,40 @@ with
                 obj.get("products", []), "product", source, f"{field}.products")
             data["products"] = products
             dependencies.extend(products)
-    elif kind == "actor":
 ```
 
-No change is needed to `all_fields` at the top of `_parse_resource`: it is the union of every
-kind's fields, and `flag-type` already contributes `products`.
+`all_fields` at the top of `_parse_resource` needs no change: it is the union over every
+kind, and `flag-type` already contributes `products`.
 
-### Step 1.5 — run them and confirm they pass
+### 1.4 Confirm they pass, then commit
 
-```sh
-uv run --python 3.11 python -m unittest tests.test_scenario_resources -v
-```
-
-Expect `OK` with every test in the file passing.
-
-### Step 1.6 — commit
+`uv run --python 3.11 python -m unittest tests.test_scenario_resources -v` — `OK`, every
+test in the file passing.
 
 ```sh
 git add src/bzr_live/scenario/loader.py tests/test_scenario_resources.py
 git commit -m "feat: let a group declare the products it is settable on"
 ```
 
-**Acceptance criteria.** A `group` may carry `products`; each entry must resolve to a
-declared product; duplicates are rejected; omission yields `()`; the resource plan orders the
-group after its products; every other kind is unchanged.
+**Acceptance.** A `group` may carry `products`; entries must resolve to declared products;
+duplicates are rejected; omission yields `()`; the plan orders the group after its products;
+no other kind changes.
 
 ## Task 2 — the bridge sets and reads product group controls
 
-**Files:** modifies `containers/bugzilla/bridge.pl` and
-`src/bzr_live/provision/adapters.py`; tests in `tests/test_provision.py`.
+**Files:** `containers/bugzilla/bridge.pl`, `src/bzr_live/provision/adapters.py`,
+`tests/test_provision.py`.
 
-**Interfaces.** Consumes nothing from Task 1. Task 3 relies on:
-`BridgeClient.call("set-group-control", {"product": str, "group": str})` returning
-`{"product": str, "group": str, "settable": True}`, and
-`BridgeClient.call("get-group-control", {"product": str, "group": str})` returning `None`
-when the group is not mapped to that product, otherwise a dict carrying at least
+**Interfaces.** Provides, for Task 3:
+`BridgeClient.call("set-group-control", {"product": str, "group": str})` returns
+`{"product": str, "group": str, "settable": True}`;
+`BridgeClient.call("get-group-control", {"product": str, "group": str})` returns `None` when
+the group is not mapped to that product, otherwise a dict carrying at least
 `"settable": bool`.
 
-**Where it fits.** It is the only route to the end state; nothing else in this repository may
-write `group_control_map`.
+### 2.1 Write the failing test
 
-### Step 2.1 — write the failing test
-
-Append to `tests/test_provision.py`, inside the class that exercises `BridgeClient` (the one
-holding the existing `OPERATIONS` and reply-shape tests):
+Append to the `tests/test_provision.py` class holding the existing `BridgeClient` tests:
 
 ```python
     def test_group_control_operations_are_allowlisted(self) -> None:
@@ -212,93 +174,36 @@ holding the existing `OPERATIONS` and reply-shape tests):
         self.assertIn("get-group-control", adapters.BridgeClient.OPERATIONS)
 ```
 
-### Step 2.2 — run it and confirm it fails
+### 2.2 Confirm it fails
 
-```sh
-uv run --python 3.11 python -m unittest tests.test_provision -v
-```
+`uv run --python 3.11 python -m unittest tests.test_provision -v` — one failure:
+`'set-group-control' not found in frozenset({...})`.
 
-Expect one failure: `'set-group-control' not found in frozenset({...})`.
+### 2.3 Allowlist them on the client
 
-### Step 2.3 — allowlist them on the client
-
-In `src/bzr_live/provision/adapters.py`, change `BridgeClient.OPERATIONS` from
-
-```python
-    OPERATIONS = frozenset({
-        "create-version", "create-milestone", "create-custom-field",
-        "create-keyword", "create-flag-type", "create-api-key",
-        "get-custom-field", "get-keyword", "get-flag-type",
-    })
-```
-
-to
+In `src/bzr_live/provision/adapters.py`, add `"set-group-control", "get-group-control",` as a
+final line inside `BridgeClient.OPERATIONS`. Then append two lines to the comment above
+`BOUNDARIES`, after its existing "Fixed by issue #4's implementation boundaries." line:
 
 ```python
-    OPERATIONS = frozenset({
-        "create-version", "create-milestone", "create-custom-field",
-        "create-keyword", "create-flag-type", "create-api-key",
-        "get-custom-field", "get-keyword", "get-flag-type",
-        "set-group-control", "get-group-control",
-    })
-```
-
-In the same file, extend the comment above `BOUNDARIES` so the table's scope stays honest.
-Replace
-
-```python
-# Resource kind -> mutation boundary. Fixed by issue #4's implementation boundaries.
-```
-
-with
-
-```python
-# Resource kind -> mutation boundary. Fixed by issue #4's implementation boundaries.
 # A group's optional product-control mapping is a bridge sub-step of a "bzr" kind
 # (ADR 0013); the table records each kind's own boundary, not its sub-steps.
 ```
 
-### Step 2.4 — run it and confirm it passes
+### 2.4 Confirm it passes
 
-```sh
-uv run --python 3.11 python -m unittest tests.test_provision -v
-```
+`uv run --python 3.11 python -m unittest tests.test_provision -v` — `OK`.
 
-Expect `OK`.
+### 2.5 Add the operations to the bridge
 
-### Step 2.5 — add the operations to the bridge
+In `containers/bugzilla/bridge.pl`, add one import line so the block reads
+`use Bugzilla::FlagType;` / `use Bugzilla::Group;` / `use Bugzilla::Keyword;` — the only new
+line is `use Bugzilla::Group;`, keeping the block alphabetical.
 
-In `containers/bugzilla/bridge.pl`, add one line to the import block so it reads
+Add `set-group-control get-group-control` as a third line inside the `%OPERATIONS` `qw(...)`
+list.
 
-```perl
-use Bugzilla::Field::Choice;
-use Bugzilla::FlagType;
-use Bugzilla::Group;
-use Bugzilla::Keyword;
-```
-
-The only new line is `use Bugzilla::Group;`; the block stays alphabetical.
-
-Change the allowlist from
-
-```perl
-my %OPERATIONS = map { $_ => 1 } qw(
-  create-version create-milestone create-custom-field create-keyword
-  create-flag-type create-api-key get-custom-field get-keyword get-flag-type
-);
-```
-
-to
-
-```perl
-my %OPERATIONS = map { $_ => 1 } qw(
-  create-version create-milestone create-custom-field create-keyword
-  create-flag-type create-api-key get-custom-field get-keyword get-flag-type
-  set-group-control get-group-control
-);
-```
-
-Then, in `sub dispatch`, immediately before the final `die "unreachable operation\n";`, insert:
+In `sub dispatch`, immediately before the final `die "unreachable operation\n";`, insert:
 
 ```perl
   if ($operation eq 'set-group-control') {
@@ -330,8 +235,8 @@ Then, in `sub dispatch`, immediately before the final `die "unreachable operatio
   if ($operation eq 'get-group-control') {
     my $product = product_of($request->{product});
     my $group   = Bugzilla::Group->check({name => $request->{group}});
-    # group_controls without $full_data joins on product_id, so an unmapped group
-    # is simply absent from the hash (Product.pm:604-637 at the pinned SHA).
+    # group_controls without $full_data constrains the join on product_id, so an
+    # unmapped group is simply absent (Product.pm:604-637 at the pinned SHA).
     my $controls = $product->group_controls->{$group->id};
     return undef unless $controls;
     return {
@@ -346,54 +251,58 @@ Then, in `sub dispatch`, immediately before the final `die "unreachable operatio
   }
 ```
 
-`CONTROLMAPSHOWN` is already in scope: `bridge.pl` does `use Bugzilla::Constants;`, which
+`CONTROLMAPSHOWN` is already in scope — `bridge.pl` does `use Bugzilla::Constants;`, which
 exports it (`Bugzilla/Constants.pm:35`, `:257`).
 
-### Step 2.6 — verify the bridge parses
+### 2.6 Check and commit
 
-```sh
-make check
-```
-
-Expect it to pass. `make check` runs `bash -n`, `shellcheck`, `python -m compileall` and
-`docker compose config`; it does not lint Perl, so also run
-
-```sh
-perl -c containers/bugzilla/bridge.pl
-```
-
-which will report `Can't locate Bugzilla.pm` on the host — that is expected, the modules only
-exist inside the image, and it still surfaces a syntax error before the module load. A clean
-syntax error report is the pass condition; the real check is Task 5's live run.
-
-### Step 2.7 — commit
+`make check` — passes. It does not lint Perl, so also run
+`perl -c containers/bugzilla/bridge.pl`: on the host it reports `Can't locate Bugzilla.pm`,
+which is expected (the modules live only in the image) and still surfaces a syntax error
+first. Task 5 is the real proof.
 
 ```sh
 git add containers/bugzilla/bridge.pl src/bzr_live/provision/adapters.py tests/test_provision.py
 git commit -m "feat: add object-layer group-control operations to the bridge"
 ```
 
-**Acceptance criteria.** Both operations are allowlisted on the client and in the bridge;
-both resolve their arguments with `->check`; the setter uses
-`Bugzilla::Product::set_group_controls` and `update()` and asserts settability afterwards;
-the getter returns `undef` for an unmapped group; no SQL statement appears in the diff.
+**Acceptance.** Both operations allowlisted client-side and bridge-side; both resolve
+arguments with `->check`; the setter uses `set_group_controls` + `update()` and asserts
+settability afterwards; the getter returns `undef` for an unmapped group; no SQL in the diff.
 
 ## Task 3 — provisioning applies and verifies the mapping
 
-**Files:** modifies `src/bzr_live/provision/executor.py`; tests in `tests/test_provision.py`.
+**Files:** `src/bzr_live/provision/executor.py`, `tests/test_provision.py`.
 
-**Interfaces.** Consumes `PlannedResource.data["products"]` from Task 1 and both bridge
-operations from Task 2. Later tasks rely on: a group with unsatisfiable `products` raising
-`ProvisionError` from `Provisioner._reject_reserved_values` before any mutation, and a group
-whose declared products are not all settable raising
+**Interfaces.** Consumes Task 1's `data["products"]` and Task 2's two operations. Provides: a
+system group declaring `products` raises `ProvisionError` from
+`Provisioner._reject_reserved_values` before any mutation; a group whose declared products
+are not all settable raises
 `ProvisionConflictError(identity, "products", declared, observed, multi_step=True)`.
 
-**Where it fits.** It is the behaviour issue #34 asks for; Tasks 1 and 2 only make it
-expressible.
+### 3.1 Write the failing tests
 
-### Step 3.1 — write the failing tests
+Add to `_FakeBridge` in `tests/test_provision.py` — two branches immediately before its
+final `raise AssertionError`, and one helper method:
 
-Append to `tests/test_provision.py`'s `ExecutorTests` class:
+```python
+        if operation == "set-group-control":
+            key = f"group-control:{payload['product']}:{payload['group']}"
+            self.state[key] = {
+                "product": payload["product"], "group": payload["group"],
+                "entry": 0, "membercontrol": 1, "othercontrol": 1, "settable": True}
+            return dict(self.state[key])
+        if operation == "get-group-control":
+            return self.state.get(
+                f"group-control:{payload['product']}:{payload['group']}")
+```
+
+```python
+    def calls_of(self, operation):
+        return [payload for op, payload in self.calls if op == operation]
+```
+
+Append to `ExecutorTests`:
 
 ```python
     def test_system_group_declaring_products_is_refused_before_mutation(self) -> None:
@@ -422,10 +331,9 @@ Append to `tests/test_provision.py`'s `ExecutorTests` class:
         bridge = _FakeBridge(bzr)
         report = self._provisioner(bzr, bridge).run()
         self.assertEqual(dict((i, s) for s, i in report)["group:q4-secret"], "created")
-        mapped = sorted(
-            payload["product"] for op, payload in bridge.calls
-            if op == "set-group-control")
-        self.assertEqual(mapped, ["q4-billing", "q4-checkout"])
+        self.assertEqual(
+            sorted(p["product"] for p in bridge.calls_of("set-group-control")),
+            ["q4-billing", "q4-checkout"])
 
     def test_rerun_over_a_mapped_group_is_unchanged_and_writes_nothing(self) -> None:
         self.scenario = self._scenario_from([
@@ -435,15 +343,13 @@ Append to `tests/test_provision.py`'s `ExecutorTests` class:
         bzr = _FakeBzr()
         bridge = _FakeBridge(bzr)
         self._provisioner(bzr, bridge).run()
-        rerun_bridge = _FakeBridge(bzr, dict(bridge.state))
-        report = self._provisioner(bzr, rerun_bridge).run()
+        rerun = _FakeBridge(bzr, dict(bridge.state))
+        report = self._provisioner(bzr, rerun).run()
         self.assertEqual([status for status, _ in report], ["unchanged", "unchanged"])
-        self.assertEqual(rerun_bridge.calls_of("set-group-control"), [])
+        self.assertEqual(rerun.calls_of("set-group-control"), [])
         # the rerun must actually have asked, or "unchanged" proves nothing
         self.assertEqual(
-            [payload["product"]
-             for payload in rerun_bridge.calls_of("get-group-control")],
-            ["q4-checkout"])
+            [p["product"] for p in rerun.calls_of("get-group-control")], ["q4-checkout"])
 
     def test_group_present_without_its_mapping_is_a_multi_step_conflict(self) -> None:
         self.scenario = self._scenario_from([
@@ -466,67 +372,23 @@ Append to `tests/test_provision.py`'s `ExecutorTests` class:
         self.assertEqual(bzr.writes, [])
 ```
 
-Extend `_FakeBridge.call` so it models both operations. Insert these branches immediately
-before its final `raise AssertionError`:
+### 3.2 Confirm they fail
+
+`uv run --python 3.11 python -m unittest tests.test_provision -v` — exactly four failures:
+
+- refusal test — no `ProvisionError` raised;
+- create test — the `set-group-control` product list is `[]`, not the two names;
+- rerun test — the `get-group-control` list is `[]`, not `["q4-checkout"]`. Its `unchanged`
+  and empty-`set-group-control` assertions pass trivially before the change, which is why
+  the test also asserts the rerun asked;
+- conflict test — no `ProvisionConflictError` raised.
+
+### 3.3 Refuse an unsatisfiable declaration
+
+In `src/bzr_live/provision/executor.py`, add a second clause to the loop in
+`_reject_reserved_values`, after the existing `custom-field` clause:
 
 ```python
-        if operation == "set-group-control":
-            key = f"group-control:{payload['product']}:{payload['group']}"
-            self.state[key] = {
-                "product": payload["product"], "group": payload["group"],
-                "entry": 0, "membercontrol": 1, "othercontrol": 1, "settable": True}
-            return dict(self.state[key])
-        if operation == "get-group-control":
-            return self.state.get(
-                f"group-control:{payload['product']}:{payload['group']}")
-```
-
-and add this helper method to `_FakeBridge`:
-
-```python
-    def calls_of(self, operation):
-        return [payload for op, payload in self.calls if op == operation]
-```
-
-### Step 3.2 — run them and confirm they fail
-
-```sh
-uv run --python 3.11 python -m unittest tests.test_provision -v
-```
-
-Expect exactly four failures:
-
-- the refusal test — no `ProvisionError` is raised;
-- the create test — `mapped` is `[]`, not `["q4-billing", "q4-checkout"]`;
-- the rerun test — the `get-group-control` list is `[]`, not `["q4-checkout"]`. Its
-  `unchanged` and empty-`set-group-control` assertions pass trivially before the change,
-  which is why the test also asserts the rerun asked;
-- the conflict test — no `ProvisionConflictError` is raised.
-
-### Step 3.3 — refuse an unsatisfiable declaration
-
-In `src/bzr_live/provision/executor.py`, replace the body of `_reject_reserved_values`
-
-```python
-    def _reject_reserved_values(self) -> None:
-        for resource in self._scenario.resources:
-            if resource.kind == "custom-field" and "---" in resource.data["values"]:
-                raise ProvisionError(
-                    f"custom-field {resource.name!r} declares the reserved value "
-                    "'---' (Bugzilla's single-select placeholder); remove it from "
-                    "the scenario")
-```
-
-with
-
-```python
-    def _reject_reserved_values(self) -> None:
-        for resource in self._scenario.resources:
-            if resource.kind == "custom-field" and "---" in resource.data["values"]:
-                raise ProvisionError(
-                    f"custom-field {resource.name!r} declares the reserved value "
-                    "'---' (Bugzilla's single-select placeholder); remove it from "
-                    "the scenario")
             if (resource.kind == "group" and resource.data["products"]
                     and resource.name in SYSTEM_GROUPS):
                 raise ProvisionError(
@@ -536,59 +398,23 @@ with
                     "creates instead")
 ```
 
-### Step 3.4 — map the products on create
+### 3.4 Map the products on create
 
-Replace `_create_group`
-
-```python
-    def _create_group(self, resource) -> None:
-        self._bzr.write([
-            "group", "create", f"--name={resource.name}",
-            f"--description={resource.data['description']}"])
-```
-
-with
+Append to `_create_group`, after its existing `self._bzr.write([...])` call:
 
 ```python
-    def _create_group(self, resource) -> None:
-        self._bzr.write([
-            "group", "create", f"--name={resource.name}",
-            f"--description={resource.data['description']}"])
         for ref in resource.data["products"]:
             self._bridge.call(
                 "set-group-control", {"product": ref.name, "group": resource.name})
 ```
 
-### Step 3.5 — compare the mapping on classify
+### 3.5 Compare the mapping on classify
 
-Replace `_classify_group`
-
-```python
-    def _classify_group(self, resource, cache) -> str:
-        if resource.name in SYSTEM_GROUPS:
-            return "unchanged"  # fixture furniture; never compared, never created
-        payload = self._bzr.read(["group", "view"], positionals=[resource.name])
-        if payload is None:
-            return "absent"
-        self._compare(_identity(resource), "description",
-                      resource.data["description"],
-                      payload.get("description") if isinstance(payload, dict) else None)
-        return "unchanged"
-```
-
-with
+In `_classify_group`, bind `identity = _identity(resource)` before the existing
+`self._compare(...)` description check and pass `identity` to it. Then, between that check
+and the closing `return "unchanged"`, insert:
 
 ```python
-    def _classify_group(self, resource, cache) -> str:
-        if resource.name in SYSTEM_GROUPS:
-            return "unchanged"  # fixture furniture; never compared, never created
-        payload = self._bzr.read(["group", "view"], positionals=[resource.name])
-        if payload is None:
-            return "absent"
-        identity = _identity(resource)
-        self._compare(identity, "description",
-                      resource.data["description"],
-                      payload.get("description") if isinstance(payload, dict) else None)
         declared = {ref.name for ref in resource.data["products"]}
         settable = {name for name in declared if self._group_is_settable(resource, name)}
         if settable != declared:
@@ -597,56 +423,42 @@ with
             raise ProvisionConflictError(
                 identity, "products", sorted(declared), sorted(settable),
                 multi_step=True)
-        return "unchanged"
+```
 
+Add this method beside it:
+
+```python
     def _group_is_settable(self, resource, product: str) -> bool:
         result = self._bridge.call(
             "get-group-control", {"product": product, "group": resource.name})
         return bool(result.get("settable")) if isinstance(result, dict) else False
 ```
 
-### Step 3.6 — run them and confirm they pass
+### 3.6 Confirm they pass, then commit
 
-```sh
-uv run --python 3.11 python -m unittest tests.test_provision -v
-```
+`uv run --python 3.11 python -m unittest tests.test_provision -v` — `OK`, with the
+pre-existing `test_plan_order_is_respected` (13 created) and
+`test_identical_rerun_is_all_unchanged_with_no_writes` (13 unchanged) still passing; their
+fixture's one group declares no `products`.
 
-Expect `OK`, with every pre-existing test in the file still passing — in particular
-`test_plan_order_is_respected` (13 created) and
-`test_identical_rerun_is_all_unchanged_with_no_writes` (13 unchanged), which use a fixture
-whose one group declares no `products`.
-
-### Step 3.7 — run the whole unit suite
-
-```sh
-make test
-```
-
-Expect `OK`, at 387 tests plus the ones added here.
-
-### Step 3.8 — commit
+`make test` — `OK`, at 387 tests plus the ones added here.
 
 ```sh
 git add src/bzr_live/provision/executor.py tests/test_provision.py
 git commit -m "feat: provision a group's declared product controls"
 ```
 
-**Acceptance criteria.** A system group declaring `products` is refused with a message naming
-the group and `isbuggroup`, with no write and no bridge call. Creating a group calls
-`set-group-control` once per declared product. A rerun over a mapped group reports
-`unchanged` and issues no write. A group present without its mapping raises
-`ProvisionConflictError` naming `products` and carrying the reset hint. A group declaring no
-products behaves exactly as before.
+**Acceptance.** A system group declaring `products` is refused, naming the group and
+`isbuggroup`, with no write and no bridge call. Creating a group calls `set-group-control`
+once per declared product. A rerun reports `unchanged`, asks per product, and writes nothing.
+A group present without its mapping raises `ProvisionConflictError` naming `products` with
+the reset hint. A group declaring no products behaves exactly as before.
 
 ## Task 4 — the smoke scenario declares a settable bug group
 
-**Files:** modifies `scenarios/smoke/resources.json`, `tests/test_smoke_scenario.py`.
+**Files:** `scenarios/smoke/resources.json`, `tests/test_smoke_scenario.py`.
 
-**Interfaces.** Consumes Task 1's contract. Task 5 verifies this live.
-
-**Where it fits.** It is what makes the capability exist in the fixture the guardrails run.
-
-### Step 4.1 — declare the group
+### 4.1 Declare the group and a member
 
 In `scenarios/smoke/resources.json`, after the `canconfirm` group line, add:
 
@@ -655,91 +467,52 @@ In `scenarios/smoke/resources.json`, after the `canconfirm` group line, add:
    "products": [{"ref": "product:checkout"}, {"ref": "product:billing"}]},
 ```
 
-and change the `admin-ops` actor from
+and append `{"ref": "group:restricted"}` to the `admin-ops` actor's `groups` list. A bug
+restricted to a memberless group is invisible to the actor that restricted it, so the
+capability needs one member to be usable (ADR 0013).
 
-```json
-  {"kind": "actor", "name": "admin-ops", "email": "admin-ops@example.test",
-   "display_name": "Avery Ops",
-   "groups": [{"ref": "group:admin"}, {"ref": "group:editbugs"}, {"ref": "group:canconfirm"}]},
-```
-
-to
-
-```json
-  {"kind": "actor", "name": "admin-ops", "email": "admin-ops@example.test",
-   "display_name": "Avery Ops",
-   "groups": [{"ref": "group:admin"}, {"ref": "group:editbugs"},
-              {"ref": "group:canconfirm"}, {"ref": "group:restricted"}]},
-```
-
-A bug restricted to a group with no member is invisible to the actor that restricted it, so
-the fixture needs at least one member for the capability to be usable (ADR 0013).
-
-### Step 4.2 — read the new digest
+### 4.2 Re-pin the digest
 
 ```sh
 uv run --python 3.11 python -c "from bzr_live.scenario import load_scenario; print(load_scenario('scenarios/smoke').digest)"
 ```
 
-Expect a 64-character hex digest different from the pinned one. If the command instead raises
-`ScenarioValidationError`, the JSON edit is wrong — fix it before continuing.
+Expect a 64-character hex digest different from the pinned one; a `ScenarioValidationError`
+instead means the JSON edit is wrong. Put that value in `EXPECTED_DIGEST` in
+`tests/test_smoke_scenario.py`, leaving the comment above it unchanged.
 
-### Step 4.3 — pin it
+### 4.3 Verify and commit
 
-In `tests/test_smoke_scenario.py`, replace the value of `EXPECTED_DIGEST` with the digest
-step 4.2 printed. Leave the comment above it unchanged; it already says why this is a
-deliberate two-file change.
-
-### Step 4.4 — run the suite
-
-```sh
-make test
-```
-
-Expect `OK`. `test_digest_matches_the_pinned_value` passes with the new value, and
+`make test` — `OK`. `test_digest_matches_the_pinned_value` passes with the new value;
 `test_twenty_bugs_across_two_products` is unaffected because no event changed.
-
-### Step 4.5 — commit
 
 ```sh
 git add scenarios/smoke/resources.json tests/test_smoke_scenario.py
 git commit -m "feat: declare a settable bug group in the smoke scenario"
 ```
 
-**Acceptance criteria.** `scenarios/smoke` declares one bug group mapped to both products
-with one member; the pinned digest matches; no event changed.
+**Acceptance.** `scenarios/smoke` declares one bug group mapped to both products with one
+member; the pinned digest matches; no event changed.
 
 ## Task 5 — prove it live, and record the `bzr` gap
 
-**Files:** modifies `docs/bzr-findings.md`. No source change.
+**Files:** `docs/bzr-findings.md`. No source change.
 
-**Interfaces.** Consumes everything above. Produces nothing later tasks read.
+### 5.1 Provision a fresh fixture
 
-**Where it fits.** `make test` proves the fakes agree with the code; only the Docker fixture
-proves the Perl is right. AGENTS.md requires the `bzr` gap be recorded.
-
-### Step 5.1 — bring up a fresh fixture and provision it
-
-From the worktree root, with the floor binary:
-
-```sh
-make up
-```
-
-Expect both containers healthy. Then
+From the worktree root: `make up` — both containers healthy. Then
 
 ```sh
 BZR_LIVE_BZR="/Volumes/Source Code Volume/src/bzr/target/release/bzr" make smoke
 ```
 
-Expect the provisioning report to include `created group:restricted` and the run to finish
-without a `ProvisionError`. A `bridge set-group-control failed: ...` message means the Perl
-is wrong; read the named Bugzilla error before changing anything.
+Expect `created group:restricted` in the provisioning report and no `ProvisionError`. A
+`bridge set-group-control failed: ...` message means the Perl is wrong; read the named
+Bugzilla error before changing anything.
 
-### Step 5.2 — confirm the end state directly
+### 5.2 Confirm the end state directly
 
-Invoke the bridge exactly as `src/bzr_live/provision/__main__.py:14-21` does, from the
-worktree root:
+Invoke the bridge exactly as `src/bzr_live/provision/__main__.py:14-21` does:
 
 ```sh
 ROOT=$(pwd -P)
@@ -750,25 +523,21 @@ printf '%s' '{"product":"checkout","group":"restricted"}' | docker compose \
 ```
 
 Expect one JSON line whose `result` carries `"settable":true`, `"membercontrol":1` and
-`"othercontrol":1`. Repeat with `"product":"billing"` and expect the same.
+`"othercontrol":1`. Repeat with `"product":"billing"` for the same result.
 
-### Step 5.3 — confirm the rerun is idempotent
+### 5.3 Confirm the rerun is idempotent
 
-```sh
-BZR_LIVE_BZR="/Volumes/Source Code Volume/src/bzr/target/release/bzr" make smoke
-```
+Re-run the `make smoke` command from 5.1. Expect `unchanged group:restricted`.
 
-Expect `unchanged group:restricted` and no `set-group-control` failure.
+### 5.4 Record finding G11
 
-### Step 5.4 — record finding G11
-
-In `docs/bzr-findings.md`, add a row to the summary table after the `D9` row:
+In `docs/bzr-findings.md`, add a summary-table row after the `D9` row:
 
 ```markdown
 | [G11](#g11) | gap | No `bzr` command maps a bug group to a product, so no group is settable without the admin bridge | — |
 ```
 
-and add this section at the end of the file:
+and this section at the end of the file:
 
 ```markdown
 ---
@@ -804,24 +573,11 @@ adds `set-group-control` and `get-group-control` to that bridge, over
 mapping, and provisioning refuses before mutating anything when it cannot be established.
 ```
 
-### Step 5.5 — run the remaining guardrails
+### 5.5 Run the remaining guardrails, then commit
 
-```sh
-make check
-```
-Expect it to pass.
-
-```sh
-BZR_LIVE_BZR="/Volumes/Source Code Volume/src/bzr/target/release/bzr" make replay-smoke
-```
-Expect the probe report to print and the script to exit 0.
-
-```sh
-BZR_LIVE_BZR="/Volumes/Source Code Volume/src/bzr/target/release/bzr" make checkpoint-smoke
-```
-Expect a save/restore round trip that exits 0.
-
-### Step 5.6 — tear down and commit
+`make check` — passes.
+`BZR_LIVE_BZR=... make replay-smoke` — the probe report prints and the script exits 0.
+`BZR_LIVE_BZR=... make checkpoint-smoke` — a save/restore round trip exits 0.
 
 ```sh
 make down
@@ -829,10 +585,9 @@ git add docs/bzr-findings.md
 git commit -m "docs: record G11, no bzr surface maps a bug group to a product"
 ```
 
-**Acceptance criteria.** A live fixture provisions `group:restricted` as settable on both
-products; a rerun reports it unchanged; `docs/bzr-findings.md` carries G11 with its `bzr`
-source citation, its observed behaviour, and a defect-or-gap verdict; all five guardrails
-pass.
+**Acceptance.** A live fixture provisions `group:restricted` as settable on both products; a
+rerun reports it unchanged; `docs/bzr-findings.md` carries G11 with its `bzr` citation,
+observed behaviour and class; all five guardrails pass.
 
 ## Rollback
 
