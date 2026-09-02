@@ -33,6 +33,7 @@ already-filed one (D5).
 | [G5](#g5) | design choice | `--dupe-of` conflicts with `--status` and `--resolution` | — |
 | [G6](#g6) | gap | `--permissive` is rejected for a single bug ID | — |
 | [G9](#g9) | design choice | `bug create --from-json` silently defaults an omitted `version` to `unspecified` | — |
+| [D6](#d6) | defect (fixed upstream) | `component view` reports `default_assignee: null` for a component Bugzilla says has one | fixed by `5fb99362` |
 
 ---
 
@@ -262,3 +263,36 @@ accept a bug whose version no scenario ever stated.
 **What the fixture does.** Refuses a declared null `version` on `bug.create` as a
 precondition, naming this entry. An omitted `version` is a scenario-contract question rather
 than a bzr one and is settled by the loader.
+
+## D6
+
+**`component view` reports `default_assignee: null` for a component Bugzilla says has one.**
+*Observed against a running fixture.*
+
+`Component` (`src/types/component.rs` at `ae39fbd8`) declares
+`#[serde(default)] pub default_assignee: Option<String>`. Bugzilla's `Product.get` returns the
+field as `default_assigned_to`, so serde finds no matching key and leaves the value `None`.
+`bzr component view` reads the component out of `get_product`'s nested `components`
+(`src/commands/component/view.rs`), so the omission reaches every caller of that command.
+
+The write path is unaffected: `component create --default-assignee=` stores the value
+correctly. Observed on the smoke fixture — `bzr component view -- checkout cart` returned
+`"default_assignee": null` while stock REST `GET /rest/product/checkout` returned
+`"default_assigned_to": "triager@example.test"` for the same component, in the same run.
+
+So this is a **read-side wire-name mismatch**, the same shape as [D5](#d5) and closely related
+to [D3](#d3): a value that can be written but not read back, which makes a declared component
+default assignee unverifiable through `bzr` alone.
+
+**Upstream.** Already fixed. `5fb99362` ("fix(component): accept Bugzilla default assignee
+key") adds `alias = "default_assigned_to"` to the field; the alias is present at `b9d779ef`
+and absent at `ae39fbd8`. Nothing to file.
+
+**What the fixture does.** Nothing — the scenario keeps declaring `default_assignee` on all
+four components, because the field is honest and the defect is the finding. The provisioner
+refuses the readback with
+`component:cart differs in declared field 'default_assignee': declared '…', observed None`,
+which is correct behaviour: it cannot confirm what it wrote. Running `make smoke` therefore
+requires a `bzr` at `5fb99362` or later. This entry is why `tests/smoke_scenario.sh` prints
+the `bzr` revision as its first line: the same scenario passes or fails on that revision
+alone, and an entry recorded against the wrong one would be a false report.
