@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# Operator-run checkpoint save/restore round trip. Requires Docker and the fixture
+# reachable from this checkout; it runs `make up` itself.
+#
+# Runs on bash 3.2 -- macOS /bin/bash, the `bash` the Makefile's smoke recipes
+# resolve to on the development host. So: no bash 4+ syntax here, and no version
+# precondition either. That bash also discards a fatal `set -u` error's status
+# before the EXIT trap runs, which is why cleanup carries a completion sentinel
+# rather than only the status it was handed (issue #29).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -10,9 +18,14 @@ RUNNER_STATE="$TEMP_ROOT/runner"
 RUNNER_MARKER="$RUNNER_STATE/checkpoint-smoke-marker"
 BUGZILLA_MARKER=/var/www/html/data/checkpoint-smoke-marker
 
+COMPLETED=0
 cleanup() {
   local status=$?
   rm -rf -- "$TEMP_ROOT"
+  if [ "$status" -eq 0 ] && [ "$COMPLETED" -ne 1 ]; then
+    printf 'checkpoint smoke failed: exited before finishing; see the error above\n' >&2
+    status=1
+  fi
   exit "$status"
 }
 trap cleanup EXIT HUP INT TERM
@@ -140,4 +153,5 @@ actual=$(db_client <<<'SELECT value FROM checkpoint_smoke.marker WHERE id = 1;')
   fail "corrupt restore changed MariaDB marker to '$actual' before rejection"
 make doctor
 
+COMPLETED=1
 printf 'Checkpoint smoke passed: save, repeated restore, corruption preflight, and health.\n'
