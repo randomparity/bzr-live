@@ -58,7 +58,7 @@ scenario dir ──load_scenario──▶ ValidatedScenario ──┐
 | `tests/replay_smoke.sh` | operator-run live proof: create succeeds, its alias round-trips, and a duplicate alias is rejected |
 | `src/bzr_live/provision/adapters.py` | *changed*: `BzrClient.read` gains keyword-only `absent_codes` (see **Reading absence**) |
 | `docs/bzr-findings.md` | already committed on this branch: the register of bzr limitations this work surfaced — the fixture's own deliverable |
-| `containers/bugzilla/checksetup_answers.txt` | *changed*: `defaultplatform` and `defaultopsys`, so an honest create succeeds without runner-side substitution |
+| `containers/bugzilla/checksetup_answers.txt` | *changed*: `defaultplatform` and `defaultopsys`, so an honest create succeeds without runner-side substitution, plus `defaultpriority` corrected from `'--'` to Bugzilla's own `'---'` (the live run found the original rejects every create) |
 
 Every unit is testable in isolation: `ReplayContext` needs only a `ValidatedScenario` and a
 `KeyStore`; a handler needs only a context and a `PlannedEvent`; `ReplayEngine` needs a

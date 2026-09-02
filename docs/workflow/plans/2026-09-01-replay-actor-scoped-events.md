@@ -75,7 +75,7 @@ Transcribed from
 | `tests/fixtures/replay-scenario/` | new | scenario exercising all eight actions (built in Task 1; every later task's tests load it) |
 | `src/bzr_live/provision/adapters.py` | changed | `BzrClient.read` gains keyword-only `absent_codes`; new `BUG_ABSENT_CODES` |
 | `docs/bzr-findings.md` | already committed | the register of bzr limitations this work surfaced; no task changes it |
-| `containers/bugzilla/checksetup_answers.txt` | changed | `defaultplatform` / `defaultopsys`, so an honest create succeeds (Task 0) |
+| `containers/bugzilla/checksetup_answers.txt` | changed | `defaultplatform` / `defaultopsys`, so an honest create succeeds (Task 0); `defaultpriority` corrected to `'---'` after the live run (see Task 0's acceptance criteria) |
 | `tests/replay_smoke.sh` | new | operator-run live proof: the create succeeds and its alias round-trips |
 | `Makefile` | changed | widen `compileall` from two named test files to `tests`; add `tests/replay_smoke.sh` to the shell checks and a `replay-smoke` target |
 | `.github/workflows/scenario-contract.yml` | changed | add the new ADR, spec and plan to both `paths` lists |
@@ -135,6 +135,14 @@ git commit -m "fix(fixture): declare default platform and OS for bug creates"
 so a create declaring neither succeeds without the runner substituting anything. Every
 bzr-grounded refusal message a later task writes has a register entry to cite — satisfied by
 the committed register, not by this task.
+
+**Amended after the live run.** This task planned two answers; the file carries three. The
+first `make replay-smoke` failed at the create with api_code 51, and the cause was a
+pre-existing `defaultpriority = '--'` answer — not a legal priority, accepted unchecked at
+install (`Bugzilla/Config.pm:235-236`), and substituted into every create that declares none
+(`Bugzilla/Bug.pm:713-714`). Corrected to Bugzilla's own `'---'` in commit `a9627fe`. It is
+recorded here rather than folded into Step 0.1 because the plan did not foresee it: nothing
+in this repository had created a bug through the fixture before replay did.
 
 ## Task 1 — `ReplayContext`
 

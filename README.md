@@ -112,5 +112,10 @@ interruption, refusing if the scenario or fixture changed underneath it. Both ex
 with a `replay failed: ...` message on stderr naming the precondition or `bzr`
 limitation that stopped them.
 
+Replay needs a fixture installed with the current `containers/bugzilla/checksetup_answers.txt`.
+Bugzilla reads those answers only at install, so a fixture built before them rejects every
+create — "There is no Priority named '--'", or a missing platform — with nothing pointing at
+the cause. Recreate it first: `CONFIRM_RESET=1 make reset && make up`, then re-provision.
+
 `tests/replay_smoke.sh` runs the live proof against a fresh fixture
 (`BZR_LIVE_BZR=<bzr binary> bash tests/replay_smoke.sh`).

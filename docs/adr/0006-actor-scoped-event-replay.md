@@ -233,6 +233,17 @@ defaults to reset *to*, and `resolution` and `dupe_of` are cleared by a status t
   because `defaultplatform`/`defaultopsys` supply them, which is what the whole of Task 0
   exists to arrange.
 
+  That first run also uncovered a second fixture defect, and it is the more valuable half
+  of the run's output: `checksetup_answers.txt` answered `defaultpriority = '--'`, which is
+  not a legal priority. Bugzilla seeds `["Highest", "High", "Normal", "Low", "Lowest",
+  "---"]` (`Bugzilla/DB.pm:89`) and defaults the parameter to the last of them
+  (`Bugzilla/Config/BugFields.pm:39-44`), but `Bugzilla/Config.pm:235-236` stores an
+  answers-file value *without* running the parameter's checker — so the invalid answer
+  installed cleanly and then failed every create that declared no priority, at
+  `Bugzilla/Bug.pm:713-714` where `defaultpriority` is substituted and `_check_select_field`
+  rejects it. The answer is now `'---'`. It predates this branch and was invisible until
+  something first created a bug through the fixture, which is what replay does.
+
   That first run also falsified one thing this record asserted. The 255-byte attachment
   ceiling is **not** enforced by rejection: a 256-byte summary was accepted (exit 0,
   attachment 2) and stored at exactly 255 bytes — silent truncation, with the column
