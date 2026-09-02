@@ -1,0 +1,15 @@
+Checkout double-charge triage notes
+===================================
+
+Reproduced on the v1 checkout path with two browser tabs submitting the same
+cart within roughly 200ms of each other. Both submissions were accepted and the
+customer was charged twice.
+
+What we know:
+
+- The cart lock is taken after the payment authorisation, not before it.
+- The second submission sees a cart that still reads as unpaid.
+- Refunds have to be issued by hand today; there is no automatic reversal.
+
+Next steps: confirm whether the billing side observes one invoice or two, and
+whether the dunning retry path can compound the problem.
