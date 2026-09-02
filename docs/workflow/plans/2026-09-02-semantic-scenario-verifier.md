@@ -1229,7 +1229,8 @@ Adds `check_history` to `src/bzr_live/verify/checks.py`. Extends
 
 ```python
 def check_history(bug: ExpectedBug, records: list,
-                  observed_fields: Mapping[str, object]) -> list[Finding]: ...
+                  observed_fields: Mapping[str, object],
+                  emails: Mapping[str, str]) -> list[Finding]: ...
 def chain_order(records: list[dict],
                 final_value: str | None) -> tuple[list[dict] | None, str | None]: ...
 ```
@@ -1598,6 +1599,14 @@ reads and collects findings from the six check families. It passes each insider
 `comments` reply to `check_comment_transport` **before** handing it to `check_comments`,
 so a fixture missing `XMLRPC::Lite` refuses with that precondition's message instead of
 reporting a divergence per private comment.
+
+**Four check families take `expected.actor_emails` as their last argument** —
+`check_fields`, `check_history`, `check_comments` and `check_attachments`. Every one of
+them compares a declaring actor's **alias**, which is what `ExpectedChange.actor`,
+`ExpectedComment.author`, `ExpectedAttachment.author` and `ExpectedFlag.requestee` hold,
+against a **login** that `bzr` returned. Nothing else in their arguments can bridge the
+two. The signature blocks above originally omitted the parameter while the prose beside
+them required the projection; Tasks 3 and 4 each hit that and added it.
 
 Three reads are conditional, and every condition comes from the fold rather than from a
 reply, so nothing is skipped on the strength of what the server happened to return:
