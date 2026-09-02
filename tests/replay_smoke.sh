@@ -23,10 +23,6 @@ if [[ -z ${BZ_PORT:-} && -f "$ROOT/.env" ]]; then
   BZ_PORT=$(grep -E '^BZ_PORT=' "$ROOT/.env" | tail -1 | cut -d= -f2)
 fi
 BASE_URL="http://127.0.0.1:${BZ_PORT:-8080}/"
-if [[ -z ${BZ_ADMIN_EMAIL:-} && -f "$ROOT/.env" ]]; then
-  BZ_ADMIN_EMAIL=$(grep -E '^BZ_ADMIN_EMAIL=' "$ROOT/.env" | tail -1 | cut -d= -f2)
-fi
-ADMIN_EMAIL=${BZ_ADMIN_EMAIL:-admin@bugzilla.test}
 
 echo "replay smoke: provisioning scenario resources"
 uv run --python 3.11 python -m bzr_live.provision "$SCENARIO" \
@@ -59,11 +55,22 @@ print(record['resolved_ids']['bug:checkout-race'])
 TRIAGER_KEY=$(cat "$STATE/state/actor-keys/triager.key")
 REPORTER_KEY=$(cat "$STATE/state/actor-keys/reporter.key")
 
+# Each key must be paired with its own actor's login: Bugzilla validates the API key
+# against the email, so an actor key sent with the admin address fails authentication
+# outright (exit 9, "rest/valid_login did not confirm your credentials"). Read the
+# addresses out of the scenario for the same reason the alias is read from it.
+read -r TRIAGER_EMAIL REPORTER_EMAIL <<<"$(uv run --python 3.11 python -c "
+from bzr_live.scenario import load_scenario
+s = load_scenario('$SCENARIO')
+actors = {r.name: r.data['email'] for r in s.resources if r.kind == 'actor'}
+print(actors['triager'], actors['reporter'])
+")"
+
 echo "replay smoke: alias round-trip (finding D4)"
 view=$(BZR_LIVE_API_KEY=$TRIAGER_KEY "$BZR" --json \
   --server-url "$BASE_URL" \
   --server-api-key-env BZR_LIVE_API_KEY \
-  --server-email "$ADMIN_EMAIL" \
+  --server-email "$TRIAGER_EMAIL" \
   bug view -- "$ALIAS")
 VIEWED_ID=$(printf '%s\n' "$view" | uv run --python 3.11 python -c \
   "import json, sys; print(json.load(sys.stdin)['id'])")
@@ -85,7 +92,7 @@ set +e
 dup_out=$(BZR_LIVE_API_KEY=$REPORTER_KEY "$BZR" --json \
   --server-url "$BASE_URL" \
   --server-api-key-env BZR_LIVE_API_KEY \
-  --server-email "$ADMIN_EMAIL" \
+  --server-email "$REPORTER_EMAIL" \
   bug create "--from-json=$DUP_JSON" 2>&1)
 dup_status=$?
 set -e
@@ -102,7 +109,7 @@ set +e
 attach_out=$(BZR_LIVE_API_KEY=$TRIAGER_KEY "$BZR" --json \
   --server-url "$BASE_URL" \
   --server-api-key-env BZR_LIVE_API_KEY \
-  --server-email "$ADMIN_EMAIL" \
+  --server-email "$TRIAGER_EMAIL" \
   attachment upload "--summary=$SUMMARY_256" --content-type=text/plain \
   -- "$CREATE_BUG_ID" "$SCENARIO/assets/notes.txt" 2>&1)
 attach_status=$?
@@ -118,7 +125,7 @@ set +e
 flag_out=$(BZR_LIVE_API_KEY=$TRIAGER_KEY "$BZR" --json \
   --server-url "$BASE_URL" \
   --server-api-key-env BZR_LIVE_API_KEY \
-  --server-email "$ADMIN_EMAIL" \
+  --server-email "$TRIAGER_EMAIL" \
   bug update "--flag=needs-info?" -- "$CREATE_BUG_ID" 2>&1)
 flag_status=$?
 set -e
