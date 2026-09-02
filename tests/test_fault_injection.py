@@ -363,11 +363,6 @@ class _Fixture(unittest.TestCase):
         events = tuple(event for event in self.scenario.events if event.name in names)
         return dataclasses.replace(self.scenario, events=events)
 
-    def _alias(self, scenario) -> str:
-        return self._event(
-            scenario, "create-checkout-race").expected_postcondition["values"][
-                "server_alias"]
-
 
 class ReplayThroughTheDoubleTest(_Fixture):
     """The double records what replay sends.
@@ -384,7 +379,9 @@ class ReplayThroughTheDoubleTest(_Fixture):
             [status for status, _ in self._process(scenario, server, "replay")],
             ["executed", "executed", "executed"])
         self.assertEqual(len(server.bugs), 1)
-        bug_id = server.aliases[self._alias(scenario)]
+        create = self._event(scenario, "create-checkout-race")
+        bug_id = server.aliases[
+            create.expected_postcondition["values"]["server_alias"]]
         # Two comments: Bugzilla stores the create's description as the bug's first
         # comment, which is why it is in the corpus the append reconcilers search.
         self.assertEqual(len(server.comments[bug_id]), 2)
