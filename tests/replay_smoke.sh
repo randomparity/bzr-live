@@ -72,8 +72,11 @@ view=$(BZR_LIVE_API_KEY=$TRIAGER_KEY "$BZR" --json \
   --server-api-key-env BZR_LIVE_API_KEY \
   --server-email "$TRIAGER_EMAIL" \
   bug view -- "$ALIAS")
+# bzr --json wraps its result in a schema envelope; unwrap "data" exactly as
+# BzrClient._payload does (src/bzr_live/provision/adapters.py:76-77), including its
+# tolerance of a reply that carries no envelope.
 VIEWED_ID=$(printf '%s\n' "$view" | uv run --python 3.11 python -c \
-  "import json, sys; print(json.load(sys.stdin)['id'])")
+  "import json, sys; d = json.load(sys.stdin); print(d.get('data', d)['id'])")
 if [[ "$VIEWED_ID" != "$CREATE_BUG_ID" ]]; then
   echo "smoke failed: alias $ALIAS resolved to bug $VIEWED_ID, not the created bug $CREATE_BUG_ID" >&2
   echo "$view" >&2
