@@ -6,7 +6,10 @@ than being routed around in the runner.
 
 Every entry names the `bzr` source that establishes it, at a commit, and says whether the
 behaviour was **observed** against a running fixture or **read** from source. An entry that
-has only been read is marked so; `make replay-smoke` is what promotes it.
+has only been read is marked so. `make replay-smoke` is what produces the evidence to promote
+it: the script prints each probe's observed exit code and message, and a maintainer transcribes
+the result here. The script does not edit this file — the class of an entry is a judgement
+call, as D2 becoming G7 and the withdrawal of G8 both show.
 
 Citations are against `randomparity/bzr` at `b80303b7` unless stated otherwise. Before
 filing anything upstream, check it against `bzr`'s own `docs/adr/` and its open issues:
@@ -52,8 +55,8 @@ start, since the status is always the last character or immediately precedes `(`
 end-anchored parse as the suggested fix.
 
 **What the fixture does.** Refuses the payload as a precondition, before any mutation,
-naming this entry. `tests/replay_smoke.sh` probes the live behaviour and records the exit
-code and message here.
+naming this entry. `tests/replay_smoke.sh` probes the live behaviour and prints the exit code
+and message for transcription here.
 
 ## G7
 
