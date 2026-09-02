@@ -77,7 +77,7 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
    declares, filed as its own actor. Every declared summary is in `bug.scalars`, which
    `src/bzr_live/verify/checks.py:70-73` compares against `bug view`, so a restore that
    silently did nothing leaves a divergence the re-verify must report. The bug is
-   **addressed by the numeric id a `bug view` on its declared alias returns**, not by the
+   **addressed by the numeric id a `bug view` on its server alias returns**, not by the
    alias: `bug update` declares `pub ids: Vec<u64>` (`src/cli/bug/update.rs:79` at the
    pinned revision) where `bug view` declares `Vec<String>` and documents aliases
    (`view.rs:60-62`). That asymmetry is recorded as finding G10.
@@ -85,22 +85,29 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
 7. **Name GitHub-hosted macOS runners as unavailable** for the arm64 live proof, and keep
    that proof operator-run and recorded in `README.md`.
 
-8. **Refuse to run `tests/smoke_scenario.sh` under bash older than 4.3.** Issue #29 tracks a
-   status-masking `EXIT` trap in the sibling smoke scripts, and this script carries the same
-   `trap 'rm -rf "$STATE"' EXIT` shape. Measured on this host, the shape is not the problem
-   and the trap discipline is not the fix:
+8. **Drop the `EXIT` trap from `tests/smoke_scenario.sh`** and remove the mktemp'd state
+   root explicitly at the end of the success path, so it survives only a run that actually
+   failed. Issue #29 tracks a status-masking `EXIT` trap in the sibling smoke scripts, and
+   this script had the same shape. Measured here, `set -euo pipefail` throughout:
 
-   | case, `set -euo pipefail` | bash 3.2.57 | bash 5.3.15 |
-   |---|---|---|
-   | `trap 'rm -rf "$D"' EXIT; false` | exits 1 | exits 1 |
-   | `trap ':' EXIT; echo "$UNSET"` | **exits 0** | exits 1 |
-   | `cleanup(){ local s=$?; …; exit "$s"; }; echo "$UNSET"` | **exits 0** | exits 1 |
+   | | no `EXIT` trap | `trap ':' EXIT` | status-preserving `cleanup` |
+   |---|---|---|---|
+   | `false` | exits 1 | exits 1 | exits 1 |
+   | `echo "$UNSET"`, bash 3.2.57 | **exits 1** | exits 0 | exits 0 |
+   | `echo "$UNSET"`, bash 5.3.15 | exits 1 | exits 1 | exits 1 |
 
-   An ordinary `set -e` failure — which is every failure this script's stages produce —
-   propagates through the trap on both. Only a *fatal expansion error* loses its status, and
-   on bash 3.2 it is already 0 by the time any trap runs, so `tests/checkpoint_smoke.sh`'s
-   status-preserving `cleanup` pattern does not recover it either. The one thing that does
-   is not running on that interpreter, so the script says so and exits 1.
+   An ordinary `set -e` failure — which is what every stage of this script produces —
+   propagates through any of them. Only a *fatal expansion error* loses its status, only on
+   bash 3.2, and there `$?` is already 0 at handler entry, so `tests/checkpoint_smoke.sh`'s
+   status-preserving `cleanup(){ local status=$?; …; exit "$status"; }` measures the same 0
+   and fixes nothing. **Removing the handler is what restores exit 1**, on every
+   interpreter, which is why no version guard is needed either.
+
+   This is a real trade against PR #23's stated intent that actor API keys not outlive the
+   script: on a failing run the 0700 state root now stays under `TMPDIR`. `AGENTS.md` scopes
+   secret handling here to owner-only modes and omission from ordinary output "and nothing
+   more", the directory is already `chmod 700`, and the alternative was a masked failure —
+   so the trade is taken and nothing more elaborate is built to compensate.
 
 ## Consequences
 
@@ -135,10 +142,19 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
 - **`Scenario contract` now runs on every edit under `docs/adr/` or `docs/workflow/`**,
   including records that have nothing to do with the scenario contract. That is the price of
   ending the omission class, and it is a couple of minutes of a Python-only job.
-- **`make smoke` now refuses to run under macOS's `/bin/bash`.** An operator whose `PATH`
-  puts bash 3.2 first gets an actionable message instead of the run, where before they would
-  have got the run. On a fatal expansion error that run could have exited 0 having proved
-  nothing, so the refusal replaces a silent false pass rather than a working path.
+- **A failed `make smoke` now leaves its state root behind**, holding the actor API keys
+  provisioning minted, under `TMPDIR` at mode 0700. A successful run removes it as before.
+  That is the cost of the exit-status fix and it is bounded by `AGENTS.md`'s file-hygiene
+  scope; an operator who wants it gone reruns or clears `TMPDIR`.
+- **`make smoke` keeps working on every interpreter**, macOS's bash 3.2 included, and now
+  reports a fatal expansion error as a failure there rather than as success. Every figure
+  `README.md` reports from this script was produced before that fix, under an interpreter
+  that exits 0 on such an error. The exposure is narrow and should be stated as it is:
+  ordinary `set -e` failures always propagated correctly on both interpreters, and issue
+  #20's run was proven to bite — a server-side summary edit produced exit 1 and restoring it
+  produced exit 0 — so the normal failure path has positive evidence behind it. What could
+  not be distinguished from success was a fatal expansion error, which for this file means an
+  unbound variable under `set -u`, since it carries no bash-4-only construct.
 - The gate is only worth what its failure behaviour is worth, so this change is not done
   until a controlled fault has been shown to fail it — see the specification's *Proving the
   gate bites*. A green first CI run is not by itself evidence that the step can go red.
@@ -188,9 +204,10 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
   paragraph asks for the live x86_64 path in the same breath as the filters, and issue
   #7's guarantee is the half that has no evidence.
 - **Add issue #20's three records to `scenario-contract.yml` and keep the per-record
-  enumeration.** judgment: it fixes the instance and preserves the class. The list is
-  already twelve doc entries and has been missed once without anyone noticing; the next
-  record would depend on the same manual step that just failed.
+  enumeration.** judgment: it fixes the instance and preserves the class. The list already
+  carries seven record entries in each of its two trigger lists, and all three of issue
+  #20's were missed without anyone noticing; the next record would depend on the same manual
+  step that just failed.
 - **Fix the `EXIT` trap in `tests/smoke_scenario.sh` with the status-preserving `cleanup(){
   local status=$?; …; exit "$status"; }` pattern `tests/checkpoint_smoke.sh:13-18` uses.**
   verified: it does not fix the case it is aimed at. On bash 3.2.57 (macOS `/bin/bash`),
@@ -198,6 +215,12 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
   "$NOPE"` exits **0**, identically to the plain trap, because the status is already 0 when
   the trap runs; the same command on bash 5.3.15 exits 1. Adopting the pattern here would
   have looked like a fix and changed nothing.
+- **Keep the trap and refuse to run under bash older than 4.3 instead.** verified: the
+  refusal is unnecessary once the trap is gone — `set -euo pipefail; echo "$NOPE"` with no
+  trap exits 1 on bash 3.2.57 — and it was actively harmful, because `make smoke` resolves
+  `bash` from `PATH`, which on this repository's own reference host finds `/bin/bash`
+  3.2.57 ahead of `/opt/homebrew/bin/bash` 5.3.15 (`make -n smoke`; `which -a bash`). The
+  guard would have blocked the very runs that produce this change's arm64 evidence.
 - **Run the live tier on a GitHub-hosted arm64 macOS runner.** verified: GitHub's
   runners reference states nested virtualization is unsupported on arm64 macOS runners
   (Apple Virtualization Framework), and container operations are Linux-only

@@ -254,42 +254,29 @@ either entry is later removed, if a workflow line grows a tab, or if any indent 
 `$BASE_URL`, and `elapsed_since <start-ns>` defined at line 79. Provides nothing to later
 tasks except the stages themselves, which Task 3's job step invokes through `make smoke`.
 
-### Step 2.1 — guard the interpreter, canonicalize the state root, then append the stages
+### Step 2.1 — drop the trap, canonicalize the state root, then append the stages
 
-First, in `tests/smoke_scenario.sh`, insert this immediately after `set -euo pipefail`
-(line 14), before the `ROOT=` assignment:
-
-```bash
-# Issue #29 tracks a status-masking EXIT trap in the sibling smoke scripts, and this script
-# has the same `trap 'rm -rf "$STATE"' EXIT` shape -- but measured on bash 3.2.57 and 5.3.15,
-# the shape is not the defect and no trap discipline is the fix. An ordinary `set -e` failure,
-# which is what every stage below produces, propagates through that trap on both. A *fatal
-# expansion error* does not: on 3.2, `set -euo pipefail; trap ':' EXIT; echo "$NOPE"` exits 0,
-# and so does the status-preserving `cleanup(){ local s=$?; ...; exit "$s"; }` pattern
-# tests/checkpoint_smoke.sh:13-18 uses, because $? is already 0 when the trap runs. bash 5.3
-# exits 1 for the same input. macOS still ships 3.2 as /bin/bash, so refuse it: a live proof
-# that can exit 0 while failing is worse than one that does not run.
-if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
-  echo "smoke scenario: needs bash >= 4.3, found ${BASH_VERSION}." >&2
-  echo "  On bash 3.2 a fatal expansion error exits 0, so a failed run would look green." >&2
-  echo "  Install a newer bash (brew install bash) and put it ahead of /bin/bash." >&2
-  exit 1
-fi
-```
-
-Then insert one assignment between the existing `STATE=$(mktemp -d …)` at line 20 and the
-`trap 'rm -rf "$STATE"' EXIT` at line 21, so it reads:
+First, in `tests/smoke_scenario.sh`, replace lines 20-22 — the `mktemp`, the `EXIT` trap and
+the `chmod` — with:
 
 ```bash
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-smoke-scenario.XXXXXX")
-# scripts/checkpoint requires every path argument to equal its own resolve()
-# (src/bzr_live/checkpoint.py:155-167), and on macOS TMPDIR sits under the
-# /var -> /private/var symlink, so the mktemp spelling is refused with
-# "paths: store must be canonical". Resolve once here rather than leaving two spellings of
-# one directory in the script; tests/checkpoint_smoke.sh:5-6 does the same, for the same
-# caller. Nothing above this line uses $STATE, and the EXIT trap below expands it at exit.
+# No EXIT trap. Measured, `set -euo pipefail` throughout: an ordinary command failure -- what
+# every stage below produces -- exits 1 through any trap on bash 3.2.57 and 5.3.15 alike, but
+# a fatal expansion error (an unbound variable under `set -u`) exits 1 with NO trap and 0 with
+# ANY trap on 3.2, including tests/checkpoint_smoke.sh:13-18's status-preserving cleanup,
+# because $? is already 0 at handler entry. Removing the handler is what restores the status,
+# so the state root is removed explicitly at the end of the success path instead and a failed
+# run leaves it behind. That trades against PR #23's intent that actor keys not outlive the
+# script; the directory is mode 0700 and AGENTS.md scopes this fixture's secret handling to
+# owner-only modes "and nothing more", so the trade is taken deliberately (ADR 0010).
+#
+# Canonicalize before anything uses it: scripts/checkpoint requires every path argument to
+# equal its own resolve() (src/bzr_live/checkpoint.py:155-167), and on macOS TMPDIR sits under
+# the /var -> /private/var symlink, so the mktemp spelling is refused with
+# "paths: store must be canonical". tests/checkpoint_smoke.sh:5-6 does the same.
 STATE=$(cd "$STATE" && pwd -P)
-trap 'rm -rf "$STATE"' EXIT
+chmod 700 "$STATE"
 ```
 
 Then append, after the existing `echo "smoke scenario: verified in ${VERIFY_ELAPSED}s"` line
@@ -308,8 +295,10 @@ echo "smoke scenario: saving checkpoint 'smoke' over the verified fixture"
 scripts/checkpoint save smoke --store "$STORE" --runner-state "$STATE/state"
 
 # The mutation target is read from the scenario rather than pasted, for the same reason
-# the counts above are: the first bug.create's declared alias, the actor that files it,
-# and that actor's address. Bugzilla validates an API key against its own address, so key
+# the counts above are: the first bug.create's SERVER alias, the actor that files it, and
+# that actor's address. The server alias is not the declared one -- loader.py:711-716 drops
+# `alias` from the postcondition and substitutes `bzr-live-<hash>`, which is what the bug
+# actually carries; `verify` still reports findings under the declared name. Bugzilla validates an API key against its own address, so key
 # and address must belong to one actor (tests/replay_smoke.sh:70-73). Assign first and
 # split second -- `read ... <<<"$(...)"` would take its status from `read` and a scenario
 # that failed to load would leave three empty values behind.
@@ -384,6 +373,11 @@ echo "smoke scenario: re-verified the restored fixture in ${RESTORE_ELAPSED}s"
 echo "smoke scenario: resuming the restored journal"
 uv run --python 3.11 python -m bzr_live.replay resume "$SCENARIO" \
   --state-root "$STATE/state" --bzr "$BZR" --base-url "$BASE_URL"
+
+# The success path removes the state root, so the actor keys provisioning minted do not
+# outlive a run that worked. A failing run stops before this line and leaves the 0700
+# directory under TMPDIR for inspection -- see the header note where the trap used to be.
+rm -rf "$STATE"
 ```
 
 ### Step 2.2 — confirm the shell guardrails pass
@@ -406,7 +400,8 @@ complete; and `smoke scenario: OK`. Record each duration — they are the arm64 
 Task 3 writes into `README.md` and the input to the CI budget claim.
 
 Two failures here are findings about `scripts/checkpoint`, not reasons to weaken the stage:
-a `summary` divergence on `$PROBE_ALIAS` at the re-verify means the restore did not revert
+a `summary` divergence at the re-verify -- reported under the declared alias
+`cart-double-charge`, not `$PROBE_ALIAS` -- means the restore did not revert
 the probe, and a mode-0700 complaint from `verify` or `resume` means it did not preserve the
 runner tree's modes. Record either in the pull request.
 
@@ -416,15 +411,28 @@ A green run does not show the new stages can go red, and the restore is the stag
 failure is otherwise indistinguishable from success: a restore that reverts nothing leaves a
 fixture that still looks replayed. Make one controlled fault, observe red, revert it.
 
+Both runs need a reset first. `make smoke` provisions and replays but never resets, and
+`replay/engine.py:43-47` sweeps for a pristine baseline — `_require_absent` (`:104-115`)
+raises `bug alias … already exists in the fixture` — so a run against the fixture Step 2.3
+just replayed dies at the sweep, long before the stage under test.
+
 Comment out the single `scripts/checkpoint restore smoke …` line, then:
 
+    CONFIRM_RESET=1 make reset && make up
     BZR_LIVE_BZR=/Users/dave/src/bzr/target/release/bzr make smoke
 
-Expect exit 1, with the re-verify printing a `summary` divergence naming the probe bug's
-alias and the summary the scenario declares against the probe text. Record the exact finding
-line — it is the evidence for R8.
+Expect exit 1, with the re-verify printing a `summary` divergence naming the bug's declared
+alias `cart-double-charge` — `verify` builds each `ExpectedBug` with
+`alias=event.creates.name` (`verify/expected.py:306`) and `checks.py:71` prints that, not the
+`bzr-live-<hash>` server alias the stages address. Record the exact finding line; it is the
+evidence for R8.
 
-Restore the line and re-run the same command; expect `smoke scenario: OK` and exit 0 again.
+Restore the line, reset again, and re-run:
+
+    CONFIRM_RESET=1 make reset && make up
+    BZR_LIVE_BZR=/Users/dave/src/bzr/target/release/bzr make smoke
+
+Expect `smoke scenario: OK` and exit 0.
 Do not commit with the line commented out; `git diff` must be empty of that change before
 Step 2.5.
 
@@ -600,10 +608,13 @@ first-run cost:
           key: bzr-${{ runner.os }}-63abb94e7e14a2db79efe0ddf0011a1f32ed8640
 ```
 
-with `if: steps.bzr-cache.outputs.cache-hit != 'true'` on the install step. Resolve
-`actions/cache`'s current release and its commit SHA at that moment rather than from this
-plan, promote the rejected bullet to a decision, and say in the pull request what the
-measurement was that forced it.
+with `if: steps.bzr-cache.outputs.cache-hit != 'true'` on the install step. Three things go
+with it: resolve `actions/cache`'s current release and its commit SHA at that moment rather
+than from this plan; add `"Restore the pinned bzr build"` to the expected list in
+`test_the_live_job_declares_every_step_in_order`, immediately before
+`"Install the pinned bzr build"`, since that assertion pins the step list exactly and an
+eleventh step would fail it; and promote ADR 0010's rejected bullet to a decision, saying in
+the pull request what measurement forced it.
 
 **Acceptance criteria.** The `x86_64-linux` job installs a full-SHA-pinned `bzr`, starts
 the fixture and runs `make smoke` to completion; the job stays inside 45 minutes and the

@@ -98,16 +98,22 @@ The smoke step precedes `make checkpoint-smoke` so that the fixture `make smoke`
 one `make up` just installed, which is the fresh-fixture precondition `README.md:189-191`
 states. `CONFIRM_CLEAN=1 make clean` already runs `if: always()` and removes the volumes.
 
-### Interpreter guard (R7)
+### Exit-status hygiene (R7)
 
-`tests/smoke_scenario.sh` carries the same `trap 'rm -rf "$STATE"' EXIT` shape issue #29
-tracks, and measurement says the shape is not the defect: an ordinary command failure — what
-every stage here produces — propagates through it on both bash 3.2 and 5.3. Only a fatal
-expansion error loses its status, only on bash 3.2, and only because `$?` is already 0 before
-any trap runs, which is why `tests/checkpoint_smoke.sh:13-18`'s status-preserving pattern does
-not fix it either. ADR 0010 decision 8 carries the measurements. The script therefore refuses
-bash older than 4.3 with an actionable message. Nothing else changes: it holds no negative
-subscript and no other bash-4-only construct, so it does not carry issue #29's actual bug.
+`tests/smoke_scenario.sh` carried the same `trap 'rm -rf "$STATE"' EXIT` shape issue #29
+tracks. Measured, `set -euo pipefail` throughout: an ordinary command failure — what every
+stage here produces — exits 1 through any trap on both bash 3.2.57 and 5.3.15. A *fatal
+expansion error* (an unbound variable under `set -u`; this file has no bash-4-only construct)
+exits **1 with no trap** and **0 with any trap** on bash 3.2, including
+`tests/checkpoint_smoke.sh:13-18`'s status-preserving `cleanup`, because `$?` is already 0 at
+handler entry. ADR 0010 decision 8 carries the table.
+
+So the trap goes, and the state root is removed explicitly at the end of the success path
+instead. No interpreter guard is needed — removing the handler restores the status on every
+bash — and none is added, which matters because `make smoke` resolves `bash` from `PATH` and
+finds `/bin/bash` 3.2.57 first on this repository's reference host. The cost is that a failed
+run leaves its 0700 state root under `TMPDIR`; ADR 0010 records that trade against PR #23's
+intent.
 
 ### Proving the gate bites (R8)
 
@@ -132,13 +138,15 @@ trap.
   its own `resolve()` (`:155-167`), which the script's `mktemp` root does not on macOS
   because `TMPDIR` sits under the `/var` → `/private/var` symlink. The script therefore
   canonicalizes `$STATE` at its `mktemp`, as `tests/checkpoint_smoke.sh:5-6` does.
-- **resolve** — read the first `bug.create` event's declared alias and actor out of the
-  loaded scenario, and its actor email out of the scenario's resources, then `bug view` that
+- **resolve** — read the first `bug.create` event's **server** alias and actor out of the
+  loaded scenario — `scenario/loader.py:711-716` drops the declared alias from the
+  postcondition and substitutes the synthesized `bzr-live-<hash>`, which is what the fixture
+  actually carries — and its actor email out of the scenario's resources, then `bug view` that
   alias and take the numeric `id` from the reply. `bug update` accepts `Vec<u64>` only
   (finding G10), so the alias cannot address the mutation even though it addresses this read.
 - **mutate** — send `bug update --summary=<probe text> -- <id>` as that actor with
   `--server-api-key-env`. ADR 0010 decision 6 records why the summary is the field chosen.
-- **read back** — `bug view` the same alias again and require the observed summary to equal
+- **read back** — `bug view` the same server alias again and require the observed summary to equal
   the probe text, so a restore that reverts nothing cannot be mistaken for one that did.
 - **restore** — `scripts/checkpoint restore smoke` with the same store and runner state.
 - **re-verify and resume** — `verify` again against the same state root, then `resume`.
@@ -180,8 +188,12 @@ inside the budget and plausibly not, and the first CI run is what settles it. If
 `randomparity/bzr` and then executes the result. That is external code running on a CI
 runner with the repository checked out.
 
-**Boundaries it widens.** The `paths` filters. More pull requests now reach the live job,
-including pull requests from forks — `randomparity/bzr-live` is public.
+**Boundaries it widens.** The `paths` filters, on both workflows. More pull requests now
+reach the live job, including pull requests from forks — `randomparity/bzr-live` is public.
+A docs-only fork pull request now also reaches the **offline** job, which runs `unittest
+discover` over head-controlled test code, `uv build`, and `tests/smoke_installed.py` against
+the built wheel (`scenario-contract.yml:64-74`); before this change it ran no job at all. The
+control is the same *Fork pull request → runner* row below, not a new one.
 
 **Actor model.** The untrusted actor is the author of a fork pull request. They control
 every file at the pull-request head, including `scenarios/**`, `tests/smoke_scenario.sh` and
