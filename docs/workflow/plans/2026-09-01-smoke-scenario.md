@@ -3,14 +3,9 @@
 **Goal.** Commit `scenarios/smoke/` — 20 bugs, 47 events, two products — and prove it loads
 offline and replays against the live pinned Bugzilla fixture through a real `bzr` binary.
 
-**Architecture.** The fixture is data validated by the existing loader; no Python module under
-`src/` changes. Two proof tiers sit beside it: an offline `unittest` case that loads and plans
-the scenario with no server, and an operator-run shell script that provisions and replays it
-against a running fixture. A `make smoke` target and a `make check` registration wire the
-script into the repository's existing command surface.
-
-**Tech stack.** Python 3.11 via `uv` (no runtime dependencies), Bash, GNU Make, Docker Compose,
-the operator-selected `bzr` binary.
+**Architecture and stack** are the spec's; this plan does not restate them. The one thing to
+carry into every task: the fixture is data validated by the existing loader, and no module
+under `src/` changes.
 
 Expected implementation size: 320–430 changed lines (M) — derived from the file map below: four
 fixture files (~120 lines), two proof files (~220), and Makefile/README edits (~40).
@@ -20,32 +15,25 @@ Decision record: [`docs/adr/0007-committed-smoke-scenario.md`](../../adr/0007-co
 
 ## Global constraints
 
-Transcribed from the spec. Every task's requirements include this section.
+Every task's requirements include this section.
+
+**The twelve contract constraints in the spec's "Contract constraints that shape the fixture"
+table bind every task here, with their citations.** They are not restated: a second copy is a
+second thing to keep in agreement with the loader, and the spec's table is the one that was
+reviewed. Read it before writing a single event.
+
+Only these four are not in that table:
 
 - **Python 3.11**, invoked as `uv run --python 3.11`. The package under `src/bzr_live/` has no
   runtime dependencies and gains none here.
 - **No change to `src/`.** The loader, replay engine, journal, and provisioning executor are
   read, not modified. An expressive gap is a finding for `docs/bzr-findings.md`, never a
   contract change.
-- **Names** match `[a-z][a-z0-9-]{0,62}` — resource names, bug aliases, attachment aliases, and
-  event names alike (`src/bzr_live/scenario/loader.py:25`).
-- **Line length** 100 characters; `shellcheck` clean; `bash -n` clean.
-- **No forward references.** An event may cite only bugs created by earlier events
-  (`src/bzr_live/scenario/loader.py:810`).
-- **Flag type names** contain none of `+ - ? X` (`src/bzr_live/replay/actions.py:588-598`).
-- **`bug.create`** must declare `version`; must not declare `custom_fields`,
-  `estimated_hours`, `remaining_hours`, or `duplicate_of`
-  (`src/bzr_live/replay/actions.py:23-30,281-285`).
-- **`bug.update`** must not declare `groups` or `version`; must not set `resolution`,
-  `milestone`, or `duplicate_of` to null; must not pair `duplicate_of` with `status` or
-  `resolution` (`src/bzr_live/replay/actions.py:31-50`).
-- **Declared text** — every summary, description, comment body, and attachment description —
-  must not contain the literal `[bzr-live:` (`src/bzr_live/replay/actions.py:169-178`).
-- **Attachment descriptions** stay under 140 bytes: the rendered summary is
-  `<description> [<marker>] sha256=<64 hex>` capped at 255 bytes
-  (`src/bzr_live/replay/actions.py:13,81-82`).
-- **Secrets** never appear in committed files, command lines, or script output. Actor keys
-  reach `bzr` through the `BZR_LIVE_API_KEY` environment variable only.
+- **Line length** 100 characters **for shell and Python only**. It cannot bind
+  `events.jsonl`, whose format is one JSON object per line and whose lines run to several
+  hundred characters. No repository gate enforces line length in any case — `make check` runs
+  `bash -n`, `shellcheck`, `compileall`, and `docker compose config`.
+- **Secrets** never appear in committed files, command lines, or script output.
 - **Guardrails**: `make check` and `make test` must be green at every commit.
 
 ## File map
@@ -233,12 +221,13 @@ From `src/bzr_live/replay`:
    - `test_twenty_bugs_across_two_products` — exactly 20 events have `action == "bug.create"`,
      and the set of their `expected_postcondition["values"]["product"].name` values has at
      least two members.
-   - `test_dependency_chain_is_three_deep_and_crosses_products` — build the
-     `depends_on` edge set from every create payload and every `bug.update` `set`, then assert
-     `cart-double-charge → inv-tax-mismatch → dun-retry-storm` is present and that the three
-     bugs do not all share one product.
-   - `test_diamond_has_two_distinct_paths` — from the same edge set, assert `pay-token-leak`
-     reaches `dun-wrong-locale` by exactly two distinct paths.
+   - `test_dependency_chain_is_three_deep_and_crosses_products` — over the shared graph
+     defined below, assert `dun-retry-storm → inv-tax-mismatch → cart-double-charge` is a
+     path (the chain read in the graph's `blocks` direction, which is the reverse of how the
+     spec's prose names it) and that the three bugs do not all share one product.
+   - `test_diamond_has_two_distinct_paths` — over the same shared graph, assert
+     `pay-token-leak` reaches `dun-wrong-locale` by exactly two distinct paths.
+
    - `test_exactly_one_duplicate_assignment` — exactly one event's `set` carries
      `duplicate_of`, and it carries no `status` or `resolution`.
    - `test_reopening_present` — the ordered status values declared for `pay-decline-copy`
@@ -252,6 +241,26 @@ From `src/bzr_live/replay`:
    - `test_attachment_summaries_fit` — for every `bug.attach` event,
      `len(render_attachment_summary(description, marker, asset_sha256).encode("utf-8"))` is at
      most `ATTACHMENT_SUMMARY_BYTE_LIMIT`.
+   - `test_no_server_ids_in_committed_files` — read the three committed JSON/JSONL files as
+     raw text and assert no value under a key that takes a typed reference (`product`,
+     `component`, `version`, `milestone`, `assignee`, `actor`, `bug`, `attachment`, `asset`,
+     `field`, and the list-valued `cc`, `groups`, `depends_on`, `blocks`, `keywords`) is a
+     bare integer or a string of digits. This is the property ADR 0007 relies on when it
+     prefers literal JSON to a generator; without this assertion nothing checks it.
+
+   **The shared topology graph.** The two topology tests read one directed graph, built once
+   in a module-level helper and oriented consistently as `blocks` — an edge `(a, b)` means
+   "a blocks b". Walk every `bug.create` payload and every `bug.update` `set`, and add:
+
+   - `(target, b)` for every reference `b` in a `blocks` list, and
+   - `(b, target)` for every reference `b` in a `depends_on` list.
+
+   Merging both orientations into one graph is what makes the diamond traversable. Its apex
+   edges are declared as `blocks` on `pay-token-leak` and its sink edges as `depends_on` on
+   `dun-wrong-locale`, so a `depends_on`-only graph holds no path from apex to sink at all and
+   the diamond test could never pass over it. Do not "fix" that by adding a redundant
+   `depends_on` edge to the fixture: the spec declares each edge exactly once, and duplicating
+   one changes the topology the design chose.
 
 8. **Run it and confirm it passes.**
 
@@ -259,12 +268,22 @@ From `src/bzr_live/replay`:
    uv run --python 3.11 python -m unittest tests.test_smoke_scenario -v
    ```
 
-   Expect `OK` with ten tests. If a test fails, the fixture is wrong — correct the fixture.
+   Expect `OK` with eleven tests. A failure is usually the fixture — correct the fixture. But
+   a test that disagrees with the topology the spec declares is a test defect: fix the test,
+   not the fixture.
 
 9. **Prove the tests bite.** Break the fixture deliberately, once per guard, and observe red
-   before reverting: delete one `bug.create` line (expect `test_twenty_bugs_across_two_products`
-   to fail), and lengthen an attachment description past 140 bytes (expect
-   `test_attachment_summaries_fit` to fail). Revert both edits.
+   before reverting:
+
+   - delete one `bug.create` line — expect `test_twenty_bugs_across_two_products` to fail;
+   - lengthen `attach-triage-notes`' description to 160 bytes — expect
+     `test_attachment_summaries_fit` to fail. 160 is the figure that goes red, not the
+     spec's 140-byte authoring margin: the marker `bzr-live:smoke:attach-triage-notes` is 34
+     bytes, so the fixed overhead is 109 bytes and a 140-byte description renders to 249,
+     comfortably under the 255 limit. At 160 the rendered summary is 269 bytes.
+
+   Revert both edits. **If an injection stays green, the guard is at fault, not the fixture** —
+   the assertion is not measuring what it claims to. Fix the test and re-inject.
 
 10. **Run the guardrails and commit.**
 
@@ -276,9 +295,9 @@ From `src/bzr_live/replay`:
     Both exit 0. Commit as `feat(scenario): add the 20-bug smoke scenario and its offline proof`.
 
 **Acceptance criteria.** `scenarios/smoke/` loads with 47 events and 20 creates;
-`tests/test_smoke_scenario.py` passes with ten tests; both guard tests were observed failing
-against a deliberate fault and passing after revert; `make check` and `make test` are green;
-no file under `src/` changed.
+`tests/test_smoke_scenario.py` passes with eleven tests; both guard tests were observed
+failing against a deliberate fault and passing after revert; `make check` and `make test` are
+green; no file under `src/` changed.
 
 ## Task 2 — The live proof
 
@@ -364,6 +383,23 @@ scenario. It ends at a `make smoke` that an operator can run and that reports a 
    `make up` returns only after MariaDB initialization, `checksetup.pl`, Apache start, and the
    HTTP health check. Expect it to take several minutes on first build.
 
+   Then save a pristine baseline immediately, before anything has been provisioned into it.
+   `scripts/checkpoint` requires both `--store` and `--runner-state`, exactly as
+   `tests/checkpoint_smoke.sh:100` invokes it; choose a store directory outside the repository
+   and keep both paths for the restore in step 7:
+
+   ```sh
+   CHECKPOINT_STORE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-smoke-store.XXXXXX")
+   RUNNER_STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-smoke-runner.XXXXXX")
+   scripts/checkpoint save pristine --store "$CHECKPOINT_STORE" \
+     --runner-state "$RUNNER_STATE"
+   ```
+
+   This is what makes step 7's retry loop cheap. Without it every fixture-defect iteration
+   pays the full reset-and-rebuild above; with it the recovery is a restore measured in
+   seconds. The replay engine's own refusal text already points the operator at this command
+   (`src/bzr_live/replay/engine.py:113-115`).
+
 6. **Run the live proof.**
 
    ```sh
@@ -376,14 +412,24 @@ scenario. It ends at a `make smoke` that an operator can run and that reports a 
 7. **Triage any failure honestly.** A failure is one of three things, and the response differs:
 
    - **A fixture-configuration gap** — Bugzilla rejects an honest payload because the install
-     lacks something. Fix `containers/`, recreate the fixture (step 5), and say in the commit
-     message that the checkpoint stack fingerprint changed.
+     lacks something. Fix `containers/`, recreate the fixture from step 5 in full — a
+     `containers/` edit changes the checkpoint stack fingerprint, so the saved `pristine`
+     stops restoring ("bundle: stack fingerprint is incompatible") and must be re-saved — and
+     say in the commit message that the fingerprint changed.
    - **A `bzr` limitation** — the engine refuses before mutating and names the boundary. Record
      it in `docs/bzr-findings.md` with the `bzr` source citation, the observed behaviour, and
      whether it is a defect or a design choice. Do not alter the declared payload to route
      around it.
    - **A defect in this fixture** — a wrong reference, a privilege the actor does not hold, a
-     mistyped status. Fix the fixture and re-run from step 5.
+     mistyped status. Fix the fixture, then restore the baseline rather than rebuilding:
+
+     ```sh
+     scripts/checkpoint restore pristine --store "$CHECKPOINT_STORE" \
+       --runner-state "$RUNNER_STATE"
+     ```
+
+     and re-run step 6. This is the common branch, and it is the one the checkpoint saved in
+     step 5 exists to make cheap.
 
 8. **Record the observed duration in `README.md`.** Add a "Smoke scenario" section after
    "Scenario replay" giving what the scenario covers, the `make smoke` invocation with
@@ -414,6 +460,18 @@ record path or tracker issue before implementation begins.
 ## Rollback
 
 Every artifact is additive except the `Makefile` and `README.md` edits. Reverting the branch
-removes `scenarios/smoke/` and both proof files and restores both edited files; nothing
-persists outside the repository except a live fixture the operator resets with
-`CONFIRM_RESET=1 make reset`.
+removes `scenarios/smoke/` and both proof files and restores those two.
+
+Three things that revert does **not** cover:
+
+- **`docs/bzr-findings.md` is excluded from the revert.** A finding records what the live
+  `bzr` binary actually did; that evidence is true whether or not this change ships, and
+  `AGENTS.md` calls the register the most valuable thing this repository produces. Its commit
+  stands on its own — which is why step 9 keeps it in a separate commit.
+- **A `containers/` edit under Task 2 step 7 invalidates saved checkpoints.** Reverting
+  restores the old stack fingerprint, so any checkpoint saved *during* the work stops
+  restoring in the other direction. Recovery is to re-save `pristine` after the fixture is
+  recreated (`README.md:127-130`); `CONFIRM_RESET=1 make reset` alone does not do it.
+- **The live fixture and the checkpoint store persist outside the repository.** The operator
+  clears them with `CONFIRM_RESET=1 make reset` and by removing the `mktemp -d` store and
+  runner-state directories from step 5.

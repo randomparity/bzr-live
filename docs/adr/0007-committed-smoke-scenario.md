@@ -12,7 +12,7 @@ tests plus a narrow operator-run live script. What none of them proves is that t
 compose: the largest committed fixture,
 `tests/fixtures/replay-scenario/`, declares one bug touched by every supported action, so
 no committed scenario exercises cross-bug topology, a second product, more than two actors,
-or custom-field values.
+or more than a single single-select custom-field value.
 
 Epic #1 requires a smoke scenario of roughly 20 bugs stored under `scenarios/<name>/`, and
 issue #19 scopes the authoring of it. That raises three questions this record settles: where
@@ -45,17 +45,25 @@ therefore reads as a narrative in which relationships accumulate, which is also 
 relationships it models arise in a real tracker.
 
 The proof is two-tier. `tests/test_smoke_scenario.py` loads and plans the committed scenario
-with no server, asserting the topology and coverage invariants; it runs in the existing
-scenario-contract CI job and needs no Docker. `tests/smoke_scenario.sh`, invoked by
-`make smoke`, provisions and replays the scenario against a running fixture with a real
-`bzr` binary, and is the arm that proves the composition. Wiring the live arm into x86_64 CI
-is issue #21's, not this record's.
+with no server, asserting the topology and coverage invariants; it needs no Docker and runs
+under `make test`. `tests/smoke_scenario.sh`, invoked by `make smoke`, provisions and replays
+the scenario against a running fixture with a real `bzr` binary, and is the arm that proves
+the composition. Wiring either tier into CI is issue #21's, not this record's — including the
+`scenarios/**` path filter the offline tier needs, which is why the consequence below is
+stated as narrowly as it is.
 
 ## Consequences
 
-- A malformed or internally inconsistent smoke fixture fails in ordinary CI, on every pull
-  request that touches it, without a container. The offline tier is what makes the fixture
-  safe to edit.
+- A malformed or internally inconsistent smoke fixture fails locally under `make test`,
+  without a container. That is what makes the fixture safe to edit at a desk.
+- **It is not yet a CI gate for fixture-only edits.** `.github/workflows/scenario-contract.yml`
+  filters on `src/**`, `tests/**`, package metadata, and named design documents; `scenarios/**`
+  appears in neither its `pull_request` nor its `push` list. So the pull request that adds
+  `tests/test_smoke_scenario.py` runs the job — that file is under `tests/` — while a later
+  pull request editing only `scenarios/smoke/events.jsonl` runs nothing. The 20-bug fixture
+  this record expects people to edit is exactly the artifact left ungated, and the gap closes
+  when #21 adds the path filter. Until then the offline tier is a developer guardrail, not a
+  merge precondition, and this record does not claim otherwise.
 - The live tier stays operator-invoked until #21 wires it into CI, so between this change and
   that one the composition proof is a command someone runs, recorded in the pull request,
   rather than a gate.
@@ -74,9 +82,10 @@ is issue #21's, not this record's.
 
 - **Do nothing; extend `tests/fixtures/replay-scenario/`.** verified: its `scenario.json:2`
   declares "Replay fixture: one bug touched by every supported action" and its
-  `events.jsonl` holds five events all targeting `bug:checkout-race`, so growing it to 20
-  bugs would redefine the fixture that `tests/test_replay.py` and `tests/replay_smoke.sh`
-  were written against, at the same time as it stops being minimal.
+  `events.jsonl` holds eight events, seven targeting `bug:checkout-race` and one its
+  attachment, so growing it to 20 bugs would redefine the fixture that
+  `tests/test_replay.py` and `tests/replay_smoke.sh` were written against, at the same time
+  as it stops being minimal.
 - **Store the smoke scenario under `tests/fixtures/` too.** verified: epic #1's scenario
   contract requires "Store each scenario under `scenarios/<name>/`", and the runner's
   `load`/`replay`/`verify` commands take a scenario path an operator types.

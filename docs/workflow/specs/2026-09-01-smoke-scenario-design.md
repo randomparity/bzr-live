@@ -152,7 +152,10 @@ its neighbours'. Proving what resume does with it belongs to #21.
 
 **Offline tier — `tests/test_smoke_scenario.py`.** Loads `scenarios/smoke/` through
 `load_scenario` with no server and asserts the invariants that make the fixture worth
-replaying, so a fixture defect fails in the existing scenario-contract CI job:
+replaying, so a fixture defect fails under `make test` without a container. It is not yet a
+CI gate for fixture-only edits — `scenarios/**` is in neither path filter of
+`.github/workflows/scenario-contract.yml`, and adding it belongs to #21 (ADR 0007,
+Consequences). The assertions:
 
 - it loads without error, and the digest is stable across two loads;
 - exactly 20 `bug.create` events, spanning at least two products;
@@ -163,10 +166,13 @@ replaying, so a fixture defect fails in the existing scenario-contract CI job:
 - every action in `HANDLERS` appears at least once;
 - all three custom-field types are assigned;
 - at least one private comment, and its author is in `group:admin`;
-- every rendered attachment summary is within `ATTACHMENT_SUMMARY_BYTE_LIMIT`.
+- every rendered attachment summary is within `ATTACHMENT_SUMMARY_BYTE_LIMIT`;
+- no committed fixture file carries a bare integer where a typed reference belongs — the
+  property ADR 0007 rests on when it prefers literal JSON to a generator, which nothing
+  would otherwise check.
 
-The last two are guard tests: each encodes a constraint that would otherwise fail only
-against a live server, late.
+The last three are guard tests: each encodes a constraint that would otherwise fail only
+against a live server, late — or, for the last, not at all.
 
 **Live tier — `tests/smoke_scenario.sh`, `make smoke`.** Provisions the scenario's resources
 and replays its events against a running fixture, following the conventions
@@ -196,14 +202,15 @@ checkpoints (`README.md:127-130`). Any such fix says so in its commit message.
 
 ## Threat model
 
-The change adds fixture data plus one shell script that reads actor API keys, so the
-security-relevant trigger that applies is secret handling. Everything else about the
-deployment is unchanged.
+The change adds fixture data plus one shell script that creates the state root actor API keys
+are written into, so the security-relevant trigger that applies is secret handling.
+Everything else about the deployment is unchanged.
 
-**Boundaries.** The script adds no boundary. It widens no existing one. It reads actor API
-keys from the run's state root and passes them to `bzr` through `BZR_LIVE_API_KEY`, which is
-the mechanism ADR 0004 already established and `tests/replay_smoke.sh:67-68,82-86` already
-uses.
+**Boundaries.** The script adds no boundary and widens no existing one. It handles no key
+material itself: its only invocations are `python -m bzr_live.provision` and
+`python -m bzr_live.replay`, which mint and read the keys internally, so no key ever enters
+the shell process — a stronger boundary than `tests/replay_smoke.sh`, which does read
+`actor-keys/*.key` at its lines 67-68 in order to call `bzr` directly.
 
 **Actors.** A local operator running `make smoke` on their own machine. Per `AGENTS.md`, the
 fixture binds to loopback, every credential in it is fabricated and disposable, and neither a
@@ -211,7 +218,8 @@ remote attacker nor a hostile local user is in the threat model.
 
 **Controls.** The state root is a `mktemp -d` directory set to mode 0700 and removed by an
 `EXIT` trap; keys reach `bzr` in the environment, never on a command line or in script
-output; the scenario's committed files contain no key, no server ID, and no runtime state.
+output; the scenario's committed files contain no key, no server ID, and no runtime state —
+the last of these asserted by the offline tier rather than assumed.
 
 **Out of scope.** Encryption at rest, key rotation, and credential-store integration, all
 excluded by `AGENTS.md`. Fault injection and the response-loss proofs are #21's.
