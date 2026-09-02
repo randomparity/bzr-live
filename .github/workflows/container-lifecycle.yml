@@ -76,6 +76,35 @@ jobs:
           make test
           make check
 
+      - name: Install the pinned bzr build
+        # libdbus-1-dev is not preinstalled on GitHub's Ubuntu images; bzr's own CI
+        # installs it in every job that compiles (randomparity/bzr
+        # .github/workflows/ci.yml:21-22). cargo and rustup are preinstalled, but the
+        # toolchain the image defaults to drifts, so 1.89.0 -- the channel the pinned
+        # tree's own rust-toolchain.toml names -- is requested explicitly. The revision
+        # is the one README.md states this scenario is proven at, pinned by full SHA
+        # with --locked. The prefix is outside the workspace because compose.yaml builds
+        # from context "." and this repository has no .dockerignore.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+          rustup toolchain install 1.89.0 --profile minimal
+          cargo +1.89.0 install --git https://github.com/randomparity/bzr \
+            --rev 63abb94e7e14a2db79efe0ddf0011a1f32ed8640 \
+            --locked --root "$RUNNER_TEMP/bzr" bzr
+
+      - name: Start the fixture
+        run: make up
+
+      - name: Exercise the live scenario smoke path
+        # Provision, replay, verify, checkpoint save, mutate, restore, re-verify, resume
+        # -- one invocation, because every stage after the replay reads the state root
+        # that script mktemps. It removes that root on its success path only, so a
+        # failed run leaves it for inspection (ADR 0010 decision 8).
+        env:
+          BZR_LIVE_BZR: ${{ runner.temp }}/bzr/bin/bzr
+        run: make smoke
+
       - name: Exercise checkpoint round trip
         run: make checkpoint-smoke
 

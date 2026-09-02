@@ -88,5 +88,48 @@ class ScenarioTreeIsGated(unittest.TestCase):
             self.assertEqual(named, [], f"{trigger}: enumerated records are back")
 
 
+class LiveJobSteps(unittest.TestCase):
+    def test_the_smoke_step_runs_before_the_checkpoint_round_trip(self) -> None:
+        """The ordering is a design decision, not an accident: `make smoke` documents a
+        fresh fixture as its precondition, so it runs against the one `make up` just
+        installed rather than whatever `make checkpoint-smoke` leaves behind. Asserted as
+        a relation rather than against a literal step list, so adding an unrelated step
+        later does not fail a test that is not about it.
+        """
+        lines = (WORKFLOWS / "container-lifecycle.yml").read_text(
+            encoding="utf-8").splitlines()
+        names = [match.group(1)
+                 for match in map(_STEP_NAME.match, lines) if match is not None]
+        for step in ("Install the pinned bzr build", "Start the fixture",
+                     "Exercise the live scenario smoke path",
+                     "Exercise checkpoint round trip"):
+            self.assertIn(step, names)
+        self.assertLess(names.index("Install the pinned bzr build"),
+                        names.index("Exercise the live scenario smoke path"))
+        self.assertLess(names.index("Start the fixture"),
+                        names.index("Exercise the live scenario smoke path"))
+        self.assertLess(names.index("Exercise the live scenario smoke path"),
+                        names.index("Exercise checkpoint round trip"))
+
+
+class PinnedBzrRevision(unittest.TestCase):
+    """CI's pin and the revision README claims the scenario is proven at are one fact.
+
+    They live in two files, so nothing but this test stops them drifting apart -- and a
+    CI run against an unproven revision reports a green gate for a claim nobody made.
+    """
+
+    def test_ci_pins_the_revision_the_readme_proves(self) -> None:
+        workflow = (WORKFLOWS / "container-lifecycle.yml").read_text(encoding="utf-8")
+        pins = re.findall(r"--rev ([0-9a-f]{40})", workflow)
+        self.assertEqual(len(pins), 1, "expected exactly one pinned bzr revision")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        proven = re.search(r"proven at `bzr` `([0-9a-f]{8,40})`", readme)
+        self.assertIsNotNone(proven, "README no longer states a proven bzr revision")
+        self.assertTrue(
+            pins[0].startswith(proven.group(1)),
+            f"CI pins {pins[0]}, README proves {proven.group(1)}")
+
+
 if __name__ == "__main__":
     unittest.main()

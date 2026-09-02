@@ -181,14 +181,30 @@ container-free run; only the third targets a substitution Bugzilla makes silentl
 this image even that is unreachable, because stock Bugzilla grants `editbugs` to every
 account by regexp. The offline tier's value is speed and no Docker, not extra reach.
 
-The live tier provisions and replays the scenario against the running fixture:
+The live tier runs ten stages against the running fixture:
 
     CONFIRM_RESET=1 make reset && make up
     BZR_LIVE_BZR=/path/to/bzr make smoke
 
+It provisions, replays and verifies the scenario; then saves a checkpoint over the verified
+fixture, reads one bug's numeric id, rewrites that bug's summary to a value the scenario does
+not declare, reads it back to prove the change reached the server, restores the checkpoint,
+verifies again, and resumes the restored journal. The last four stages are what prove a
+checkpoint restores the state the scenario declares rather than merely completing: the
+re-verify compares every declared summary against the server, so a restore that reverted
+nothing fails it. Because a cold checkpoint stops the stack, `make smoke` now stops and
+restarts Compose twice.
+
 Start from a fresh fixture: Bugzilla reads `containers/bugzilla/checksetup_answers.txt` only
 at install, and an existing fixture may already hold conflicting definitions of the products
-and components the scenario declares.
+and components the scenario declares. `replay` refuses outright if the fixture already holds
+the scenario's bugs, so a second `make smoke` without a reset stops at that check.
+
+A failing run leaves its mode-0700 state root under `TMPDIR`; a successful one removes it.
+That is deliberate. The script carries no `EXIT` trap, because on bash 3.2 — still macOS's
+`/bin/bash` — any `EXIT` trap turns a fatal expansion error into exit 0, and the
+status-preserving handler `tests/checkpoint_smoke.sh` uses does not help, since `$?` is
+already 0 when the handler runs. Removing the trap is what makes the failure visible.
 
 **`make smoke` has been proven at `bzr` `63abb94e` and nowhere else.** Two separate
 requirements bear on the revision, and only one of them is a measurement:
@@ -207,17 +223,38 @@ So `5fb99362` is where the D6 defect stops, not a floor this repository has evid
 `bzr` revision as its first line for this reason — the same scenario passes or fails on that
 revision alone.
 
-Observed: **47 events replayed in 72.63s**, then **69 checks verified in 56.91s**
-reporting 0 divergences and 4 unverifiable claims. Each figure covers its own stage alone,
-excluding provisioning and `make up`. Measured on Apple M5 Max, macOS (Darwin 25.6.0,
-arm64), Docker 29.7.2, with `bzr 0.8.3-dev (63abb94e)`, against a fixture reset immediately
-beforehand. Provisioning the 28 resources and `make up` are each separate intervals and are
-not included.
+Observed: **47 events replayed in 72.80s**, then **69 checks verified in 56.94s**, and after
+the checkpoint round trip the same **69 checks re-verified in 59.02s** — every run reporting
+0 divergences and 4 unverifiable claims. Each figure covers its own stage alone, excluding
+provisioning and `make up`. Measured on Apple M5 Max, macOS (Darwin 25.6.0, arm64), Docker
+29.7.2, with `bzr 0.8.3-dev (63abb94e)`, against a fixture reset immediately beforehand.
+Provisioning the 28 resources, `make up`, and the checkpoint save and restore are each
+separate intervals and are not included.
+
+Those figures were produced under `/bin/bash` 3.2.57, which `make smoke` resolves from
+`PATH` on this machine. Ordinary failures propagate correctly there — issue #20's run was
+proven to bite, a server-side summary edit producing exit 1 and restoring it exit 0 — but
+before the trap removal above, a fatal expansion error under `set -u` would have been
+indistinguishable from success. Nothing indicates one occurred.
 
 The four unverifiable claims are `cart-double-charge`'s `estimated_hours` (finding D8) and
 `remaining_hours` (PR #23), and the work-time hours on the two bugs that log any
 (issue #22). Every other declared value on all 20 bugs is asserted.
 
 The live tier proves both that the parts compose and that the state they leave behind is
-the one the scenario declares. Fault injection and x86_64 CI wiring are tracked separately,
-so `make smoke` is operator-run rather than a merge gate today.
+the one the scenario declares.
+
+**It is now a merge gate.** `Container lifecycle`'s `x86_64-linux` job compiles `bzr` at the
+pinned revision above and runs this same `make smoke` on every pull request touching
+`scenarios/`, the containers, the compose file, the lifecycle or checkpoint scripts,
+`tests/smoke_scenario.sh`, or this file. The offline tier gained the same reach: both
+workflows now name `scenarios/**`, so a pull request editing only a fixture file runs the
+jobs that prove it. Response-loss fault injection is a separate offline suite
+(`tests/test_fault_injection.py`).
+
+The arm64 half stays operator-run, and the runner is named rather than wished for: no
+GitHub-hosted macOS runner can start this fixture. Container operations are Linux-only
+([actions/runner#1866](https://github.com/actions/runner/issues/1866)), and GitHub's
+runner reference records that nested virtualization is unsupported on arm64 macOS runners
+because of Apple's Virtualization Framework. The figures above are the current arm64 record;
+reproduce them with the two commands at the top of this section.
