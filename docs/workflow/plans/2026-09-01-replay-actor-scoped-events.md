@@ -1417,7 +1417,12 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(result.next_action, "advance")
 
     def test_attachment_update_reads_the_attachment_by_id(self) -> None:
-        run = _FakeRun([(0, {"id": 7, "summary": "notes", "is_obsolete": True}, None)])
+        # The summary must equal the description obsolete-notes declares, because
+        # reconcile compares it: build emits --summary=<description>, so a reply whose
+        # summary still held the old value is a declared change that did not commit.
+        run = _FakeRun([
+            (0, {"id": 7, "summary": "Superseded triage notes", "is_obsolete": True},
+             None)])
         context = self._context(run)
         # The id table is keyed by the *attachment alias* the attach event declares
         # (`triage-notes`), not by the asset name (`notes`) -- the same distinction that
