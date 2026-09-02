@@ -72,7 +72,22 @@ Two roles, both chosen from the scenario's own declared actors:
 - **insider** — the first declared actor whose `groups` include the fixture's insider
   group. That group is `admin`, set by
   `containers/bugzilla/checksetup_answers.txt:31` (`$answer{'insidergroup'} = 'admin'`).
-  Every positive read is issued as this actor, so the observed state is the complete one.
+  Every positive read is issued as this actor.
+
+  Issuing a read as the insider is not the same as the server answering it as the insider,
+  and on this fixture the two come apart. `bzr` prefers header auth once its probe sees
+  `rest/bug` answer 200 (`header auth works on API endpoints despite valid_login rejecting
+  it; preferring header`), but this Bugzilla does not accept `X-BUGZILLA-API-KEY` for REST:
+  `rest/valid_login` returns `{"result":false}` for the header and `{"result":true}` for
+  `Bugzilla_api_key` as a query parameter. A 200 is what an anonymous caller gets too, so
+  the probe cannot tell the difference, and `bzr`'s REST reads run unauthenticated. Writes
+  are unaffected — they draw a 401, which triggers `bzr`'s alternate-auth retry — which is
+  why the replay works. Recorded as a `bzr` finding in `docs/bzr-findings.md`.
+
+  Nothing in `scenarios/smoke/` is group-restricted, so no read the verifier makes today
+  returns less than the insider would see. The premise is recorded here rather than assumed,
+  so a scenario that does restrict a bug fails against a stated boundary instead of a
+  silent one.
 - **outsider** — the first declared actor whose `groups` do not include it. Used only for
   the private-comment invisibility check.
 
@@ -169,7 +184,17 @@ prevent.
 
 Three of the four fire on `scenarios/smoke/`. No event there declares a non-empty
 `groups`, so that row is unexercised by the shipped scenario and a green smoke run is not
-evidence about it.
+evidence about it. Only `bug.create` can raise it: `bzr bug update` refuses a `groups`
+change outright (`src/bzr_live/replay/actions.py:32-36`), so no such event ever reaches a
+completed journal record.
+
+A second consequence of a group-restricted bug is recorded rather than handled. Such a bug
+is unreadable to the outsider role, and the reader passes `absent_codes=frozenset()`
+deliberately, so an access-denied reply raises out of the run instead of yielding a finding
+— the verifier stops rather than reporting why it could not read. Building an access-denied
+path for a case the shipped scenario cannot produce would be machinery ahead of its
+trigger; the boundary is stated here so the failure is diagnosable, and the first scenario
+that restricts a bug is what should buy the handling.
 
 Everything else in the completion criteria is asserted.
 
@@ -321,7 +346,10 @@ then `verify: <n> checks, <m> divergences, <k> unverifiable`, where `<n>` is the
 `(bug, check family)` pairs actually executed. That definition is what makes the summary
 readable: a bug the verifier skipped moves the number, so a green run cannot look
 identical to one that asserted nothing — the failure the replay's own `47 events executed`
-summary has. Exit 1 if `m > 0`, else 0.
+summary has. The definition only holds while an executed family evaluates something, which
+is why check 2 skips a bug whose fold declares no change (below): counting eighteen history
+families that assert nothing would inflate `<n>` in exactly the way this definition exists
+to prevent. Exit 1 if `m > 0`, else 0.
 A precondition refusal exits 1 with a single `verify failed: <reason>` line, matching how
 `replay` reports one today.
 
@@ -346,11 +374,19 @@ fails the script on a non-zero exit.
 
 **Read budget.** Each check read is a `bzr` process spawn plus an HTTP round trip, and the
 verify stage issues several per bug across twenty bugs, so it adds enough wall time that
-`README.md`'s published smoke figure stops being true. Two skips keep it down — no
+`README.md`'s published smoke figure stops being true. Three skips keep it down — no
 `attachment list` for a bug with no declared attachment, no recursive `links` read at
-eccentricity 1 — and the figure is re-measured from the run that adds the stage, the way
-the fixture change before it was. No estimate is published here: the measurement belongs
-to that run.
+eccentricity 1, and no `bug history` for a bug whose fold carries no `ExpectedChange` — and
+the figure is re-measured from the run that adds the stage, the way the fixture change
+before it was. No estimate is published here: the measurement belongs to that run.
+
+The third skip is the largest of the three on `scenarios/smoke/`. Folding it gives a
+declared history change on two bugs only, `cart-double-charge` and `pay-decline-copy`; for
+the other eighteen the attribution multiset is empty, so containment is vacuous and the
+ordering guard's second clause never fires. Each of those eighteen still cost a `bzr` spawn
+and an HTTP round trip and bought no assertion. The `links` read is deliberately **not** in
+this class and stays unconditional: its direct-edge check reports an observed edge the
+scenario never declared, so it bites on a bug with no declared edges.
 
 ## New finding for `docs/bzr-findings.md`
 

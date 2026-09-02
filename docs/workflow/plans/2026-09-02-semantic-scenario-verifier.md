@@ -207,6 +207,13 @@ class FoldSmokeScenarioTest(unittest.TestCase):
         self.assertEqual(fields, {"estimated_hours", "remaining_hours", "worktime"})
         self.assertNotIn("estimated_time", bug.scalars)
 
+    def test_created_groups_are_classified_unverifiable(self) -> None:
+        # scenarios/smoke/ declares no non-empty groups, so this one folds a minimal
+        # in-test scenario whose bug.create carries a group reference. bug.update can
+        # never supply the case: actions._UPDATE_UNSUPPORTED refuses a groups update.
+        bug = fold_scenario(_scenario_with_created_groups()).bugs["restricted"]
+        self.assertIn("groups", {name for name, _ in bug.unverifiable})
+
     def test_custom_fields_carry_their_cf_names(self) -> None:
         bug = self.expected.bugs["cart-double-charge"]
         self.assertEqual(bug.custom_fields["cf_risk"], "high")
@@ -612,8 +619,16 @@ observed flag.
   `target_milestone` and `assigned_to` when declared; seeds `names["cc"]` and
   `names["keywords"]`; seeds `edges` from declared `depends_on` / `blocks` **and their
   inverses on the other bug**; appends comment 0 with the declared description and
-  `private=False`; records the create actor as `creator`. It appends **no** history:
-  Bugzilla writes no `bugs_activity` row for a creation.
+  `private=False`; records the create actor as `creator`. A non-empty declared `groups`
+  appends `("groups", UNVERIFIABLE_FIELDS["groups"])` to that bug's `unverifiable` list.
+  Create is the **only** path that rule can fire on, which is why it belongs here rather
+  than beside the `bug.update` unverifiables: `_UPDATE_UNSUPPORTED` refuses a `groups`
+  update outright (`src/bzr_live/replay/actions.py:32-36`), so such an event never reaches a
+  completed journal record and never reaches verify at all, while `_CREATE_UNSUPPORTED`
+  (`actions.py:23-31`) does not refuse it and `BugCreateHandler.build` writes the declared
+  group names into the create document (`actions.py:312-314`). Without this rule the
+  `groups` row the spec's unverifiable table promises could never be emitted by anything.
+  It appends **no** history: Bugzilla writes no `bugs_activity` row for a creation.
 - **`bug.update`** for each declared key: a `_SCALARS` key sets `scalars[view_key]` and
   appends `ExpectedChange(actor, history_field, value, chain=True)`; `assignee` projects
   through `emails`. A `_NAME_SETS` key computes `added = declared - current` over the
@@ -1049,6 +1064,11 @@ where all three share a timestamp. Both must recover the same order.
   that field, not a guess;
 - `chain_order` returns `(None, "oversized")` for a bucket of eight records — one above
   `_MAX_BUCKET` — and a second case pins the budget path;
+- `chain_order` returns `(None, "oversized")`, never a solution, on a payload whose first
+  linking ordering is found before the budget runs out: several buckets large enough that
+  the global budget is exhausted while orderings remain unenumerated. This is the case that
+  pins the budget check ahead of the solution-count branches; with the two swapped it
+  returns the first solution as though the search had proved it unique;
 - `chain_order([], "CONFIRMED")` returns `([], None)`, not `(None, "unlinked")`;
 - `check_history` runs no chain check for a bug whose `summary` was seeded at create and
   never changed, so a bug with an empty history yields no finding at all — reproduce with
@@ -1072,10 +1092,12 @@ where all three share a timestamp. Both must recover the same order.
 `CHAIN_FIELDS` and the `Expected*` types from the package.
 
 ```python
-# One bucket may not exceed this many records, and the whole search may not explore more
-# than BUDGET permutations: both bound a factorial enumeration on adversarial input.
-# 7! = 5,040 fits inside the budget; 8! = 40,320 does not, so 7 is the real ceiling and
-# the two bounds must agree or the bucket ceiling is unreachable.
+# Two independent bounds on a factorial enumeration. _MAX_BUCKET caps one bucket, so the
+# largest single enumeration is 7! = 5,040. _SEARCH_BUDGET caps the whole search, across
+# every bucket and every branch, so it is reached first on any input with more than one
+# non-trivial bucket -- two buckets of 7 would cost up to 5,040 x 5,040. The bounds do not
+# agree and are not meant to: the bucket cap rejects an input up front, the budget stops a
+# search already under way, and an exhausted budget always answers "oversized".
 _MAX_BUCKET = 7
 _SEARCH_BUDGET = 10_000
 
@@ -1133,15 +1155,19 @@ def chain_order(records: list[dict],
                 walk(index + 1, permutation[-1]["new_value"], acc + list(permutation))
 
     walk(0, None, [])
-    # Order matters: a search that found the unique ordering and then spent the rest of
-    # its budget on dead branches has an answer, and reporting "oversized" would throw it
-    # away.
+    # Order matters, and it is the budget that comes first. An abort does not distinguish a
+    # dead branch from an unvisited one, so a search that recorded one solution and then ran
+    # out of budget has not shown that solution is unique -- a second linking ordering may
+    # sit in the part never reached. Returning it as unique would feed a wrong actor
+    # sequence to the subsequence assertion and report an ordering proof that was never
+    # obtained. ADR 0008 promises "a search too large to settle (oversized) ... reported
+    # unverifiable rather than guessed", and this is the line that keeps that promise.
+    if budget <= 0:
+        return None, "oversized"
     if len(solutions) == 1:
         return solutions[0], None
     if len(solutions) > 1:
         return None, "ambiguous"
-    if budget <= 0:
-        return None, "oversized"
     return None, "unlinked"
 
 
@@ -1177,8 +1203,10 @@ costs no extra call.
    `chain_order(records_for_field, observed_fields.get(view_key))`. Both halves of that
    guard matter: `bug.create` seeds `summary` (and `target_milestone`, `assigned_to`)
    into `scalars` while writing no history at all, so a guard keyed on "the bug declares
-   the field" would run the chain check over an empty record list for 18 of the smoke
-   scenario's 20 bugs. A `"unlinked"` reason yields a divergence; `"ambiguous"` and
+   the field" would run the chain check over an empty record list. The runner's own skip
+   (Step 7.2) already keeps the 18 smoke bugs with no `ExpectedChange` out of this function
+   entirely; this guard is the per-field case inside a bug that does declare a change, and
+   `chain_order`'s empty-records return is the third. A `"unlinked"` reason yields a divergence; `"ambiguous"` and
    `"oversized"` each yield an `unverifiable` finding naming the field and the reason; and
    on success the reconstructed `who` sequence must contain the declared actor sequence
    for that field as a subsequence.
@@ -1257,8 +1285,12 @@ def check_attachments(bug: ExpectedBug, attachments: list,
 
 Transcribe the payloads from live replies at implementation time, as Task 4 does:
 `bzr --json --server-url <base> comment list 1`, `... comment list 12`, and
-`... attachment list 1`. Note that `comment list` returns `time: null` on this fixture, so
-no comment assertion may use a timestamp; `count` is the ordering key. Then:
+`... attachment list 1`. Transcribe the keys `bzr` actually emits: an entry carries `id`,
+`bug_id`, `text`, `creator`, `creation_time`, `count`, `is_private` and `attachment_id`,
+with `creation_time` populated (`"2026-09-02T14:19:01Z"` for comment 0 of bug 1) and **no**
+`time` key at all — the unauthenticated stock-REST reply carries both, `bzr`'s does not, so
+a fixture written from the REST shape would not match the command under test. No comment
+assertion may use either timestamp; `count` is the ordering key. Then:
 
 - comment 0's creator and text match the declaration, and a differing text yields a
   divergence;
@@ -1319,7 +1351,9 @@ canned `bzr` replies the way `tests/test_replay.py` does:
   `<n>` is the number of `(bug, check family)` pairs executed. Assert the **exact**
   number for the fixture under test, never just the shape: a pattern match passes for an
   implementation that skipped nineteen bugs, which is the failure this summary exists to
-  make visible;
+  make visible. Derive that number with the three conditional reads applied — a bug whose
+  fold carries no `ExpectedChange` contributes no history family — so the assertion pins
+  the skips as well as the count;
 - one divergence prints a line matching
   `verify: <scenario_dir>: <alias>: <check>: <detail>` and `run()` returns 1;
 - an unverifiable claim alone still returns 0 and is counted in the summary;
@@ -1335,16 +1369,25 @@ the context, builds a
 then for each bug in declaration order issues `bug`, `history`, `links` and `comments`
 reads and collects findings from the six check families.
 
-Two reads are conditional, and both conditions come from the fold rather than from a
+Three reads are conditional, and every condition comes from the fold rather than from a
 reply, so nothing is skipped on the strength of what the server happened to return:
 
 - `attachments` runs only for a bug the fold gives at least one attachment — two of the
   smoke scenario's twenty;
 - the recursive `links` read runs only when the root's eccentricity in the declared graph
-  is 2 or more; at 1 or 0 the direct read already covers the whole neighbourhood.
+  is 2 or more; at 1 or 0 the direct read already covers the whole neighbourhood;
+- `history` runs, and `check_history` with it, only for a bug whose fold carries at least
+  one `ExpectedChange` — two of the smoke scenario's twenty, `cart-double-charge` and
+  `pay-decline-copy`. For the other eighteen the attribution multiset is empty, so
+  containment holds vacuously and the ordering guard's second clause never fires: the
+  family executes, costs a spawn, and evaluates no expectation. Skipping it is what keeps
+  `<n>` honest, since the summary's whole claim is that an executed family asserted
+  something.
 
-Each read is a process spawn plus an HTTP round trip, so both skips are worth having on a
-twenty-bug scenario. No latency figure is published here: Task 7.4 measures the stage on
+The `links` read stays unconditional and is not a fourth candidate: its direct-edge check
+reports an observed edge the scenario never declared, so it bites on a bug whose fold
+declares no edges at all. Each read is a process spawn plus an HTTP round trip, so all
+three skips are worth having on a twenty-bug scenario. No latency figure is published here: Task 7.4 measures the stage on
 the run that adds it, and that measurement is the one `README.md` carries. It prints each
 finding, then the summary, and returns 1 when any finding is a `divergence`.
 
