@@ -166,6 +166,8 @@ sh … cat`), not inferred:
   bzr gap: there is nothing on the wire for it to send.
 - The attachment ceiling is `attachments.description`, declared `TINYTEXT` at
   `Bugzilla/DB/Schema.pm:505` — 255 bytes, so the check counts encoded bytes, not code points.
+  Observed live to be enforced by silent truncation rather than by rejection; see the
+  consequence below.
 
 An earlier revision of this record charged the last two to bzr, on the reasoning that
 `--reset-assigned-to` and `--reset-qa-contact` establish a reset pattern the other fields lack.
@@ -213,16 +215,32 @@ defaults to reset *to*, and `resolution` and `dupe_of` are cleared by a status t
   deletes a row here rather than adding one. The scenario contract stays wider than the
   engine on purpose — narrowing the contract to what bzr can do today would erase the
   evidence.
-- Three of this record's boundary facts are inferred from the fixture's configuration rather
+- Three of this record's boundary facts were inferred from the fixture's configuration rather
   than observed against it: that a create omitting `op_sys`/`rep_platform` would be rejected,
   that the `alias` key round-trips, and that Bugzilla enforces alias uniqueness — the last
   being what makes a duplicate create *fail* into reconciliation rather than quietly produce a
   second bug under one alias. The Bugzilla-model grounds above are *not* on this list: they
   were settled by reading the fixture's own image, and each carries its file and line. The
-  unit suite mocks the subprocess boundary and
-  cannot reach either, so `tests/replay_smoke.sh` — an operator-run live proof beside
-  `tests/provision_smoke.sh`, the split ADR 0004 already chose — is what discharges them.
-  Until it has run, both are stated as inferences here rather than as verified grounds.
+  unit suite mocks the subprocess boundary and cannot reach any of the three, so
+  `tests/replay_smoke.sh` — an operator-run live proof beside `tests/provision_smoke.sh`, the
+  split ADR 0004 already chose — is what discharges them.
+
+  **`tests/replay_smoke.sh` has now run, and all three are observed.** Against a fresh
+  fixture on Bugzilla 5.2+ with bzr `b80303b7`: all eight events replayed; the alias
+  `bzr-live-2f12319c0845fcbdafe07609b352b81` round-tripped to bug 1 through `bug view`; and a
+  second create declaring that same alias failed with exit 4. The `op_sys`/`rep_platform`
+  fact is discharged in the form that matters — a create declaring neither now *succeeds*,
+  because `defaultplatform`/`defaultopsys` supply them, which is what the whole of Task 0
+  exists to arrange.
+
+  That first run also falsified one thing this record asserted. The 255-byte attachment
+  ceiling is **not** enforced by rejection: a 256-byte summary was accepted (exit 0,
+  attachment 2) and stored at exactly 255 bytes — silent truncation, with the column
+  `tinytext` and `sql_mode` `STRICT_TRANS_TABLES`, so Bugzilla truncates above the database
+  rather than the database refusing. The client-side refusal is therefore *more* necessary
+  than this record argued, not less: the reconciliation marker lives in that summary, so a
+  truncated summary destroys the handle append-class reconciliation matches on, and the
+  server would report success while doing it.
 - Replay imports two private names across package boundaries: `_ATTEMPT_FILE` from
   `bzr_live.scenario.journal` (issue #3) and `_KEY_ENV` from `bzr_live.provision.adapters`
   (issue #4). Both are deliberate. `JournalStore`'s public read tolerates other events'

@@ -38,7 +38,10 @@ already-filed one (D5).
 
 ## D1
 
-**A flag type name containing `-`, `+`, `?` or `X` cannot be addressed.** *Read from source.*
+**A flag type name containing `-`, `+`, `?` or `X` cannot be addressed.** *Observed against
+the running fixture by `make replay-smoke` (Bugzilla 5.2+, bzr `b80303b7`): `--flag=needs-info?`
+exits 7 with `invalid flag 'needs-info?': requestee must be in parentheses`, the message this
+entry predicted from source verbatim.*
 
 `parse_single_flag` locates the status character with
 `s.find(['+', '-', '?', 'X'])` — the **first** occurrence anywhere in the argument

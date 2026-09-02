@@ -207,6 +207,14 @@ The attachment ceiling is `attachments.description`, declared `TINYTEXT` in Bugz
 through and fail at the server. The marker and checksum already spend about 90 bytes, so a
 description's real budget is around 165.
 
+"Fail at the server" was the expectation; the live smoke's first run showed otherwise, and
+the correction makes the check more important rather than less. A 256-byte summary is
+**accepted** (exit 0) and stored at exactly 255 bytes — Bugzilla truncates above the
+database, which reports success, with the column `tinytext` and `sql_mode`
+`STRICT_TRANS_TABLES`. Since the reconciliation marker lives in that summary, an
+over-length summary would silently lose the handle append-class reconciliation matches on,
+and the run would look like it worked. The refusal is what prevents that.
+
 Deltas are computed against a fresh `bzr bug view` read taken immediately before the update,
 because Bugzilla's list fields are edited by add/remove and not by assignment. The engine
 assumes it is the only mutator, which `AGENTS.md` establishes for this fixture.
