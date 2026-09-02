@@ -175,12 +175,12 @@ class SmokeTrapStatusTest(unittest.TestCase):
             # so reaching a different one fails the marker assertion rather than the
             # operator's fixture.
             for shadowed in SHADOWED_COMMANDS:
+                if shadowed == command and mode == "command-failure":
+                    body = f"printf 'ran\\n' >>'{marker}'\nexit {STUB_STATUS}\n"
+                else:
+                    body = f"exit {STUB_STATUS}\n"
                 stub = stub_dir / shadowed
-                records = shadowed == command and mode == "command-failure"
-                stub.write_text(
-                    "#!/bin/sh\n"
-                    + (f"printf 'ran\\n' >>'{marker}'\n" if records else "")
-                    + f"exit {STUB_STATUS}\n")
+                stub.write_text(f"#!/bin/sh\n{body}")
                 stub.chmod(0o755)
 
             env = dict(os.environ)
@@ -191,8 +191,10 @@ class SmokeTrapStatusTest(unittest.TestCase):
                 # Sourced before the script, so the function is defined by the time
                 # `set -u` is in force and the expansion inside it becomes fatal. A
                 # function outranks the PATH stub of the same name.
-                fault = ('printf \'%s\\n\' "$SMOKE_TRAP_TEST_UNSET_VARIABLE"'
-                         if mode == "fatal-expansion" else "exit 0")
+                if mode == "fatal-expansion":
+                    fault = 'printf \'%s\\n\' "$SMOKE_TRAP_TEST_UNSET_VARIABLE"'
+                else:
+                    fault = "exit 0"
                 bash_env = sandbox / "inject.sh"
                 bash_env.write_text(
                     f"{command}() {{\n"
