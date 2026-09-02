@@ -36,18 +36,26 @@ verifier compares that against live state; it never asserts a per-event postcond
 against final state.
 
 **Server-generated additions are modelled where they are derivable from the scenario, and
-tolerated where they are not.** Modelled: expected CC is the declared CC union the
-requestees of the flags declared on that bug, and the link graph materialises the
+tolerated where they are not.** Modelled: a flag requestee joins the bug's running CC set
+at the point the flag is declared — so a later `cc` declaration that omits it removes it,
+exactly as the replay engine's own delta does — and the link graph materialises the
 `depends_on`/`blocks` inverse on both endpoints. Tolerated by asserting containment rather
 than equality: history records the scenario did not declare, and comments Bugzilla posts
 itself. Status and resolution are not asserted for a bug the scenario marks duplicate
 without declaring a status.
 
-**History ordering is proven by chain-linking `old_value` to `new_value` within
-equal-timestamp buckets.** Records are bucketed by `when`, buckets ordered by `when`, and
-within a bucket the unique permutation that links the value carried in from the previous
-bucket establishes the order. The reconstructed actor sequence must contain the declared
-one as a subsequence. No assertion compares a timestamp; `when` is a sort key only.
+**History ordering is proven by chain-linking `old_value` to `new_value` across the
+whole record list, with `when` bounding the search.** Records are bucketed by `when` and
+the buckets ordered by `when`; the reconstruction then searches for an ordering that
+links head to tail across every bucket and ends at the field's current value, which
+`bug view` supplies. The search is global rather than per bucket: on the live reply for
+bug 9 the first bucket admits two orderings and only the next bucket rules one of them
+out, so a reconstruction that commits bucket by bucket answers "ambiguous" where a
+unique ordering exists. Candidate orderings are deduplicated by their
+`(who, old_value, new_value)` sequence, so two records identical in all three are
+interchangeable rather than two answers. The reconstructed actor sequence must contain
+the declared one as a subsequence. No assertion compares a timestamp; `when` is a sort
+key and a search bound only.
 
 **A value `bzr` cannot read back is reported `unverifiable`, with the field, the alias,
 and the finding citation — and does not fail the run.** The report counts divergences and
@@ -68,14 +76,17 @@ and names the bug and field. That is the intended failure: the premise is record
 with the live reply that established it, so the failure is diagnosable rather than
 mysterious.
 
-Chain-linking has a defined ambiguous case — a bucket admitting more than one valid
-permutation — reported `unverifiable` for that field rather than guessed. On
-`scenarios/smoke/` no bucket is ambiguous.
+Chain-linking has three defined non-answers — no ordering links (a divergence), more than
+one links (ambiguous), and a search too large to settle (oversized) — and the last two are
+reported `unverifiable` rather than guessed. Verified on the live fixture: for bug 9's
+`status` and `resolution` the search returns the unique ordering
+`developer → triager → developer`, which is the declared sequence.
 
 `unverifiable` not failing the run means a gap can be ignored by an operator who does not
 read the summary. The alternative is a permanently red gate, which gets suppressed
-instead of read. Four claims are unverifiable today, all four already recorded as findings
-or deferred issues.
+instead of read. Three claims are unverifiable on `scenarios/smoke/` today, and a fourth
+(`groups`) whenever a scenario declares one; all four are already recorded as findings or
+deferred issues.
 
 ## Considered & rejected
 
@@ -85,12 +96,15 @@ or deferred issues.
   `refix-decline-copy` (`RESOLVED`) on the same bug, so the first two postconditions are
   false against the final state `bzr bug view 9` returns.
 - **Assert history ordering by the reply's record order.** verified: `bzr bug history 9`
-  (bzr 0.8.2 `ae39fbd8`, 2026-09-02) returns the reopening cycle's three status changes
-  inside one second as `triager RESOLVED->CONFIRMED`, `developer CONFIRMED->RESOLVED`,
-  `developer CONFIRMED->RESOLVED` — not the order they happened in, because Bugzilla's
-  `ORDER BY bug_when` leaves ties unordered.
+  (bzr 0.8.2 `ae39fbd8`, 2026-09-02) returns two status records sharing
+  `2026-09-02T14:19:48Z` — `triager RESOLVED->CONFIRMED` then
+  `developer CONFIRMED->RESOLVED` — in the opposite order to the one they happened in,
+  because Bugzilla's `ORDER BY bug_when` leaves ties unordered. How many records share a
+  `bug_when` is a property of how fast the replay ran, so the stable premise is that
+  records sharing a `bug_when` come back in an order Bugzilla does not define, not that
+  any particular number of them collide.
 - **Assert the discovering relation for every node in a recursive link walk.** verified:
-  `bzr`'s frontier is sorted by bug id (`src/commands/bug/links.rs:41`), so for a node
+  `bzr`'s frontier is sorted by bug id (`src/commands/bug/links.rs:42`), so for a node
   reachable by two paths the credited relation depends on generated identifiers, which
   issue #20 forbids an assertion from depending on. Depth is asserted instead.
 - **Model `remaining_hours` as the declared value minus logged work.** judgment: derivable,

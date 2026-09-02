@@ -77,8 +77,8 @@ Each confirmed in the target repository at `555b7de`:
   (`src/bzr_live/provision/keys.py`)
 - `custom_field_name(slug) -> str` (`src/bzr_live/provision/executor.py:31`)
 - `render_attachment_summary(description, marker, sha256) -> str`
-  (`src/bzr_live/replay/actions.py:80`)
-- `render_marker(text, marker) -> str` (`src/bzr_live/replay/actions.py:76`)
+  (`src/bzr_live/replay/actions.py:81`)
+- `render_marker(text, marker) -> str` (`src/bzr_live/replay/actions.py:77`)
 
 ## File map
 
@@ -90,10 +90,19 @@ Each confirmed in the target repository at `555b7de`:
 | `src/bzr_live/verify/checks.py` (new) | the six check families |
 | `src/bzr_live/verify/runner.py` (new) | preconditions, orchestration, report, exit code |
 | `src/bzr_live/replay/__main__.py` | add `verify` to `choices` and dispatch it |
+| `tests/fixtures/verify-cc-order/` (new) | a scenario declaring `cc` after a requestee flag |
 | `tests/test_verify_expected.py` (new) | the fold |
 | `tests/test_verify_checks.py` (new) | every check against recorded payloads |
 | `tests/test_verify_journal.py` (new) | preconditions and the report |
 | `tests/smoke_scenario.sh` | run `verify` after the replay, in the same state root |
+| `README.md` | re-measure the published smoke duration with the verify stage in place |
+
+`README.md` is outside the charter's listed surface and is included deliberately: it
+publishes `47 events replayed in 78.14s` as a maintained measurement (the commit before
+this branch is `docs: re-measure the smoke duration after the fixture changed`), and this
+change roughly doubles that wall time. Leaving a figure this change falsifies would be a
+doc that fails when followed. The edit is one measured number, adds no contract and no
+behaviour, and is reported as a surface note rather than treated as a silent expansion.
 
 ## Task 1 — the expected-state fold
 
@@ -227,6 +236,12 @@ class FoldSmokeScenarioTest(unittest.TestCase):
             "96a330b23f0ebeb73d94721fce926b0b49daacfc448696af2f373afb30b49681")
         self.assertIn("[bzr-live:smoke:attach-triage-notes]", attachment.summary)
 
+    def test_flag_requestee_reaches_cc_and_its_history(self) -> None:
+        bug = self.expected.bugs["pay-retry-loop"]
+        self.assertEqual(bug.names["cc"], frozenset({"releaser@example.test"}))
+        added = [c.value for c in bug.history if c.field == "cc"]
+        self.assertEqual(added, ["releaser@example.test"])
+
     def test_flags_fold_with_their_requestee(self) -> None:
         bug = self.expected.bugs["pay-retry-loop"]
         self.assertEqual(len(bug.flags), 1)
@@ -239,6 +254,23 @@ class FoldSmokeScenarioTest(unittest.TestCase):
         self.assertIsNotNone(self.expected.outsider)
         self.assertNotEqual(self.expected.outsider, "admin-ops")
         self.assertEqual(INSIDER_GROUP, "admin")
+
+
+class CcOrderingTest(unittest.TestCase):
+    """The one fold interaction scenarios/smoke/ does not exercise.
+
+    No smoke bug declares `cc` after a requestee flag, so the ordering rule -- a later
+    declaration replaces the running set and drops the requestee, matching the
+    `--cc-remove` the replay engine would compute -- is pinned on a fixture written for
+    it rather than left until a scenario happens to hit it.
+    """
+
+    def test_a_later_cc_declaration_drops_the_requestee(self) -> None:
+        expected = fold(load_scenario(
+            str(ROOT / "tests" / "fixtures" / "verify-cc-order")))
+        bug = expected.bugs["ordered"]
+        self.assertNotIn("releaser@example.test", bug.names["cc"])
+        self.assertEqual(bug.names["cc"], frozenset({"triager@example.test"}))
 
 
 class TopologyTest(unittest.TestCase):
@@ -281,6 +313,27 @@ if __name__ == "__main__":
 Run `uv run --python 3.11 python -m unittest tests.test_verify_expected -v`. Expect
 `ModuleNotFoundError: No module named 'bzr_live.verify'` — the failure that proves the
 tests reach the code under test.
+
+### Step 1.1a — the cc-ordering fixture
+
+Create `tests/fixtures/verify-cc-order/` in the shape of the existing fixture scenarios
+(`scenario.json`, `resources.json`, `events.jsonl`; copy the structure from
+`tests/fixtures/minimal-scenario/`). It declares two actors (`developer`, `triager`), one
+`flag-type` and enough product/component/version resources for one `bug.create` aliased
+`ordered`, then three events in this order:
+
+1. `bug.create` for `ordered`, declaring `cc: [developer]`;
+2. `bug.flag` on `ordered` with `status: "?"` and `requestee: triager`;
+3. `bug.update` on `ordered` declaring `cc: [triager]`.
+
+After event 2 the running CC set is `{developer, triager}`; event 3 replaces it with
+`{triager}`, which is what the replay's `--cc-remove=developer@example.test` would leave.
+A union-at-the-end model would wrongly keep `developer`, and a model that never added the
+requestee would wrongly drop `triager` from the history expectation.
+
+Verify the fixture loads before writing the fold:
+`uv run --python 3.11 python -c "from bzr_live.scenario import load_scenario;
+print(len(load_scenario('tests/fixtures/verify-cc-order').events))"` — expect `3`.
 
 ### Step 1.2 — the package root
 
@@ -523,6 +576,15 @@ def _bug_of(event: PlannedEvent, values: Mapping[str, object],
 
 The per-action rules, each with its ground:
 
+Every declared value in a postcondition arrives as a `Reference`. It projects to
+`emails[ref.name]` for an actor-kinded field — `assignee`, each `cc` member, a flag
+`requestee` — and to `ref.name` otherwise — `product`, `component`, `version`,
+`milestone`, each `keywords` member, a custom-field name. The projection happens **before**
+any set arithmetic, so both sides of a delta are already strings. `ExpectedFlag.requestee`
+is the one exception, and its type signature already shows it: it holds the actor
+**alias**, and `check_fields` projects it through `emails` when it compares against the
+observed flag.
+
 - **`bug.create`** seeds `scalars` with `summary`, `product`, `component`, `version`, and
   `target_milestone` and `assigned_to` when declared; seeds `names["cc"]` and
   `names["keywords"]`; seeds `edges` from declared `depends_on` / `blocks` **and their
@@ -531,13 +593,20 @@ The per-action rules, each with its ground:
   Bugzilla writes no `bugs_activity` row for a creation.
 - **`bug.update`** for each declared key: a `_SCALARS` key sets `scalars[view_key]` and
   appends `ExpectedChange(actor, history_field, value, chain=True)`; `assignee` projects
-  through `emails`. A `_NAME_SETS` key computes `added = declared - current` and
-  `removed = current - declared`, replaces the set, and appends one `ExpectedChange` per
-  added member (`value=member`, `chain=False`) — mirroring `BugUpdateHandler.build`'s
-  `--cc-add` / `--keywords-add` delta (`src/bzr_live/replay/actions.py:396-409`) and the
-  observed record `'' -> 'perf'`. An `_EDGE_SETS` key does the same but appends
+  through `emails`. A `_NAME_SETS` key computes `added = declared - current` over the
+  **projected** strings, replaces the running set with `declared`, and appends one
+  `ExpectedChange` per added member (`value=member`, `chain=False`), matching the observed
+  record `'' -> 'perf'`. The running set is a model of the server, which is why it is the
+  right basis to subtract from: `BugUpdateHandler.build` computes its own add/remove delta
+  against the value it reads back from the server
+  (`src/bzr_live/replay/actions.py:397-409`), not against the previous declaration, so the
+  two agree only while the fold models every server-side addition. They are not the same
+  computation; do not claim they are. An `_EDGE_SETS` key does the same but appends
   `ExpectedChange(actor, key, None, chain=False)` because the history value is a
-  generated bug id, and maintains the inverse set on the other bug. `duplicate_of` sets
+  generated bug id, and maintains the inverse set on the other bug. Only additions reach
+  the history expectation at all: attribution is containment over
+  `(who, field, new_value)`, and a removal's `new_value` is the residue rather than the
+  removed member. `duplicate_of` sets
   `duplicate_of`, appends `ExpectedChange(actor, "dupe_of", None, chain=False)`, and adds
   `status` and `resolution` to `unasserted` unless the same event declares a status —
   Bugzilla drives both itself (finding G5). `estimated_hours` and `remaining_hours`
@@ -566,9 +635,16 @@ The per-action rules, each with its ground:
   `ExpectedChange(actor, "flagtypes.name", spec, chain=False)` where `spec` is
   `f"{name}{status}"` plus `f"({requestee_email})"` when a requestee is declared,
   matching the observed record `'' -> 'review?(releaser@example.test)'`. When a requestee
-  is declared it also adds that requestee's email to `names["cc"]`, because Bugzilla puts
-  a requestee on the CC list (observed: `bug view 8` returns
-  `cc: ['releaser@example.test']` where the scenario declared none).
+  is declared it also adds that requestee's email to the **running** `names["cc"]` set at
+  this point in the fold, because Bugzilla puts a requestee on the CC list (observed:
+  `bug view 8` returns `cc: ['releaser@example.test']` where the scenario declared none).
+  Ordered folding is what makes this correct in both directions: a later `bug.update`
+  declaring `cc` replaces the set and drops the requestee again, which is what the replay
+  does, since `BugUpdateHandler.build` would compute `--cc-remove=<requestee>` against the
+  server value. A union taken at the end would assert a member the replay had removed.
+  When the requestee was not already in the running set, also append
+  `ExpectedChange(actor, "cc", requestee_email, chain=False)`, matching the observed
+  record `'' -> 'releaser@example.test'` beside the flag.
 
 `_reader` picks a role:
 
@@ -669,7 +745,10 @@ Create `tests/test_verify_journal.py` with a fake `JournalStore` (a dict of
 - a record whose `next_safe_action` is `retry` → `VerifyError` naming the event and the
   recorded action;
 - a scenario declaring no insider actor → the roles check yields an `unverifiable`
-  finding rather than raising;
+  finding rather than raising, and `run()` still returns 0;
+- a reader actor the scenario **does** declare whose API key is absent from the key store
+  → `VerifyError` naming that actor, printed by the CLI as a single
+  `verify failed: <reason>` line;
 - an expected graph whose reachable set from one root exceeds `LINKS_MAX_NODES` →
   `VerifyError` citing the constant.
 
@@ -750,7 +829,7 @@ class ServerReader:
 ```
 
 An empty `absent_codes` for the list reads is deliberate and matches
-`_NO_ABSENT_CODES` in `src/bzr_live/replay/actions.py:108`: an unreadable bug must raise,
+`_NO_ABSENT_CODES` in `src/bzr_live/replay/actions.py:109`: an unreadable bug must raise,
 not answer "empty".
 
 ### Step 2.3 — the preconditions in `runner.py`
@@ -875,13 +954,30 @@ Adds `check_history` to `src/bzr_live/verify/checks.py`. Extends
 **Interfaces this task publishes.**
 
 ```python
-def check_history(bug: ExpectedBug, records: list) -> list[Finding]: ...
-def chain_order(records: list[dict]) -> list[dict] | None: ...
+def check_history(bug: ExpectedBug, records: list,
+                  observed_fields: Mapping[str, object]) -> list[Finding]: ...
+def chain_order(records: list[dict],
+                final_value: str | None) -> tuple[list[dict] | None, str | None]: ...
 ```
+
+`chain_order` returns `(ordered, reason)`. On success `reason` is `None`; on failure
+`ordered` is `None` and `reason` is exactly one of `"unlinked"`, `"ambiguous"`, or
+`"oversized"`. The caller must branch on the reason, because `unlinked` is a divergence
+that fails the run while the other two are `unverifiable` claims that do not — the same
+distinction `None` alone could not carry. `final_value` is the field's current value from
+the `bug view` reply, which is what anchors the chain's tail; `observed_fields` is that
+reply, from which `check_history` takes it.
 
 ### Step 4.1 — the failing tests
 
-Add, using the bug 9 history payload transcribed from the spec:
+Transcribe the bug 9 `status` payload from a live reply at implementation time rather
+than from this plan — how many records share a `bug_when` depends on how fast the replay
+ran, so a payload frozen here would stop matching the fixture. At the time of writing,
+`bzr --json --server-url http://127.0.0.1:8080/ bug history 9` returns two status records
+at `2026-09-02T14:19:48Z` (`triager RESOLVED->CONFIRMED`, then
+`developer CONFIRMED->RESOLVED`) and one at `:49Z` (`developer CONFIRMED->RESOLVED`).
+Write **both** shapes as fixtures: the two-bucket one above, and the one-bucket variant
+where all three share a timestamp. Both must recover the same order.
 
 - attribution passes when every declared `(who, field, value)` appears;
 - attribution fails, once, when a declared change is absent, and the detail names the
@@ -890,13 +986,20 @@ Add, using the bug 9 history payload transcribed from the spec:
   `cc` record beside a flag, and the `resolution` record beside a `dupe_of`;
 - a declared change appearing twice requires two records: one observed record yields a
   divergence;
-- `chain_order` on the bug 9 `status` records returns
-  `developer, triager, developer` even though the reply's order is
-  `triager, developer, developer` — the case that fails without bucket permutation;
-- `chain_order` returns `None` when no permutation links the bucket, and the check reports
+- `chain_order` on the two-bucket bug 9 `status` payload, with `final_value="RESOLVED"`,
+  returns `(ordering, None)` whose `who` sequence is exactly
+  `developer, triager, developer` — **not** the reply's own order, which puts triager
+  first. Assert the recovered order itself, not merely that it differs from the reply's;
+- `chain_order` on the one-bucket variant returns the same `developer, triager, developer`
+  ordering, proving the value-identical records are deduplicated rather than counted as
+  two answers;
+- `chain_order` returns `(None, "unlinked")` when no ordering links, and the check reports
   a divergence;
-- a bucket admitting two valid permutations yields an `unverifiable` finding for that
-  field, not a guess;
+- `chain_order` returns `(None, "ambiguous")` on a payload admitting two genuinely
+  different orderings — one record with a distinct `who` and the same values, and a
+  `final_value` reachable either way — and the check reports an `unverifiable` finding for
+  that field, not a guess;
+- `chain_order` returns `(None, "oversized")` for a bucket above eight records;
 - ordering passes when the server injects an undeclared status change into the chain, as
   a duplicate marking does.
 
@@ -907,33 +1010,74 @@ Add, using the bug 9 history payload transcribed from the spec:
 `CHAIN_FIELDS` and the `Expected*` types from the package.
 
 ```python
-def chain_order(records: list[dict]) -> list[dict] | None:
+# One bucket may not exceed this many records, and the whole search may not explore more
+# than BUDGET permutations: both bound a factorial enumeration on adversarial input.
+_MAX_BUCKET = 8
+_SEARCH_BUDGET = 10_000
+
+
+def chain_order(records: list[dict],
+                final_value: str | None) -> tuple[list[dict] | None, str | None]:
     """Order one field's history records by linking old_value to new_value.
 
-    Records are bucketed by `when` and the buckets ordered by `when`; within a bucket the
-    permutation that links the value carried in from the previous bucket establishes the
-    order. `when` is a sort key and is never compared to anything -- Bugzilla's
-    `ORDER BY bug_when` leaves same-second ties unordered, which is why the reply's own
-    order cannot be trusted: `bzr bug history 9` returns the reopening cycle's three
-    status changes inside one second in an order they did not happen in.
+    Records are bucketed by `when` and the buckets ordered by `when`, but the search is
+    global: it permutes each bucket internally and requires the whole ordering to link
+    head to tail and to end at `final_value`, the field's current value from `bug view`.
+    Committing bucket by bucket does not work -- on the live reply for bug 9 the
+    14:19:48Z bucket admits both orderings on its own, and only the :49Z record rules one
+    out. `when` is a sort key and a search bound; it is never compared to anything,
+    because Bugzilla's `ORDER BY bug_when` leaves ties unordered and the reply's own order
+    therefore cannot be trusted.
 
-    Returns None when a bucket admits no valid permutation (a divergence) or more than
-    one (ambiguous, reported unverifiable by the caller).
+    Candidate orderings are deduplicated by their (who, old_value, new_value) sequence, so
+    two records identical in all three are interchangeable rather than two answers.
+
+    Returns (ordering, None) on success, else (None, reason) where reason is "unlinked"
+    (no ordering links -- a divergence), "ambiguous" (more than one does), or "oversized"
+    (the search exceeded its bounds). The caller fails the run only on "unlinked".
     """
+    buckets = [bucket for _when, bucket in sorted(_by_when(records).items())]
+    if any(len(bucket) > _MAX_BUCKET for bucket in buckets):
+        return None, "oversized"
+    solutions: list[list[dict]] = []
+    budget = _SEARCH_BUDGET
+
+    def walk(index: int, carried: str | None, acc: list[dict]) -> None:
+        nonlocal budget
+        if len(solutions) > 1 or budget <= 0:
+            return
+        if index == len(buckets):
+            if final_value is None or carried == final_value:
+                solutions.append(acc)
+            return
+        seen: set[tuple] = set()
+        for permutation in permutations(buckets[index]):
+            budget -= 1
+            if budget <= 0:
+                return
+            key = tuple(
+                (r["who"], r["old_value"], r["new_value"]) for r in permutation)
+            if key in seen:
+                continue
+            seen.add(key)
+            if _links(permutation, carried):
+                walk(index + 1, permutation[-1]["new_value"], acc + list(permutation))
+
+    walk(0, None, [])
+    if budget <= 0:
+        return None, "oversized"
+    if not solutions:
+        return None, "unlinked"
+    if len(solutions) > 1:
+        return None, "ambiguous"
+    return solutions[0], None
+
+
+def _by_when(records: list[dict]) -> dict[str, list[dict]]:
     buckets: dict[str, list[dict]] = {}
     for record in records:
         buckets.setdefault(record["when"], []).append(record)
-    ordered: list[dict] = []
-    carried: str | None = None
-    for when in sorted(buckets):
-        candidates = [
-            permutation for permutation in permutations(buckets[when])
-            if _links(permutation, carried)]
-        if len(candidates) != 1:
-            return None
-        ordered.extend(candidates[0])
-        carried = candidates[0][-1]["new_value"]
-    return ordered
+    return buckets
 
 
 def _links(permutation, carried: str | None) -> bool:
@@ -945,25 +1089,30 @@ def _links(permutation, carried: str | None) -> bool:
     return True
 ```
 
-`itertools.permutations` is bounded by the bucket size, which is the number of changes one
-actor made to one field in one second — three on the largest bucket in
-`scenarios/smoke/`. Guard it anyway: a bucket above eight records reports
-`unverifiable` for that field rather than enumerating 40 320 permutations.
+The head of the chain is deliberately unconstrained -- `carried` starts at `None` and
+`_links` skips the check while it is -- because the fold does not know the value Bugzilla
+gave the field at creation. The tail constraint is what settles the ordering instead:
+`final_value` comes from the same `bug view` reply the field check already read, so it
+costs no extra call.
 
 `check_history` then:
 
 1. builds the observed multiset of `(who, field, new_value)` for value-carrying fields and
    `(who, field)` for the rest, and reports one divergence per declared change short of
    its declared count;
-2. for each field in `CHAIN_FIELDS` that the bug declares, calls `chain_order` on the
-   observed records for that field; `None` yields a divergence (no link) or an
-   unverifiable finding (ambiguous bucket), and otherwise the reconstructed `who` sequence
-   must contain the declared actor sequence for that field as a subsequence.
+2. for each field in `CHAIN_FIELDS` that the bug declares, calls
+   `chain_order(records_for_field, observed_fields.get(view_key))`. A `"unlinked"` reason
+   yields a divergence; `"ambiguous"` and `"oversized"` each yield an `unverifiable`
+   finding naming the field and the reason; and on success the reconstructed `who`
+   sequence must contain the declared actor sequence for that field as a subsequence.
 
 Run the tests; expect them to pass. `make check` and `make test`; expect green.
 
-**Acceptance.** The bug 9 ordering test fails if `chain_order` is replaced by sorting on
-`when` alone — check that by making the substitution, observing red, and reverting it.
+**Acceptance.** Both bug 9 fixtures recover `developer, triager, developer`. Prove the
+test bites: replace the global search with the per-bucket variant that commits the unique
+permutation of each bucket in turn, observe the two-bucket test go red with
+`reason == "ambiguous"`, and revert. Asserting only that two implementations differ would
+pass for the wrong reason, since both return a non-answer.
 
 Commit: `feat(verify): assert history attribution and reconstructed ordering`.
 
@@ -1001,7 +1150,7 @@ Using the `bug links 1` and `bug links 1 --recursive --depth 3` payloads from th
 Direct edges compare as a set of `(alias, relation, direction)`. Reachability compares
 `{alias: depth}` from the walk against `declared_hops`, ignoring `relation` and
 `direction` above depth 1 — `bzr`'s frontier is sorted by bug id
-(`src/commands/bug/links.rs:41`), so the credited relation for a node reachable two ways
+(`src/commands/bug/links.rs:42`), so the credited relation for a node reachable two ways
 depends on generated identifiers.
 
 The caller passes `depth = max(declared_hops.values())` capped at 10, `bzr`'s documented
@@ -1098,8 +1247,20 @@ canned `bzr` replies the way `tests/test_replay.py` does:
 
 `run()` calls `resolve_ids`, `check_link_bound`, adopts the ids into the context, builds a
 `ServerReader` for the insider and one for the outsider when a private comment exists,
-then for each bug in declaration order issues `bug`, `history`, `links`, `comments` and
-`attachments` reads and collects findings from the six check families. It prints each
+then for each bug in declaration order issues `bug`, `history`, `links` and `comments`
+reads and collects findings from the six check families.
+
+Two reads are conditional, and both conditions come from the fold rather than from a
+reply, so nothing is skipped on the strength of what the server happened to return:
+
+- `attachments` runs only for a bug the fold gives at least one attachment — two of the
+  smoke scenario's twenty;
+- the recursive `links` read runs only when the root's eccentricity in the declared graph
+  is 2 or more; at 1 or 0 the direct read already covers the whole neighbourhood.
+
+Each read is a process spawn plus an HTTP round trip — measured at roughly 0.34s for a
+`bug view` and 0.75s each for the list reads against this fixture — so the two skips
+remove about a third of the calls on `scenarios/smoke/`. It prints each
 finding, then the summary, and returns 1 when any finding is a `divergence`.
 
 ### Step 7.3 — the command
@@ -1126,8 +1287,11 @@ name the command:
 ```
 
 The existing `replay failed:` prefix becomes `replay failed:` / `resume failed:` /
-`verify failed:` — no test asserts the literal string; confirm with
-`rg -n 'replay failed' tests/` before the edit, and update any hit.
+`verify failed:`. One test asserts the prefix — `tests/test_replay.py:1245`,
+`self.assertTrue(errors.getvalue().startswith("replay failed:"))` — and it invokes
+`cli.main(["replay", ...])`, so `options.command` is `"replay"` and it still passes.
+Confirm with `rg -n 'replay failed' tests/` before the edit and update any hit that does
+not invoke `replay`.
 
 ### Step 7.4 — the live tier
 
@@ -1150,13 +1314,22 @@ Run `make check` (shellcheck covers this script), `make test`, then the live tie
 BZR_LIVE_BZR=$(command -v bzr) make smoke
 ```
 
-Expect the replay summary followed by
-`verify: <n> checks, 0 divergences, <k> unverifiable` and `smoke scenario: OK`. A
+Expect the replay summary, then
+`verify: <n> checks, 0 divergences, <k> unverifiable` and `smoke scenario: OK`. Record
+the wall time of the verify stage: the read budget above puts it at roughly 45-60s on
+`scenarios/smoke/` after the two skips, so a run far outside that is itself worth
+investigating before the figure goes into `README.md`. A
 divergence here is a real finding: record it rather than adjusting the assertion to match,
 unless the assertion's premise is what is wrong.
 
-**Acceptance.** `make check`, `make test` and `make smoke` are all green, and `make smoke`
-fails if a bug's summary is edited in the fixture database before the verify stage.
+Then update `README.md`'s published smoke measurement from that run: replace the
+`47 events replayed in 78.14s` figure with the observed replay **and** verify durations,
+naming both stages, so the number a reader is told to expect is the number the command
+now produces.
+
+**Acceptance.** `make check`, `make test` and `make smoke` are all green; `make smoke`
+fails if a bug's summary is edited in the fixture database before the verify stage; and
+`README.md`'s figure comes from this run, not from the previous one.
 
 Commit: `feat(verify): add the verify command and its live smoke stage`.
 
