@@ -152,6 +152,35 @@ together with `status` or `resolution` (G5); a `bug.flag` whose flag-type name c
 `+ - ? X` (D1); and any attachment description whose rendered summary would exceed 255
 **bytes** once its marker is appended.
 
+**Amended after the `groups` readback was measured (issue #27): `bug.update` carrying
+`groups` is no longer refused, and the rejected alternative below is withdrawn with it.**
+D3's premise is gone — `a7f6ab70` (`bzr` PR #646) adds `Groups` to the `Bug` serializer
+and is an ancestor of `63abb94e`, this repository's floor — so a declared `groups` set is
+now executed as an add/remove delta against observed state, like `cc` and `keywords`, and
+confirmed from `bug view` by set comparison. Measured at `63abb94e` against the running
+fixture: `bug view --fields=id,groups` returns `[]` for an unrestricted bug and the real
+member list for a bug restricted to a group, on the default transport.
+
+That second reading survives finding **D8** for a reason worth stating, because it is what
+separates `groups` from the two time fields this amendment leaves alone. `bzr`'s header
+auth is still not real auth, so the first read of a group-restricted bug draws an **HTTP
+401** — and `bzr`'s transport retries with its alternate auth method and gets a 200
+carrying the value. Bugzilla instead omits `estimated_time` and `remaining_time` from an
+otherwise-successful **200** for a caller who does not clear `timetrackinggroup`, so no
+error status ever fires that retry. **Under D8 a field is confirmable on the default
+transport when its failure is loud and unconfirmable when its failure is silent.** The two
+grounds were never the same, and the single shared rationale over the always-retry set is
+what let D3's staleness cover both fields at once; each now names its own.
+
+Two residuals this amendment does not close. No bug group is settable on any product in
+this fixture — `group_control_map` is empty and every `checksetup` group has
+`isbuggroup = 0`, so an authenticated `groups.add` returns Bugzilla error 120 — which is a
+fixture-configuration gap for `containers/`, reported rather than taken, and unexercised
+because no scenario declares a bug `groups` value. And `bzr` masks that error: on the
+alternate-auth retry, a fallback response also carrying HTTP 401 makes it report the first
+attempt's error instead of the fallback's, so error 120 surfaces as 410 "You must log in".
+That is finding D10.
+
 **Four of those grounds are Bugzilla's, not bzr's, and saying so matters as much as naming
 the ones that are.** Charging bzr for a constraint it did not impose corrupts the register
 exactly as silently routing around a real gap would, and the register is this repository's
@@ -330,7 +359,9 @@ defaults to reset *to*, and `resolution` and `dupe_of` are cleared by a status t
 - **Apply a declared `groups` set on update as adds only.** verified: `bzr bug view`
   serializes no `groups` entry (`src/types/bug.rs:200-238` at bzr `b80303b7`), so no delta can
   be computed and no read-back can confirm the declared set; converging on a superset would
-  silently diverge.
+  silently diverge. **Withdrawn by the amendment above (issue #27):** `bzr` serializes
+  `groups` from `a7f6ab70` on (`src/types/bug.rs:243` at `63abb94e`), so the delta is
+  computable and the set is confirmable, and the declared set is now applied in full.
 - **A separate reconciliation index beside the journal.** judgment: a second source of truth
   for what the journal records already answer, and one more file to keep consistent with it.
 - **Auto-retry a failed event inside the same run.** judgment: an unbounded loop against a
