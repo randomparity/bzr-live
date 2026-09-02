@@ -287,18 +287,37 @@ The change adds fixture data plus one shell script that creates the state root a
 are written into, so the security-relevant trigger that applies is secret handling.
 Everything else about the deployment is unchanged.
 
-**Boundaries.** The script adds no boundary and widens no existing one. It handles no key
-material itself: its only invocations are `python -m bzr_live.provision` and
-`python -m bzr_live.replay`, which mint and read the keys internally, so no key ever enters
-the shell process — a stronger boundary than `tests/replay_smoke.sh`, which does read
-`actor-keys/*.key` at its lines 67-68 in order to call `bzr` directly.
+**Boundaries.** The script handles no key material itself: its only invocations are
+`python -m bzr_live.provision` and `python -m bzr_live.replay`, which mint and read the keys
+internally, so no key ever enters the shell process — stronger in that respect than
+`tests/replay_smoke.sh`, which does read `actor-keys/*.key` at its lines 67-68 in order to
+call `bzr` directly.
+
+It does add one boundary. `BZ_PORT` arrives from the operator's environment or from the
+checkout's `.env`, and becomes the authority half of `BASE_URL`, which is passed to both
+Python modules as `--base-url`. That is the destination every actor API key travels to — as
+`--server-url` on the `bzr` argv beside `--server-api-key-env`
+(`src/bzr_live/provision/adapters.py:95-101`), and as the `api_key` field of the stock-REST
+`PUT {base_url}/rest/bug/{id}` body (`adapters.py:210-225`), which this scenario exercises
+three times for its custom fields. A value like `8080@example.invalid` renders
+`http://127.0.0.1:8080@example.invalid/`, whose real host is the trailing authority rather
+than the loopback address the string appears to name.
+
+Under the actor model below this costs a local operator nothing worse than a refused typo,
+and it is written down anyway because #21 wires this script into CI, where `BZ_PORT` stops
+being a person's shell variable and becomes workflow configuration. A threat model claiming
+the script has no boundaries is the wrong thing to be reading at that point.
 
 **Actors.** A local operator running `make smoke` on their own machine. Per `AGENTS.md`, the
 fixture binds to loopback, every credential in it is fabricated and disposable, and neither a
 remote attacker nor a hostile local user is in the threat model.
 
-**Controls.** The state root is a `mktemp -d` directory set to mode 0700 and removed by an
-`EXIT` trap; keys reach `bzr` in the environment, never on a command line or in script
+**Controls.** `BZ_PORT` must match `^[0-9]+$` or the script refuses and exits 1, naming the
+value; the check sits after the `.env` read so it governs both sources, and an empty value
+means "not set" and takes the documented 8080 default. Refusing rather than falling back is
+deliberate: a silent default would run the whole scenario against a different server than the
+operator asked for. The state root is a `mktemp -d` directory set to mode 0700 and removed by
+an `EXIT` trap; keys reach `bzr` in the environment, never on a command line or in script
 output; the scenario's committed files contain no key, no server ID, and no runtime state —
 the last enforced by the loader, which types every reference position and refuses anything
 that is not a `{"ref": ...}` object (`src/bzr_live/scenario/loader.py:162-172`).

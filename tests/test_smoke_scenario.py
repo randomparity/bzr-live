@@ -214,9 +214,10 @@ class SmokeScenarioTest(unittest.TestCase):
             values = event.expected_postcondition["values"]
             rendered = render_attachment_summary(
                 values["description"], event.reconciliation_marker, values["asset_sha256"])
+            size = len(rendered.encode("utf-8"))
             self.assertLessEqual(
-                len(rendered.encode("utf-8")), ATTACHMENT_SUMMARY_BYTE_LIMIT,
-                f"{event.name!r} renders a {len(rendered.encode('utf-8'))}-byte summary")
+                size, ATTACHMENT_SUMMARY_BYTE_LIMIT,
+                f"{event.name!r} renders a {size}-byte summary")
 
     def test_creates_declaring_assignee_or_edges_are_privileged(self):
         """Guard: Bugzilla silently discards these from a filer without editbugs.
