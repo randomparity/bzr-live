@@ -45,8 +45,13 @@ and `AGENTS.md`.
   whole security bar. No encryption, rotation, or crash-consistency work.
 - **Insider group is `admin`**, from `containers/bugzilla/checksetup_answers.txt:31`.
 - **The live tier needs an image built with `libxmlrpc-lite-perl`** (Task 0). Without it
-  `bzr` cannot read a full comment thread and the visibility check fails against a fixture
-  gap rather than a real divergence.
+  `bzr` cannot read a full comment thread. The verifier **refuses this as a precondition
+  naming the missing `XMLRPC::Lite`** rather than reporting a divergence: the journal
+  already proved the comment was written, so the read path is what cannot see it, and
+  calling that a divergence would file a `bzr` defect that does not exist.
+- **Every payload transcribed into a test fixture comes from the rebuilt image** (Task 0),
+  because `comment list` and `attachment list` return different shapes on either side of
+  that rebuild. See Task 0.
 - **`LINKS_MAX_NODES` is 1000**, from `bzr` `src/types/bug/links.rs:13`.
 - **Guardrails:** `make check` (bash -n, shellcheck, compileall, compose config) and
   `make test` (lifecycle shell tests plus
@@ -145,6 +150,25 @@ Run `make check`; expect green. `make check` validates `compose config` and does
 the image, so it neither proves nor is affected by this change — Task 7's live tier is
 where it is proven.
 
+**This task's `make up` gates every payload transcription in Tasks 4 and 6.** Two of the
+five read paths change shape when `xmlrpc.cgi` starts answering, because they prefer
+XML-RPC and fall back to REST only on a transport error: `get_comments_since`
+(`bzr` `src/client/resources/comment.rs:62`) and `get_attachments`
+(`attachment.rs:151`), with `get_attachment` (`attachment.rs:180`) the same for
+`attachment download`. `bug view`, `bug history` and `bug links` are REST either way and
+are unaffected. A payload transcribed before the rebuild is the REST shape, which the
+rebuilt fixture no longer returns — so Step 6.1 in particular must run after this task,
+not before.
+
+The consequence with teeth is `attachment list`. Its REST arm requests
+`exclude_fields=data` (`attachment.rs:163`); its XML-RPC arm names `data` in
+`ATTACHMENT_LIST_FIELDS` (`src/xmlrpc/resources/attachment.rs:12-27`). Before the rebuild
+the reply carries no `data` key at all, so every attachment checksum reports
+`unverifiable` — an honest report, but a vacuous one, and the whole point of check 5 is
+the checksum. A fixture transcribed from the REST reply would bake that vacuum into the
+unit tests, where nothing would ever expose it. After the rebuild, confirm with
+`bzr --json attachment list 1` that the entry carries `data` before transcribing it.
+
 Commit: `fix(containers): install XMLRPC::Lite so bzr can read comment threads`.
 
 ## Task 1 — the expected-state fold
@@ -163,7 +187,7 @@ ExpectedFlag(name: str, status: str, requestee: str | None)
 ExpectedComment(marker: str | None, author: str, private: bool, text: str | None)
 ExpectedAttachment(alias: str, bug: str, marker: str, author: str, summary: str,
                    content_type: str, private: bool, obsolete: bool, sha256: str)
-ExpectedChange(actor: str, field: str, value: str | None, chain: bool)
+ExpectedChange(actor: str, field: str, value: str | frozenset[str] | None, chain: bool)
 ExpectedBug(alias, creator, description, scalars, names, edges, duplicate_of,
             custom_fields, flags, comments, attachments, history, unverifiable,
             unasserted)
@@ -246,13 +270,6 @@ class FoldSmokeScenarioTest(unittest.TestCase):
         self.assertEqual(fields, {"estimated_hours", "remaining_hours", "worktime"})
         self.assertNotIn("estimated_time", bug.scalars)
 
-    def test_created_groups_are_classified_unverifiable(self) -> None:
-        # scenarios/smoke/ declares no non-empty groups, so this one folds a minimal
-        # in-test scenario whose bug.create carries a group reference. bug.update can
-        # never supply the case: actions._UPDATE_UNSUPPORTED refuses a groups update.
-        bug = fold_scenario(_scenario_with_created_groups()).bugs["restricted"]
-        self.assertIn("groups", {name for name, _ in bug.unverifiable})
-
     def test_custom_fields_carry_their_cf_names(self) -> None:
         bug = self.expected.bugs["cart-double-charge"]
         self.assertEqual(bug.custom_fields["cf_risk"], "high")
@@ -290,7 +307,7 @@ class FoldSmokeScenarioTest(unittest.TestCase):
         bug = self.expected.bugs["pay-retry-loop"]
         self.assertEqual(bug.names["cc"], frozenset({"releaser@example.test"}))
         added = [c.value for c in bug.history if c.field == "cc"]
-        self.assertEqual(added, ["releaser@example.test"])
+        self.assertEqual(added, [frozenset({"releaser@example.test"})])
 
     def test_flags_fold_with_their_requestee(self) -> None:
         bug = self.expected.bugs["pay-retry-loop"]
@@ -307,12 +324,13 @@ class FoldSmokeScenarioTest(unittest.TestCase):
 
 
 class CcOrderingTest(unittest.TestCase):
-    """The one fold interaction scenarios/smoke/ does not exercise.
+    """The fold rules scenarios/smoke/ does not exercise.
 
     No smoke bug declares `cc` after a requestee flag, so the ordering rule -- a later
     declaration replaces the running set and drops the requestee, matching the
     `--cc-remove` the replay engine would compute -- is pinned on a fixture written for
-    it rather than left until a scenario happens to hit it.
+    it rather than left until a scenario happens to hit it. The same fixture carries the
+    only non-empty declared `groups` in the repository, for the same reason.
     """
 
     @classmethod
@@ -333,6 +351,12 @@ class CcOrderingTest(unittest.TestCase):
                  if c.field == "cc" and isinstance(c.value, frozenset)
                  and len(c.value) == 2]
         self.assertEqual(len(multi), 1)
+
+    def test_created_groups_are_classified_unverifiable(self) -> None:
+        # bug.update can never supply this case: actions._UPDATE_UNSUPPORTED refuses a
+        # groups update, so bug.create is the only path the rule can fire on.
+        bug = self.expected.bugs["ordered"]
+        self.assertIn("groups", {name for name, _ in bug.unverifiable})
 
 
 class TopologyTest(unittest.TestCase):
@@ -380,13 +404,21 @@ tests reach the code under test.
 
 Create `tests/fixtures/verify-cc-order/` in the shape of the existing fixture scenarios
 (`scenario.json`, `resources.json`, `events.jsonl`; copy the structure from
-`tests/fixtures/minimal-scenario/`). It declares three actors (`developer`, `triager`, `releaser`), one `flag-type` and enough
+`tests/fixtures/minimal-scenario/`). It declares three actors (`developer`, `triager`, `releaser`), one `flag-type`, one
+`group` resource (`restricted`) and enough
 product/component/version resources for one `bug.create` aliased `ordered`, then three
 events in this order:
 
-1. `bug.create` for `ordered`, declaring `cc: [developer]`;
+1. `bug.create` for `ordered`, declaring `cc: [developer]` and `groups: [restricted]`;
 2. `bug.flag` on `ordered` with `status: "?"` and `requestee: triager`;
 3. `bug.update` on `ordered` declaring `cc: [triager, releaser]`.
+
+The `groups` declaration is here rather than in a fixture of its own because
+`scenarios/smoke/` declares none and `bug.update` cannot supply the case at all
+(`actions._UPDATE_UNSUPPORTED` refuses a `groups` update), so `bug.create` is the only
+path that rule fires on and this is the only `bug.create` outside the smoke scenario the
+plan writes. It folds to an `unverifiable` row and touches nothing else, so it does not
+interact with the two CC rules below.
 
 This fixture pins two rules `scenarios/smoke/` cannot. **Ordering:** after event 2 the
 running CC set is `{developer, triager}`; event 3 replaces it with `{triager, releaser}`,
@@ -529,7 +561,10 @@ class ExpectedAttachment:
 class ExpectedChange:
     actor: str                      # actor alias
     field: str                      # bzr history field name
-    value: str | None               # None means the value is a generated id: skip it
+    # A frozenset for a _NAME_SETS field (the added members, compared as a set against the
+    # observed value split on ", "), a string for a scalar, None for a generated id: skip
+    # it. The representation follows the field, never the rule that produced the change.
+    value: str | frozenset[str] | None
     chain: bool
 
 
@@ -728,8 +763,15 @@ observed flag.
   does, since `BugUpdateHandler.build` would compute `--cc-remove=<requestee>` against the
   server value. A union taken at the end would assert a member the replay had removed.
   When the requestee was not already in the running set, also append
-  `ExpectedChange(actor, "cc", requestee_email, chain=False)`, matching the observed
-  record `'' -> 'releaser@example.test'` beside the flag.
+  `ExpectedChange(actor, "cc", frozenset({requestee_email}), chain=False)`, matching the
+  observed record `'' -> 'releaser@example.test'` beside the flag. The value is a
+  **`frozenset`, not a bare string**, because `cc` is a `_NAME_SETS` field and
+  `check_history` splits every observed `cc` value on `", "` and compares sets. A bare
+  string here would be compared against a one-member set and never match — and it would
+  bite on `pay-retry-loop`, the bug ADR 0008 names as its modelled-premise case, so the
+  verifier's first live run would report a divergence against a correctly replayed
+  fixture. One representation per field, chosen by the field, is the rule; `ExpectedChange.value`
+  is `str | frozenset[str] | None` for exactly that reason.
 
 `_reader` picks a role:
 
@@ -794,8 +836,8 @@ Commit: `feat(verify): fold a scenario into its expected end state`.
 Creates `src/bzr_live/verify/observed.py` and the precondition half of
 `src/bzr_live/verify/runner.py`. Tests `tests/test_verify_journal.py`.
 
-**Interfaces this task consumes.** `fold`, `ExpectedScenario`, `VerifyError`, `Finding`
-from Task 1.
+**Interfaces this task consumes.** `fold`, `ExpectedScenario`, `ExpectedBug`,
+`VerifyError`, `Finding` from Task 1.
 
 **Interfaces this task publishes.**
 
@@ -813,6 +855,7 @@ LINKS_MAX_NODES: int
 check_reader_keys(expected: ExpectedScenario, keys: KeyStore) -> None
 resolve_ids(scenario: ValidatedScenario, store: JournalStore) -> dict[str, int]
 check_link_bound(expected: ExpectedScenario) -> None
+check_comment_transport(alias: str, bug: ExpectedBug, comments: list) -> None
 ```
 
 `check_reader_keys` runs first, before `ServerReader` is constructed for either role.
@@ -837,7 +880,17 @@ Create `tests/test_verify_journal.py` with a fake `JournalStore` (a dict of
   → `VerifyError` naming that actor, printed by the CLI as a single
   `verify failed: <reason>` line;
 - an expected graph whose reachable set from one root exceeds `LINKS_MAX_NODES` →
-  `VerifyError` citing the constant.
+  `VerifyError` citing the constant;
+- `check_comment_transport` on an insider reply carrying every declared marker → returns
+  without raising;
+- the same on a reply missing the declared **private** marker → `VerifyError` naming the
+  bug alias, the marker, and `XMLRPC::Lite`, and telling the operator to add
+  `libxmlrpc-lite-perl` and rerun `make up`. Assert the message text names the package:
+  the whole value of this precondition is that the operator is not sent to debug the
+  replay;
+- the same on a bug whose fold declares no private comment → returns without raising even
+  when a public marker is missing, because that case is check 4's divergence to report and
+  not a transport gap.
 
 Run the module; expect `ImportError` on `bzr_live.verify.observed`.
 
@@ -972,7 +1025,36 @@ def check_link_bound(expected) -> None:
                 f"bug {alias!r} reaches {count} bugs, above bzr's LINKS_MAX_NODES of "
                 f"{LINKS_MAX_NODES}; a recursive walk would truncate and the "
                 "verification would be incomplete")
+
+
+def check_comment_transport(alias: str, bug: ExpectedBug, comments: list) -> None:
+    """A declared private comment the insider cannot see is a fixture gap, not a divergence.
+
+    `resolve_ids` has already established that the bug.comment event holds a completed
+    record, so the comment is on the server. An insider read that does not carry its
+    marker therefore says the read path cannot reach it. bzr reads a thread over XML-RPC
+    Bug.comments (src/client/resources/comment.rs:62) and falls back to REST, which
+    returns the public comments alone -- so the cause is the image, and reporting it as a
+    divergence would claim a bzr defect against a correctly replayed fixture.
+    """
+    text = "".join(str(entry.get("text", "")) for entry in comments)
+    for comment in bug.comments:
+        if comment.private and comment.marker and f"[{comment.marker}]" not in text:
+            raise VerifyError(
+                f"bug {alias!r}: the fixture cannot serve a full comment thread: the "
+                f"private comment [{comment.marker}] is journalled as written but absent "
+                "from the insider read. bzr reads a thread over XML-RPC Bug.comments and "
+                "falls back to REST, which returns the public comments alone; this image "
+                "has libsoap-lite-perl without XMLRPC::Lite "
+                "(Bugzilla/Install/Requirements.pm:303-310 requires them separately). "
+                "Add libxmlrpc-lite-perl to containers/bugzilla/Dockerfile and rerun "
+                "make up")
 ```
+
+It takes the reply rather than reading one, so it is a pure function the precondition
+tests drive directly and Step 7.2 wires to the `comment list` read check 4 already makes.
+It is the one precondition that follows a read: everything it discriminates on is in that
+reply, and the discrimination is only sound because `resolve_ids` ran first.
 
 Run `uv run --python 3.11 python -m unittest tests.test_verify_journal -v`; expect all
 tests to pass. Run `make check` and `make test`; expect green.
@@ -1243,7 +1325,7 @@ costs no extra call.
    guard matter: `bug.create` seeds `summary` (and `target_milestone`, `assigned_to`)
    into `scalars` while writing no history at all, so a guard keyed on "the bug declares
    the field" would run the chain check over an empty record list. The runner's own skip
-   (Step 7.2) already keeps the 18 smoke bugs with no `ExpectedChange` out of this function
+   (Step 7.2) already keeps the 14 smoke bugs with no `ExpectedChange` out of this function
    entirely; this guard is the per-field case inside a bug that does declare a change, and
    `chain_order`'s empty-records return is the third. A `"unlinked"` reason yields a divergence; `"ambiguous"` and
    `"oversized"` each yield an `unverifiable` finding naming the field and the reason; and
@@ -1321,6 +1403,16 @@ def check_attachments(bug: ExpectedBug, attachments: list,
 ```
 
 ### Step 6.1 — the failing tests
+
+**Transcribe these payloads only from an image rebuilt by Task 0.** Both commands here are
+the two of the five read paths that prefer XML-RPC (`comment.rs:62`, `attachment.rs:151`)
+and fall back to REST when `xmlrpc.cgi` is absent, so a reply taken before the rebuild is
+a shape the shipped fixture no longer returns. The `attachment list` difference is not
+cosmetic: the REST arm sets `exclude_fields=data` (`attachment.rs:163`) and the XML-RPC arm
+requests `data` (`src/xmlrpc/resources/attachment.rs:12-27`), so a pre-rebuild transcript
+would carry no `data` key and every checksum case below would silently become the
+`unverifiable` case. Confirm `data` is present in the transcribed entry before writing the
+fixture. This is the ordering constraint Task 0 states; it binds here.
 
 Transcribe the payloads from live replies at implementation time, as Task 4 does:
 `bzr --json --server-url <base> comment list 1`, `... comment list 12`, and
@@ -1406,7 +1498,10 @@ canned `bzr` replies the way `tests/test_replay.py` does:
 the context, builds a
 `ServerReader` for the insider and one for the outsider when a private comment exists,
 then for each bug in declaration order issues `bug`, `history`, `links` and `comments`
-reads and collects findings from the six check families.
+reads and collects findings from the six check families. It passes each insider
+`comments` reply to `check_comment_transport` **before** handing it to `check_comments`,
+so a fixture missing `XMLRPC::Lite` refuses with that precondition's message instead of
+reporting a divergence per private comment.
 
 Three reads are conditional, and every condition comes from the fold rather than from a
 reply, so nothing is skipped on the strength of what the server happened to return:
@@ -1416,12 +1511,19 @@ reply, so nothing is skipped on the strength of what the server happened to retu
 - the recursive `links` read runs only when the root's eccentricity in the declared graph
   is 2 or more; at 1 or 0 the direct read already covers the whole neighbourhood;
 - `history` runs, and `check_history` with it, only for a bug whose fold carries at least
-  one `ExpectedChange` — two of the smoke scenario's twenty, `cart-double-charge` and
-  `pay-decline-copy`. For the other eighteen the attribution multiset is empty, so
+  one `ExpectedChange` — **six** of the smoke scenario's twenty: `cart-double-charge`,
+  `pay-decline-copy`, `pay-retry-loop`, `pay-token-leak`, `inv-tax-mismatch` and
+  `dun-wrong-locale`. Derive that set from the fold rules above, not from the event list:
+  only `bug.update`, `bug.flag`, `bug.custom-field-set` and `attachment.update` append an
+  `ExpectedChange`, and two rules then subtract. `cart-dupe-report`'s sole such event is
+  `mark-duplicate`, which appends none, so it is not a seventh; the materialised inverse
+  edges append none either, so `inv-currency-drift` is not an eighth. For the other
+  fourteen the attribution multiset is empty, so
   containment holds vacuously and the ordering guard's second clause never fires: the
   family executes, costs a spawn, and evaluates no expectation. Skipping it is what keeps
   `<n>` honest, since the summary's whole claim is that an executed family asserted
-  something.
+  something. This is the second-largest of the three skips, not the largest — the
+  attachment skip is, at eighteen bugs.
 
 The `links` read stays unconditional and is not a fourth candidate: its direct-edge check
 reports an observed edge the scenario never declared, so it bites on a bug whose fold

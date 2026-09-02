@@ -43,7 +43,8 @@ has written.
 
 ## Preconditions
 
-Refuse before issuing any read, naming the scenario path in every message:
+Four refuse before any read is issued; the fifth is a capability probe over the first read
+and is stated after them. All five name the scenario path in the message:
 
 1. The scenario loads (`load_scenario`, existing errors pass through).
 2. Every event has a `CompletedRecord` under `<state-root>/journal/<name>/` whose
@@ -60,6 +61,30 @@ Refuse before issuing any read, naming the scenario path in every message:
    (`LINKS_MAX_NODES`, `bzr` `src/types/bug/links.rs:13`). Above that `bzr bug links`
    truncates its walk and warns on stderr, which `BzrClient.read` discards on exit 0, so
    the bound is checked against the declared graph instead of trusted at read time.
+
+A fifth precondition is a **capability probe** and so is the one read that precedes the
+checks rather than following them. When the scenario declares a private comment, the first
+`comment list` read — as the insider, on that bug, the read check 4 needs anyway — must
+show that comment's marker. Its absence refuses the run:
+
+```
+verify failed: <scenario>: bug <alias>: the fixture cannot serve a full comment thread.
+bzr reads one over XML-RPC Bug.comments (src/client/resources/comment.rs:62) and falls
+back to REST, which returns the public comments alone; this image has libsoap-lite-perl
+without XMLRPC::Lite (Bugzilla/Install/Requirements.pm:303-310 requires them separately).
+Add libxmlrpc-lite-perl to containers/bugzilla/Dockerfile and rerun make up.
+```
+
+Refusing rather than reporting a divergence is what precondition 2 buys. That precondition
+already established the `bug.comment` event holds a completed record with
+`next_safe_action: advance`, so the comment **is** on the server; a marker the insider
+cannot see says the read path cannot reach it, not that the replay wrote the wrong thing.
+Calling that a divergence would report a `bzr` defect against a correctly replayed
+fixture — `AGENTS.md`'s silent substitution inverted — and would leave the operator
+debugging the replay for a missing OS package. Where the discrimination is imperfect is
+stated rather than hidden: an insider read missing the marker because the marker itself
+was rendered differently would also refuse here, and the message names the marker so that
+case is one `comment list` away from being told apart.
 
 `CompletedRecord.resolved_ids` is the only source of server identities
 (`src/bzr_live/scenario/journal.py:385`); the verifier never re-derives one and never
@@ -348,6 +373,18 @@ Located by `[<marker>]` in `summary`, exactly once. Assert:
   costs no extra call and no temporary file. When a reply carries no `data` the checksum is
   reported `unverifiable` naming that; nothing else is weakened.
 
+**This check depends on the same fixture package check 4 does.** `attachment list` is the
+second of the five read paths to prefer XML-RPC: `get_attachments` calls
+`dispatch_xmlrpc_first` (`bzr` `src/client/resources/attachment.rs:151`), as does
+`get_attachment` (`attachment.rs:180`). The two arms disagree about `data` specifically —
+the REST arm requests `exclude_fields=data` (`attachment.rs:163`), the XML-RPC arm asks
+for it in `ATTACHMENT_LIST_FIELDS` (`src/xmlrpc/resources/attachment.rs:12-27`). Against
+an image without `XMLRPC::Lite` every checksum therefore reports `unverifiable` for a
+missing key, which is a true report of a fixture gap and not a divergence — but it means
+the strongest assertion in this family is silently vacuous until the rebuild. It is not a
+precondition: unlike the private comment, a missing `data` key is already reported
+honestly, so a refusal would buy nothing check 4's refusal does not already buy.
+
 ### 6. Custom fields
 
 Covered by check 1's explicit `--fields` read and by check 2's `cf_*` history records; no
@@ -367,7 +404,7 @@ then `verify: <n> checks, <m> divergences, <k> unverifiable`, where `<n>` is the
 readable: a bug the verifier skipped moves the number, so a green run cannot look
 identical to one that asserted nothing — the failure the replay's own `47 events executed`
 summary has. The definition only holds while an executed family evaluates something, which
-is why check 2 skips a bug whose fold declares no change (below): counting eighteen history
+is why check 2 skips a bug whose fold declares no change (below): counting fourteen history
 families that assert nothing would inflate `<n>` in exactly the way this definition exists
 to prevent. Exit 1 if `m > 0`, else 0.
 A precondition refusal exits 1 with a single `verify failed: <reason>` line, matching how
@@ -387,7 +424,8 @@ A precondition refusal exits 1 with a single `verify failed: <reason>` line, mat
   a private comment visible to the outsider, a corrupted attachment `data`, and a missing
   `cf_*` key.
 - `tests/test_verify_journal.py` — the preconditions: absent record, digest mismatch,
-  `next_safe_action` other than `advance`, missing reader role, and the link-node bound.
+  `next_safe_action` other than `advance`, missing reader role, the link-node bound, and
+  the comment-transport probe, whose refusal must name `XMLRPC::Lite`.
 
 **Live**: `make smoke` runs `verify` after the replay, inside the same state root, and
 fails the script on a non-zero exit.
@@ -400,13 +438,23 @@ eccentricity 1, and no `bug history` for a bug whose fold carries no `ExpectedCh
 the figure is re-measured from the run that adds the stage, the way the fixture change
 before it was. No estimate is published here: the measurement belongs to that run.
 
-The third skip is the largest of the three on `scenarios/smoke/`. Folding it gives a
-declared history change on two bugs only, `cart-double-charge` and `pay-decline-copy`; for
-the other eighteen the attribution multiset is empty, so containment is vacuous and the
-ordering guard's second clause never fires. Each of those eighteen still cost a `bzr` spawn
-and an HTTP round trip and bought no assertion. The `links` read is deliberately **not** in
-this class and stays unconditional: its direct-edge check reports an observed edge the
-scenario never declared, so it bites on a bug with no declared edges.
+The attachment skip is the largest of the three on `scenarios/smoke/`, at eighteen bugs of
+twenty; the history skip is the next, at fourteen. Folding the scenario gives a declared
+history change on **six** bugs — `cart-double-charge`, `pay-decline-copy`,
+`pay-retry-loop`, `pay-token-leak`, `inv-tax-mismatch` and `dun-wrong-locale`. Six is
+what the fold rules produce, not what the event list looks like: history expectations come
+from `bug.update`, `bug.flag`, `bug.custom-field-set` and `attachment.update` alone, and
+two rules subtract from that list. `mark-duplicate` is `cart-dupe-report`'s only such
+event and contributes no `ExpectedChange`, which is why that bug is not a seventh. The
+materialised inverse edges contribute none either — they are server writes the scenario
+did not declare, and containment tolerates them — which is why `inv-currency-drift`, on
+the receiving end of both diamond edges, is not an eighth.
+
+For the other fourteen the attribution multiset is empty, so containment is vacuous and
+the ordering guard's second clause never fires. Each of those fourteen still cost a `bzr`
+spawn and an HTTP round trip and bought no assertion. The `links` read is deliberately
+**not** in this class and stays unconditional: its direct-edge check reports an observed
+edge the scenario never declared, so it bites on a bug with no declared edges.
 
 ## New finding for `docs/bzr-findings.md`
 

@@ -92,9 +92,27 @@ which are equality — still catch the state such a record would have produced.
 
 The verifier now depends on the fixture image carrying XML-RPC. `make up` rebuilds the
 image and recreates the container, and `mariadb-data` and `bugzilla-data` are top-level
-volumes, so taking the change costs a rebuild and no fixture data. An operator running
-against an image built before this change sees the private-comment check fail rather than
-silently pass, because the insider read returns a thread missing the declared comment.
+volumes, so taking the change costs a rebuild and no fixture data.
+
+An operator running against an image built before this change gets a **precondition
+refusal naming `XMLRPC::Lite`**, not a divergence. The distinction is the point: a
+divergence claims the replay wrote the wrong thing, and here the replay wrote exactly what
+the scenario declared. The journal record for the `bug.comment` event is `advance`, so the
+comment exists on the server; a marker absent from the *insider* read therefore says the
+read path cannot see it, which is a fixture gap. Reporting that as a replay defect is the
+silent-substitution failure inverted — it would file a `bzr` finding that does not exist.
+
+**Two of the five read paths move off REST when that package lands**, not one.
+`get_comments_since` (`src/client/resources/comment.rs:62`), `get_attachments`
+(`attachment.rs:151`) and `get_attachment` (`attachment.rs:180`) all call
+`dispatch_xmlrpc_first`; `bug view`, `bug history` and `bug links` do not. So `comment
+list` and `attachment list` return one shape before the rebuild and another after, and
+every payload transcribed into a test fixture must be taken from the rebuilt image. The
+consequence with teeth is on `attachment list`: the REST arm requests
+`exclude_fields=data` (`attachment.rs:163`) while the XML-RPC arm asks for `data` in
+`ATTACHMENT_LIST_FIELDS` (`src/xmlrpc/resources/attachment.rs:12-27`). Before the rebuild
+every attachment checksum would be reported `unverifiable` for a missing `data` key —
+the design would look correct and assert nothing.
 
 The two modelled behaviours are premises. If a future Bugzilla or `bzr` stops adding the
 flag requestee to CC, or stops materialising the `blocks` inverse, `verify` fails loudly
@@ -142,7 +160,9 @@ deferred issues.
 - **Fetch attachment bytes with `bzr attachment download`.** verified: `bzr attachment
   list 1` already carries the body base64-encoded in `data` against this fixture, so the
   download adds a subprocess, a temporary directory, and a cleanup path for bytes already
-  in hand.
+  in hand. That holds on the XML-RPC arm only, which is why it depends on the package
+  above; the checksum falls back to `unverifiable` rather than to a download when a reply
+  carries no `data`.
 - **A second Bugzilla client, or stock REST, for the reads.** verified: every read the
   checks need exists on `bzr` — `bug view --fields`, `bug history`, `bug links`,
   `comment list`, `attachment list` — and issue #20 asks for the assertions to run through
