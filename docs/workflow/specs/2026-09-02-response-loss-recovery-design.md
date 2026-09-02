@@ -202,9 +202,19 @@ in this change writes to #21.
 
 ## Security relevance
 
-Not security-relevant. The change adds no entry point, handles no secret, parses no input
-it did not produce (the double parses argv the test itself caused the engine to build),
-builds no command, query, path, or URL from a non-literal, widens no permission grant, and
-adds no dependency. `src/bzr_live/replay/context.py`'s existing secret handling is
-unchanged and untouched. No threat model section is therefore written; the branch diff is
-re-judged against the same triggers before shipping.
+Not security-relevant. The change adds no entry point, parses no input it did not produce
+(the double parses argv the test itself caused the engine to build), builds no command,
+query, path, or URL from a non-literal, widens no permission grant, and adds no
+dependency.
+
+It does touch secrets, and precisely this much: the test fixture stores one fabricated API
+key per actor through the shipped `KeyStore`, under a per-test temporary state root, at
+the 0700/0600 modes `AGENTS.md` requires, and then feeds those real values to the
+journal's `known_secrets` scrubber — exercising that guardrail rather than bypassing it.
+It adds no secret-handling code and no new path by which a key could leave the test: the
+key reaches `bzr` only through the environment, and the double discards the `env` it is
+handed. `src/bzr_live/replay/context.py`'s existing secret handling is unchanged and
+untouched.
+
+No threat model section is therefore written; the branch diff is re-judged against the
+same triggers before shipping.
