@@ -103,9 +103,11 @@ every attempt for safe resume:
     uv run python -m bzr_live.replay replay tests/fixtures/replay-scenario \
       --state-root ./state --bzr /path/to/bzr
 
-`replay` requires the fixture at its pristine baseline (no journal record and no
-server-side alias collision) and the scenario's actors already provisioned with API
-keys under the same state root; `resume` continues a run from its journal after an
+`replay` requires no journal record under this state root and no server-side
+collision on any alias the scenario declares — a per-scenario proxy for the pristine
+baseline rather than a check of it, since nothing here can ask whether the database
+is at that baseline (ADR 0006) — and the scenario's actors already provisioned with
+API keys under the same state root; `resume` continues a run from its journal after an
 interruption, refusing if the scenario or fixture changed underneath it. Both exit 1
 with a `replay failed: ...` message on stderr naming the precondition or `bzr`
 limitation that stopped them.
