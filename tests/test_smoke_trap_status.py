@@ -49,6 +49,18 @@ Makefile's plain `bash tests/replay_smoke.sh` resolves to there.
 
 `tests/smoke_scenario.sh` carries the same trap and is deliberately absent: it is
 owned by issue #25, in flight at the time of writing. Add its row once that lands.
+
+Issue #32 added the two scripts outside `tests/` that carried the same defect:
+`scripts/lifecycle`, which `make up`, `make down`, `make reset`, `make clean` and
+`make doctor` all invoke, and `tests/lifecycle_test.sh`, which `make test` runs. They
+need three things the smoke rows did not, all of them per-row rather than structural:
+a path, because a row is otherwise read relative to `tests/`; a subcommand, because
+`scripts/lifecycle` rejects an empty argument vector before its trap is installed; and
+an expected command-failure status, because `scripts/lifecycle` routes every failed
+command through `die`, which exits 1 with an actionable message rather than passing the
+failing status through. `containers/bugzilla/entrypoint.sh` carries a plain trap too
+and stays out: it runs inside the container on bash 5.x, where the class does not
+arise, and it clears its own trap before the exec.
 """
 
 from __future__ import annotations
@@ -78,12 +90,31 @@ SHADOWED_COMMANDS = ("uv", "docker", "make")
 # One row per in-scope script: the command to inject the fault through -- the first
 # external command the script runs after installing its trap -- and whatever the
 # script needs to reach it. `BZ_PORT` is supplied so no run depends on a generated
-# `.env` in the checkout.
+# `.env` in the checkout. A row names a script under `tests/`, or carries a
+# repo-relative path when the script lives elsewhere.
 SMOKE_SCRIPTS = (
     ("replay_smoke.sh", "uv", {"BZR_LIVE_BZR": "/bin/true", "BZ_PORT": "8080"}),
     ("provision_smoke.sh", "docker", {"BZR_LIVE_BZR": "/bin/true", "BZ_PORT": "8080"}),
     ("checkpoint_smoke.sh", "make", {}),
+    ("lifecycle_test.sh", "mkdir", {}),
+    ("scripts/lifecycle", "docker", {}),
 )
+
+# The argument vector a script needs to reach its injection point. `scripts/lifecycle`
+# rejects an empty one at `:5` with exit 64, above its trap, so a row without arguments
+# would prove nothing; `doctor` is the subcommand that takes no lock and writes nothing.
+SCRIPT_ARGUMENTS = {"scripts/lifecycle": ("doctor",)}
+
+# The status the command-failure mode expects, where the script deliberately replaces
+# the failing one. `scripts/lifecycle` funnels every failed command through `die`, which
+# exits 1 after naming the operation and the next action -- the contract its callers
+# document, so preserving it is what this mode asserts there.
+EXPECTED_COMMAND_FAILURE_STATUS = {"scripts/lifecycle": 1}
+
+
+def script_path(script):
+    """The checkout path of a `SMOKE_SCRIPTS` row, which may carry its own directory."""
+    return ROOT / script if "/" in script else ROOT / "tests" / script
 
 # `${NAME[-1]}` and friends: valid from bash 4.3, fatal under `set -u` on bash 3.2.
 FROM_THE_END = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\[\s*-\s*\d+\s*\]")
@@ -117,7 +148,7 @@ class SmokeTrapStatusTest(unittest.TestCase):
     def test_no_script_indexes_an_array_from_the_end(self):
         for script, _command, _env in SMOKE_SCRIPTS:
             with self.subTest(script=script):
-                source = (ROOT / "tests" / script).read_text()
+                source = script_path(script).read_text()
                 found = FROM_THE_END.findall(source)
                 self.assertEqual(
                     found, [],
@@ -132,7 +163,8 @@ class SmokeTrapStatusTest(unittest.TestCase):
                     completed, context = self._inject(
                         script, command, extra_env, interpreter, "command-failure")
                     self.assertEqual(
-                        completed.returncode, STUB_STATUS,
+                        completed.returncode,
+                        EXPECTED_COMMAND_FAILURE_STATUS.get(script, STUB_STATUS),
                         f"the cleanup did not hand back the failing status.\n{context}")
 
     def test_a_fatal_expansion_error_does_not_report_success(self):
@@ -174,7 +206,7 @@ class SmokeTrapStatusTest(unittest.TestCase):
             # Every shadowed command fails; only the injected one records that it ran,
             # so reaching a different one fails the marker assertion rather than the
             # operator's fixture.
-            for shadowed in SHADOWED_COMMANDS:
+            for shadowed in dict.fromkeys(SHADOWED_COMMANDS + (command,)):
                 if shadowed == command and mode == "command-failure":
                     body = f"printf 'ran\\n' >>'{marker}'\nexit {STUB_STATUS}\n"
                 else:
@@ -204,7 +236,7 @@ class SmokeTrapStatusTest(unittest.TestCase):
                 env["BASH_ENV"] = str(bash_env)
 
             completed = subprocess.run(
-                [interpreter, str(ROOT / "tests" / script)],
+                [interpreter, str(script_path(script)), *SCRIPT_ARGUMENTS.get(script, ())],
                 cwd=ROOT, env=env, capture_output=True, text=True, timeout=300,
                 check=False)
             context = (f"{script} under {interpreter} ({mode}), "
