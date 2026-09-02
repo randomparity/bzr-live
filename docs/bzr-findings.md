@@ -292,7 +292,10 @@ and absent at `ae39fbd8`. Nothing to file.
 four components, because the field is honest and the defect is the finding. The provisioner
 refuses the readback with
 `component:cart differs in declared field 'default_assignee': declared '…', observed None`,
-which is correct behaviour: it cannot confirm what it wrote. Running `make smoke` therefore
-requires a `bzr` at `5fb99362` or later. This entry is why `tests/smoke_scenario.sh` prints
+which is correct behaviour: it cannot confirm what it wrote. `5fb99362` is where this defect
+stops; it is not a proven floor for `make smoke`, because that revision still declares output
+schema `0.6.1` while `src/bzr_live/replay/actions.py` is written against `b80303b7`, which
+declares `2.0.0`. `README.md` states the distinction. This entry is why
+`tests/smoke_scenario.sh` prints
 the `bzr` revision as its first line: the same scenario passes or fails on that revision
 alone, and an entry recorded against the wrong one would be a false report.

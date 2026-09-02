@@ -204,6 +204,23 @@ Phase 3's estimate event declares `estimated_hours` and `remaining_hours`, which
 noted here because it is the one event in the scenario whose resume behaviour differs from
 its neighbours'. Proving what resume does with it belongs to #21.
 
+**Three declared postconditions are not the server's final state, and #20's verifier must
+expect that.** Bugzilla applies its own effects after an event lands, so comparing a declared
+value to the fixture at the end of a replay is wrong for these three:
+
+- `estimate-double-charge` declares `remaining_hours: "6"` on `cart-double-charge`;
+  `worktime-double-charge` later logs 2.5 hours against the same bug, and Bugzilla decrements
+  `remaining_time` by the logged work. The fixture holds `3.50`, not `6`. Nothing breaks
+  today only because `_UPDATE_ALWAYS_RETRY` (`src/bzr_live/replay/actions.py:55`) drops both
+  hour fields from every reconcile comparison, and reconcile is reached only on resume.
+- `cart-dupe-report` declares `duplicate_of` alone and ends `RESOLVED`/`DUPLICATE`, which is
+  finding G5's server-side status change rather than anything the scenario asked for.
+- `pay-retry-loop` gains `releaser@example.test` on its CC list as a side effect of the flag
+  requestee, which no event declares.
+
+These are properties of Bugzilla, not defects in the fixture, so the events keep declaring
+what they honestly mean. The verifier asserts against them, so it needs the list.
+
 ## Proof
 
 **Offline tier — `tests/test_smoke_scenario.py`.** Loads `scenarios/smoke/` through

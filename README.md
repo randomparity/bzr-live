@@ -164,13 +164,24 @@ Start from a fresh fixture: Bugzilla reads `containers/bugzilla/checksetup_answe
 at install, and an existing fixture may already hold conflicting definitions of the products
 and components the scenario declares.
 
-**`make smoke` needs a `bzr` at `5fb99362` or later.** Earlier revisions report a component's
-`default_assignee` as null even when Bugzilla has stored one, so provisioning cannot confirm
-what it wrote and refuses. That is finding [D6](docs/bzr-findings.md); the scenario keeps
-declaring the field rather than dropping it. The script prints the `bzr` revision as its first
-line for this reason — the same scenario passes or fails on that revision alone.
+**`make smoke` has been proven at `bzr` `63abb94e` and nowhere else.** Two separate
+requirements bear on the revision, and only one of them is a measurement:
 
-Observed: **47 events replayed in 73.71s**, replay only, excluding provisioning and
+- Before `5fb99362`, `bzr` reports a component's `default_assignee` as null even when Bugzilla
+  has stored one, so provisioning cannot confirm what it wrote and refuses. That is finding
+  [D6](docs/bzr-findings.md); the scenario keeps declaring the field rather than dropping it.
+- `src/bzr_live/replay/actions.py` is written against `b80303b7` and refuses a reply shape it
+  does not recognise rather than absorbing it. `b80303b7` declares output schema `2.0.0`;
+  `5fb99362` declares `0.6.1`, the same major as the `0.8.2` release D6 was found on. Whether
+  the engine accepts `bug view`, `comment list`, and `attachment list` at `0.6.1` is not known
+  here, because no run has established it.
+
+So `5fb99362` is where the D6 defect stops, not a floor this repository has evidence for. Use
+`b80303b7` or later, and treat anything below `63abb94e` as untested. The script prints the
+`bzr` revision as its first line for this reason — the same scenario passes or fails on that
+revision alone.
+
+Observed: **47 events replayed in 78.14s**, replay only, excluding provisioning and
 `make up`. Measured on Apple M5 Max, macOS (Darwin 25.6.0, arm64), Docker 29.7.2, with
 `bzr 0.8.3-dev (63abb94e)`, against a fixture reset immediately beforehand. Provisioning the
 28 resources and `make up` are each separate intervals and are not included.

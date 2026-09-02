@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Operator-run live proof for issue #19: provisions and replays scenarios/smoke/ --
-# 20 bugs, 48 events, two products -- against the running fixture using the selected
+# 20 bugs, 47 events, two products -- against the running fixture using the selected
 # bzr binary, and reports the observed replay duration. It proves that provisioning,
 # actor switching, symbolic references and every supported action compose on a real
 # Bugzilla; it asserts nothing about semantic invariants, which is issue #20's job.
@@ -25,11 +25,19 @@ chmod 700 "$STATE"
 # `|| true` is load-bearing: under `set -euo pipefail` a .env carrying no BZ_PORT= line
 # makes grep exit 1, pipefail propagates it, and the assignment kills the script before
 # the ${BZ_PORT:-8080} default below is ever reached -- turning a documented fallback
-# into a bare non-zero exit. `-f2-` keeps a value containing '='; the numeric guard then
-# rejects anything that would build a malformed URL.
+# into a bare non-zero exit. `-f2-` keeps a value containing '='.
 if [[ -z ${BZ_PORT:-} && -f "$ROOT/.env" ]]; then
   BZ_PORT=$(grep -E '^BZ_PORT=' "$ROOT/.env" | tail -1 | cut -d= -f2- || true)
-  [[ ${BZ_PORT:-} =~ ^[0-9]+$ ]] || BZ_PORT=
+fi
+# Guard both sources, not just .env: an exported BZ_PORT reaches the same string. An empty
+# value means "not set" and takes the default below; anything else must be digits, because
+# BASE_URL is passed to provision and replay as --base-url and every actor API key is sent
+# there. 'BZ_PORT=8080@example.invalid' would render http://127.0.0.1:8080@example.invalid/,
+# whose real host is the trailing authority rather than the loopback address it appears to
+# name. Refuse rather than substitute a default, so a typo is not silently a different run.
+if [[ -n ${BZ_PORT:-} && ! ${BZ_PORT} =~ ^[0-9]+$ ]]; then
+  echo "smoke scenario: BZ_PORT must be digits, got '${BZ_PORT}'" >&2
+  exit 1
 fi
 BASE_URL="http://127.0.0.1:${BZ_PORT:-8080}/"
 
@@ -42,13 +50,20 @@ echo "smoke scenario: bzr under test: $("$BZR" --version)"
 # Read the counts from the loaded scenario rather than hardcoding them, so no reported
 # figure can drift from the fixture. The scenario path goes in as argv rather than being
 # interpolated into the Python source, so a path containing a quote cannot alter it.
-read -r EVENT_COUNT RESOURCE_COUNT ACTOR_COUNT <<<"$(uv run --python 3.11 python -c '
+# Assign first and split second: `read ... <<<"$(...)"` takes its status from `read`, and
+# an empty substitution still supplies one newline for it to consume successfully, so a
+# scenario that fails to load would set three empty counts and print
+# "provisioning  resources ( actors)" before continuing. A plain assignment propagates the
+# substitution's status, so `set -e` stops here with the loader's own
+# `<file>:<line>:<json-path>: <message>` as the last thing on the terminal.
+COUNTS=$(uv run --python 3.11 python -c '
 import sys
 from bzr_live.scenario import load_scenario
 s = load_scenario(sys.argv[1])
 print(len(s.events), len(s.resources),
       sum(1 for r in s.resources if r.kind == "actor"))
-' "$SCENARIO")"
+' "$SCENARIO")
+read -r EVENT_COUNT RESOURCE_COUNT ACTOR_COUNT <<<"$COUNTS"
 
 echo "smoke scenario: provisioning $RESOURCE_COUNT resources ($ACTOR_COUNT actors)"
 uv run --python 3.11 python -m bzr_live.provision "$SCENARIO" \

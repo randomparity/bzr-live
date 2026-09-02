@@ -8,7 +8,7 @@ carry into every task: the fixture is data validated by the existing loader, and
 under `src/` changes.
 
 Expected implementation size: 480–560 changed lines (M) — derived from the file map below:
-five fixture files (250–320 lines, dominated by 28 pretty-printed resources and 48 event
+five fixture files (250–320 lines, dominated by 28 pretty-printed resources and 47 event
 lines), two proof files (~220), and Makefile/README edits (~30). The band stays M: the volume
 is declarative data, the cyclomatic surface is two files, and no reviewed logic path changes.
 An earlier 320–430 understated the fixture against this repository's existing formatting,

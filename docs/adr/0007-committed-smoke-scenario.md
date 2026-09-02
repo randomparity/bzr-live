@@ -113,7 +113,7 @@ stated as narrowly as it is.
   `load`/`replay`/`verify` commands take a scenario path an operator types.
 - **Generate the fixture from a Python script at build time.** judgment: a generator makes
   the committed artifact a program rather than data, so reviewing what the fixture declares
-  means running it, and a 48-event stream is small enough to read. The epic's requirement
+  means running it, and a 47-event stream is small enough to read. The epic's requirement
   that generated server IDs never appear in committed fixture files needs no separate audit
   either way — every reference position is typed, and `loader.py:162-172` refuses anything
   that is not a `{"ref": ...}` object, so a baked-in id cannot load at all.

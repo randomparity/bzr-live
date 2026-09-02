@@ -52,14 +52,22 @@ DIAMOND_SINK = "dun-wrong-locale"
 
 
 def _blocks_graph(scenario):
-    """One directed graph over bug aliases, oriented as `blocks`.
+    """The graph the scenario leaves behind, over bug aliases, oriented as `blocks`.
 
     An edge (a, b) means "a blocks b". `depends_on` is the inverse relation, so it
     contributes a reversed edge. Both orientations must land in one graph: the
     diamond's apex edges are declared as `blocks` and its sink edges as
     `depends_on`, so a graph built from either alone contains no path through it.
+
+    Each declaration replaces rather than extends, because that is what replay does:
+    `BugUpdateHandler.build` diffs the declared list against the observed one and
+    emits `--depends-on-remove` / `--blocks-remove` for the difference
+    (`src/bzr_live/replay/actions.py:397-409`), so a later `set` naming fewer refs
+    deletes edges on the server. Accumulating instead would make the assertions
+    below blind to exactly that: a removal would leave the final graph unchanged
+    here while shrinking it on the fixture.
     """
-    edges: set[tuple[str, str]] = set()
+    latest: dict[tuple[str, str], tuple] = {}
     for event in scenario.events:
         if event.action not in {"bug.create", "bug.update"}:
             continue
@@ -68,10 +76,15 @@ def _blocks_graph(scenario):
         if target.kind != "bug":
             continue
         values = postcondition["values"]
-        for ref in values.get("blocks") or ():
-            edges.add((target.name, ref.name))
-        for ref in values.get("depends_on") or ():
-            edges.add((ref.name, target.name))
+        for field in ("blocks", "depends_on"):
+            # A create's postcondition carries every field, an update's only the
+            # ones its `set` block names, so presence is what marks a declaration.
+            if field in values:
+                latest[target.name, field] = tuple(values[field] or ())
+    edges: set[tuple[str, str]] = set()
+    for (name, field), refs in latest.items():
+        for ref in refs:
+            edges.add((name, ref.name) if field == "blocks" else (ref.name, name))
     return edges
 
 
