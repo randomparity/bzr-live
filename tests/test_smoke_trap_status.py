@@ -131,6 +131,7 @@ def script_path(script):
     """The checkout path of a `SMOKE_SCRIPTS` row, which may carry its own directory."""
     return ROOT / script if "/" in script else ROOT / "tests" / script
 
+
 # `${NAME[-1]}` and friends: valid from bash 4.3, fatal under `set -u` on bash 3.2.
 FROM_THE_END = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\[\s*-\s*\d+\s*\]")
 
@@ -226,8 +227,13 @@ class SmokeTrapStatusTest(unittest.TestCase):
 
             # Every shadowed command fails; only the injected one records that it ran,
             # so reaching a different one fails the marker assertion rather than the
-            # operator's fixture.
-            for shadowed in dict.fromkeys(SHADOWED_COMMANDS + (command,)):
+            # operator's fixture. A row whose injection point is outside that set adds
+            # it for its own runs only, because stubbing a general-purpose command for
+            # every row would move where the other scripts fail.
+            shadowed_commands = SHADOWED_COMMANDS
+            if command not in shadowed_commands:
+                shadowed_commands += (command,)
+            for shadowed in shadowed_commands:
                 if shadowed == command and mode == "command-failure":
                     body = f"printf 'ran\\n' >>'{marker}'\nexit {STUB_STATUS}\n"
                 else:
