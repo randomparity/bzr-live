@@ -37,19 +37,31 @@ uv run --python 3.11 python -m bzr_live.replay replay "$SCENARIO" \
 # Read the expected server_alias, scenario name and create event name out of the
 # loaded scenario rather than recomputing the digest or pasting a literal -- the
 # fixture's digest has changed during this build and could again.
-read -r ALIAS SCENARIO_NAME CREATE_EVENT <<<"$(uv run --python 3.11 python -c "
+read -r ALIAS SCENARIO_NAME CREATE_EVENT CREATE_ID_KEY <<<"$(uv run --python 3.11 python -c "
 from bzr_live.scenario import load_scenario
 s = load_scenario('$SCENARIO')
 create = next(e for e in s.events if e.action == 'bug.create')
-print(create.expected_postcondition['values']['server_alias'], s.name, create.name)
+print(create.expected_postcondition['values']['server_alias'], s.name, create.name,
+      f'{create.creates.kind}:{create.creates.name}')
 ")"
 
-JOURNAL_RECORD="$STATE/state/journal/$SCENARIO_NAME/$CREATE_EVENT.000001.json"
+# The attempt number is not a constant either: a create the engine settles as `retry`
+# is re-executed at attempt 2 by the operator's resume, and only the last record
+# carries the id. Attempts are zero-padded, so the glob sorts numerically.
+JOURNAL_DIR="$STATE/state/journal/$SCENARIO_NAME"
+shopt -s nullglob
+JOURNAL_RECORDS=("$JOURNAL_DIR/$CREATE_EVENT."*.json)
+shopt -u nullglob
+if [ ${#JOURNAL_RECORDS[@]} -eq 0 ]; then
+  echo "smoke failed: replay wrote no journal record for $CREATE_EVENT under $JOURNAL_DIR" >&2
+  exit 1
+fi
+JOURNAL_RECORD="${JOURNAL_RECORDS[-1]}"
 CREATE_BUG_ID=$(uv run --python 3.11 python -c "
 import json
 with open('$JOURNAL_RECORD') as f:
     record = json.load(f)
-print(record['resolved_ids']['bug:checkout-race'])
+print(record['resolved_ids']['$CREATE_ID_KEY'])
 ")
 
 TRIAGER_KEY=$(cat "$STATE/state/actor-keys/triager.key")
