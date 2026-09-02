@@ -101,9 +101,24 @@ SMOKE_SCRIPTS = (
 )
 
 # The argument vector a script needs to reach its injection point. `scripts/lifecycle`
-# rejects an empty one at `:5` with exit 64, above its trap, so a row without arguments
-# would prove nothing; `doctor` is the subcommand that takes no lock and writes nothing.
+# rejects an empty one at `:12-18` with exit 64, above the trap it installs at `:50`, so
+# a row without arguments would prove nothing; `doctor` is the subcommand that takes no
+# lock and writes nothing.
 SCRIPT_ARGUMENTS = {"scripts/lifecycle": ("doctor",)}
+
+# The sentinel's own stderr message, asserted in the silent-exit mode -- the one that
+# bites on every interpreter -- so that deleting a cleanup's `printf` while keeping its
+# `status=1` goes red rather than staying green. `scripts/lifecycle` is absent
+# deliberately: the first external command it runs after installing its trap is
+# `docker compose version >/dev/null 2>&1`, so a fault there reaches the trap with
+# stderr still pointed at /dev/null. Its message is correct at any fault site the script
+# does not itself silence, and unobservable from this injection point.
+SENTINEL_MESSAGE = {
+    "replay_smoke.sh": "replay smoke exited before finishing",
+    "provision_smoke.sh": "provision smoke exited before finishing",
+    "checkpoint_smoke.sh": "checkpoint smoke failed: exited before finishing",
+    "lifecycle_test.sh": "lifecycle test exited before finishing",
+}
 
 # The status the command-failure mode expects, where the script deliberately replaces
 # the failing one. `scripts/lifecycle` funnels every failed command through `die`, which
@@ -187,6 +202,12 @@ class SmokeTrapStatusTest(unittest.TestCase):
                         completed.returncode, 0,
                         f"the script stopped before its last assertion and still "
                         f"reported success.\n{context}")
+                    expected_message = SENTINEL_MESSAGE.get(script)
+                    if expected_message is not None:
+                        self.assertIn(
+                            expected_message, completed.stderr,
+                            f"the sentinel changed the status without naming the "
+                            f"failure.\n{context}")
 
     def _inject(self, script, command, extra_env, interpreter, mode):
         """Run `script` under `interpreter` with `command` replaced by a failing one.
