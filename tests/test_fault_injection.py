@@ -507,6 +507,15 @@ class ResponseLossTest(_Fixture):
         self.assertEqual(record.exit_status, -1)
         self.assertEqual(record.resolved_ids, {"bug:checkout-race": 1})
         self.assertIsNone(self._record("create-checkout-race", 2))
+        # The operator-facing summary counts the recovery under its own name. Rolling
+        # `resumed` into `executed` would tell someone recovering a killed run that this
+        # run sent a mutation, when it sent none -- the misreading
+        # src/bzr_live/replay/engine.py:129-131 says the split exists to prevent. This
+        # branch is the first thing in the repository producing a nonzero resumed count,
+        # so nothing else pins it.
+        self.assertEqual(
+            self.out[-1],
+            "summary: 0 executed, 0 reconciled, 1 resumed, 0 already complete")
 
     # --- idempotent-set ----------------------------------------------------
 
