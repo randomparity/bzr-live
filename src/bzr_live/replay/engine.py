@@ -142,6 +142,14 @@ class ReplayEngine:
                 raise ReplayError(
                     f"event {event.name!r} was recorded as ambiguous by an earlier run; "
                     f"{AMBIGUOUS_HINT}")
+            if record.next_safe_action != "retry":
+                # "reconcile" is legal in CompletedRecord's Literal but this engine
+                # never writes it; a record it cannot interpret refuses rather than
+                # falling through into a silent re-execution.
+                raise ReplayError(
+                    f"event {event.name!r} was recorded with next safe action "
+                    f"{record.next_safe_action!r}, which this engine cannot act on; "
+                    f"{AMBIGUOUS_HINT}")
             return self._execute(event, record.attempt + 1)
         # An in-flight record from an earlier run: settle it, then continue per its
         # answer.

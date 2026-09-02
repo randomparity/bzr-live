@@ -974,6 +974,22 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(len(run.calls), 1)
         self.assertIn("list", run.calls[0]["argv"])
 
+    def test_resume_refuses_a_completed_record_it_cannot_interpret(self) -> None:
+        # "reconcile" is legal in CompletedRecord's Literal and this engine never
+        # writes it, so a record carrying it came from somewhere else; refusing beats
+        # re-executing a mutation on an unreadable instruction.
+        scenario = self._trimmed("create-checkout-race")
+        self._completed(
+            self._event(scenario, "create-checkout-race"), "reconcile", exit_status=-1)
+        run = _FakeRun()
+        with self.assertRaises(ReplayError) as caught:
+            self._engine(run, scenario).resume()
+        message = str(caught.exception)
+        self.assertIn("create-checkout-race", message)
+        self.assertIn("reconcile", message)
+        self.assertIn("CONFIRM_RESET=1 make reset", message)
+        self.assertEqual(run.calls, [])
+
     def test_resume_refuses_a_recorded_stop_without_querying(self) -> None:
         # A stop is terminal in the journal: the refusal is durable rather than
         # dependent on the server still looking ambiguous, so nothing is re-queried.
