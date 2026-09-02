@@ -785,7 +785,9 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(record.attempt, 1)
         self.assertEqual(len(run.calls), 10)
         self.assertEqual(len(opener.requests), 1)
-        self.assertEqual(self.out[-1], "summary: 8 executed, 0 already complete")
+        self.assertEqual(
+            self.out[-1],
+            "summary: 8 executed, 0 reconciled, 0 resumed, 0 already complete")
 
     # --- preconditions -----------------------------------------------------
 
@@ -1020,7 +1022,9 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(run.calls[0]["argv"][-2:], ["--", "41"])
         self.assertEqual(
             self.store.read("comment-triage").invocation.arguments[-1], "41")
-        self.assertEqual(self.out[-1], "summary: 1 executed, 1 already complete")
+        self.assertEqual(
+            self.out[-1],
+            "summary: 1 executed, 0 reconciled, 0 resumed, 1 already complete")
 
     # --- reconciliation inside a run ---------------------------------------
 
@@ -1050,6 +1054,10 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(record.exit_status, -1)
         # The reconciled id was adopted, so the next event addressed the right bug.
         self.assertEqual(run.calls[-1]["argv"][-2:], ["--", "41"])
+        # A reconciled result is not a mutation this run sent: the summary says so.
+        self.assertEqual(
+            self.out[-1],
+            "summary: 1 executed, 1 reconciled, 0 resumed, 0 already complete")
 
     def test_a_failing_mutation_aborts_the_run_and_journals_the_retry(self) -> None:
         """One execution per event per run: attempt 2 belongs to the operator's resume.

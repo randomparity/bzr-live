@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable
@@ -123,8 +124,14 @@ class ReplayEngine:
             status = self._advance(event, latest[event.name])
             report.append((status, event.name))
             self._out(f"{status} {event.name}")
-        done = sum(1 for status, _ in report if status != "skipped")
-        self._out(f"summary: {done} executed, {len(report) - done} already complete")
+        # Each status counted under its own name: "executed" is a mutation this run
+        # sent, while "resumed" and "reconciled" are results it adopted without
+        # sending one. Rolling all three into "executed" reads as that many mutations.
+        counts = Counter(status for status, _ in report)
+        self._out(
+            f"summary: {counts['executed']} executed, {counts['reconciled']} "
+            f"reconciled, {counts['resumed']} resumed, {counts['skipped']} "
+            "already complete")
         return report
 
     def _advance(self, event: PlannedEvent, record: _Record) -> str:
