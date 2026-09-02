@@ -154,9 +154,26 @@ def _marker_count(entries, field: str, marker: str) -> tuple[int, int | None]:
     return 1, hits[0].get("id")
 
 
-def _append_result(event: PlannedEvent, count: int, entry_id, output: JsonValue) -> Reconciliation:
+def _append_result(event: PlannedEvent, count: int, entry_id, output: JsonValue, *,
+                   id_key: str | None = None) -> Reconciliation:
+    """The append-class verdict: one marker advances, none retries, more than one stops.
+
+    `id_key` names the resolved reference an append that creates something adopts. The
+    id is checked here rather than by the caller, because `_marker_count` yields None
+    for a matched entry carrying no `id` and an unchecked None reaches
+    `CompletedRecord.resolved_ids`, which refuses it -- turning a malformed boundary
+    reply into a halt that blames the journal, after the in-flight record has landed.
+    """
     if count == 1:
-        return Reconciliation("advance", output, {}, "")
+        if id_key is None:
+            return Reconciliation("advance", output, {}, "")
+        if not isinstance(entry_id, int) or entry_id <= 0:
+            return Reconciliation(
+                "stop", output, {},
+                f"event {event.name!r}: the entry matching marker "
+                f"{event.reconciliation_marker!r} carries no usable id; "
+                f"{AMBIGUOUS_HINT}")
+        return Reconciliation("advance", output, {id_key: entry_id}, "")
     if count == 0:
         return Reconciliation(
             "retry", output, {}, f"event {event.name!r} did not commit")
@@ -429,16 +446,9 @@ class BugAttachHandler(ActionHandler):
             ["attachment", "list"], positionals=[str(bug_id)])
         count, entry_id = _marker_count(
             _entries(payload), "summary", event.reconciliation_marker)
-        if count == 1:
-            return Reconciliation(
-                "advance", payload, {f"attachment:{event.creates.name}": entry_id}, "")
-        if count == 0:
-            return Reconciliation(
-                "retry", payload, {}, f"event {event.name!r} did not commit")
-        return Reconciliation(
-            "stop", payload, {},
-            f"event {event.name!r} matches {count} results for marker "
-            f"{event.reconciliation_marker!r}; {AMBIGUOUS_HINT}")
+        return _append_result(
+            event, count, entry_id, payload,
+            id_key=f"attachment:{event.creates.name}")
 
 
 class BugWorktimeHandler(ActionHandler):

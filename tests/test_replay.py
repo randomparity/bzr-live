@@ -509,6 +509,28 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(result.next_action, "stop")
         self.assertIn("CONFIRM_RESET=1 make reset", result.detail)
 
+    def test_attach_adopts_the_matched_attachment_id(self) -> None:
+        event = self._event("attach-notes")
+        run = _FakeRun(
+            [(0, [{"id": 7, "summary": f"notes [{event.reconciliation_marker}]"}], None)])
+        result = HANDLERS["bug.attach"].reconcile(self._context(run), event)
+        self.assertEqual(result.next_action, "advance")
+        self.assertEqual(result.resolved_ids, {"attachment:triage-notes": 7})
+
+    def test_attach_stops_when_the_matched_entry_carries_no_id(self) -> None:
+        # An entry without a usable `id` used to be adopted unchecked, and the None
+        # then died in CompletedRecord's validation -- blaming the journal for a
+        # boundary reply, after the in-flight record had landed.
+        event = self._event("attach-notes")
+        run = _FakeRun(
+            [(0, [{"summary": f"notes [{event.reconciliation_marker}]"}], None)])
+        result = HANDLERS["bug.attach"].reconcile(self._context(run), event)
+        self.assertEqual(result.next_action, "stop")
+        self.assertEqual(result.resolved_ids, {})
+        self.assertIn("carries no usable id", result.detail)
+        self.assertIn(event.reconciliation_marker, result.detail)
+        self.assertIn("CONFIRM_RESET=1 make reset", result.detail)
+
     def test_set_advances_when_the_postcondition_matches(self) -> None:
         run = _FakeRun(
             [(0, {"id": 41, "status": "CONFIRMED", "target_milestone": "m1"}, None)])
