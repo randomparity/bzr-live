@@ -562,13 +562,19 @@ def check_visibility(bug: ExpectedBug, comments: list) -> list[Finding]:
 def _checksum(bug: ExpectedBug, declared: ExpectedAttachment,
               entry: Mapping[str, object]) -> list[Finding]:
     subject = f"attachment {declared.alias!r}"
-    if "data" not in entry:
+    encoded = entry.get("data")
+    # An absent key and a null one are the same claim, and both must take this arm: a
+    # null stringifies to "None", which is four base64 characters and decodes without
+    # error, so falling through would report a digest mismatch for a reply that carried
+    # no content at all. An empty string is not this case -- a zero-byte attachment has
+    # a well-defined digest and is compared.
+    if not isinstance(encoded, str):
         return [Finding(
             "unverifiable", bug.alias, "attachments",
             f"{subject}: the reply carries no data, so the stored bytes cannot be "
             "hashed; bzr requests data only on the XML-RPC arm (finding D9)")]
     try:
-        raw = base64.b64decode(str(entry["data"]), validate=True)
+        raw = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError):
         return [Finding("divergence", bug.alias, "attachments",
                         f"{subject}: the reply's data is not valid base64")]

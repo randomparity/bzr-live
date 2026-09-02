@@ -495,6 +495,37 @@ class VerifierRunTest(_JournalFixture):
         self.assertIn("insider", self.out[0])
         self.assertIn(str(FIXTURE), self.out[0])
 
+    def test_a_private_comment_with_no_insider_is_not_a_transport_gap(self) -> None:
+        # No committed scenario declares a private comment with no actor in the insider
+        # group, and building one would change a shared fixture's digest, so the fold is
+        # substituted here instead. Reading such a thread as the outsider must not raise
+        # the "add libxmlrpc-lite-perl" refusal -- the reader was never entitled to the
+        # comment -- and must not report it missing. check_roles says so once already.
+        run = _FakeRun([
+            (0, BUG_VIEW_41, None),
+            (0, HISTORY_41, None),
+            (0, [], None),
+            (0, COMMENTS_41, None),
+            (0, COMMENTS_41, None),      # the outsider read check_visibility now needs
+            (0, ATTACHMENTS_41, None),
+        ])
+        context = ReplayContext(
+            self.scenario, self.keys, bzr_path="bzr",
+            base_url="http://127.0.0.1:8080/", workspace=self.workspace, run=run)
+        verifier = Verifier(self.scenario, context, self.store, str(FIXTURE), self.keys,
+                            out=self.out.append)
+        bug = self.expected.bugs["checkout-race"]
+        marker = "bzr-live:replay-demo:comment-restricted"
+        verifier._expected = replace(
+            self.expected, insider=None,
+            bugs={"checkout-race": replace(bug, comments=(
+                *bug.comments, ExpectedComment(marker, "triager", True, None)))})
+        self.assertEqual(verifier.run(), 0)
+        self.assertEqual([line for line in self.out if "libxmlrpc-lite-perl" in line], [])
+        self.assertEqual([line for line in self.out if marker in line], [])
+        # The visibility family still runs and still proves the outsider cannot see it.
+        self.assertEqual(self.out[-1], "verify: 6 checks, 0 divergences, 3 unverifiable")
+
     def test_a_journal_resolving_no_id_for_a_bug_fails_with_a_message(self) -> None:
         # Every record is complete, so resolve_ids passes; only the create's resolved_ids
         # are gone. A hand-edited journal must not reach the CLI as a KeyError traceback.

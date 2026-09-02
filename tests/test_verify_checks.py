@@ -965,6 +965,15 @@ class AttachmentCheckTest(unittest.TestCase):
                          "attachment 'triage-notes': the reply's data is not valid "
                          "base64")
 
+    def test_a_null_data_field_is_unverifiable_not_a_digest_mismatch(self) -> None:
+        # `None` stringifies to four base64 characters and decodes without error, so a
+        # null must take the same arm as an absent key rather than reporting a mismatch
+        # for a reply that carried no content.
+        findings = self._check(data=None)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(findings[0].kind, "unverifiable")
+        self.assertIn("the reply carries no data", findings[0].detail)
+
     def test_a_reply_with_no_data_is_unverifiable_and_the_rest_still_runs(self) -> None:
         # The default-transport shape (finding D9). The checksum is the only claim it
         # costs: the metadata comparisons must still bite, or a fixture reverting to

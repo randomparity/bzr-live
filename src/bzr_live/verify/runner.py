@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 
 from ..provision.keys import KeyStore
 from ..replay.context import ReplayContext
@@ -194,6 +195,24 @@ class Verifier:
             executed += ran
         return findings, executed
 
+    def _comment_findings(self, bug: ExpectedBug, comments: list,
+                          emails: Mapping[str, str]) -> list[Finding]:
+        """check_comments against the thread the reader was entitled to see.
+
+        With no insider declared, the widest reader is the outsider, who cannot see a
+        private comment by construction. Asserting one against their reply would report
+        the scenario's own configuration as a divergence, and `check_comment_transport`
+        would send the operator to the image's XML-RPC package for a thread the reader
+        was never entitled to read. `check_roles` has already reported the missing role,
+        once for the scenario rather than once per bug.
+        """
+        if self._expected.insider is None:
+            bug = replace(bug, comments=tuple(
+                comment for comment in bug.comments if not comment.private))
+        else:
+            check_comment_transport(bug.alias, bug, comments)
+        return check_comments(bug, comments, emails)
+
     def _one_bug(self, bug: ExpectedBug, bug_id: int, reader: ServerReader,
                  outsider: ServerReader | None, alias_of: Mapping[int, str],
                  edges: frozenset[tuple[str, str, str]],
@@ -220,9 +239,7 @@ class Verifier:
             bug.alias, edges, hops if recursive else {}, reader.links(bug_id),
             reader.links(bug_id, depth=depth) if recursive else [], alias_of)
         executed += 1
-        comments = reader.comments(bug_id)
-        check_comment_transport(bug.alias, bug, comments)
-        findings += check_comments(bug, comments, emails)
+        findings += self._comment_findings(bug, reader.comments(bug_id), emails)
         executed += 1
         if outsider is not None and any(c.private for c in bug.comments):
             findings += check_visibility(bug, outsider.comments(bug_id))
