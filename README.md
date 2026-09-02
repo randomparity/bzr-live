@@ -170,10 +170,10 @@ what it wrote and refuses. That is finding [D6](docs/bzr-findings.md); the scena
 declaring the field rather than dropping it. The script prints the `bzr` revision as its first
 line for this reason — the same scenario passes or fails on that revision alone.
 
-Observed: **48 events replayed in 74.05s**, replay only, excluding provisioning and
+Observed: **47 events replayed in 73.71s**, replay only, excluding provisioning and
 `make up`. Measured on Apple M5 Max, macOS (Darwin 25.6.0, arm64), Docker 29.7.2, with
-`bzr 0.8.3-dev (63abb94e)`. Provisioning the 28 resources and `make up` are each separate
-intervals and are not included.
+`bzr 0.8.3-dev (63abb94e)`, against a fixture reset immediately beforehand. Provisioning the
+28 resources and `make up` are each separate intervals and are not included.
 
 The live tier proves the parts compose; it asserts no semantic invariants about the
 replayed state. That verifier is issue #20, and fault injection plus x86_64 CI wiring is
