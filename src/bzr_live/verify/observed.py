@@ -23,6 +23,30 @@ VIEW_FIELDS = (
     "target_milestone", "flags", "groups", "estimated_time",
 )
 
+# The transport the comment and attachment reads ask for. bzr picks its default from the
+# server's version -- version_to_api_mode maps >= 5.1 to rest (bzr src/client/version.rs)
+# and dispatch_xmlrpc_first then returns rest() without attempting XML-RPC at all
+# (src/client/mod.rs:262-280) -- and this fixture answers 5.2+, so the XML-RPC arm both
+# reads document as their only source is unreachable by default. That is finding D9, and
+# it costs two of this issue's criteria: `attachment list` requests the attachment body
+# only on that arm (src/xmlrpc/resources/attachment.rs:12-27, against exclude_fields=data
+# on the REST arm at src/client/resources/attachment.rs:163), and `comment list` only
+# authenticates the caller there, so REST drops a private comment the insider may read
+# (finding D8 compounding D9).
+#
+# `--api hybrid` is bzr's own documented setting for exactly this: `bzr --help` states
+# that under hybrid "comments and attachments use XML-RPC first to preserve private-data
+# behavior", and that the auto-detected default is "hybrid for 5.0.x, rest for >= 5.1".
+# It configures the client for the data being read; it substitutes no declared value and
+# swaps no command. The reads that do not need it keep the default, because `comment
+# list`, `bug view`, `bug history` and `bug links` are byte-identical across the two
+# transports on a thread with no private comment -- verified live at 63abb94e.
+#
+# The package Task 0 added to the image is still required and not redundant with this:
+# `--api hybrid` makes bzr *attempt* XML-RPC, and libxmlrpc-lite-perl makes the fixture
+# *answer* it. Neither alone reaches the data.
+HYBRID_API = ("--api", "hybrid")
+
 
 class ServerReader:
     """The five bzr read paths a verification needs, as one actor."""
@@ -65,7 +89,7 @@ class ServerReader:
         return self._list(args, bug_id)
 
     def comments(self, bug_id: int) -> list:
-        return self._list(["comment", "list"], bug_id)
+        return self._list([*HYBRID_API, "comment", "list"], bug_id)
 
     def attachments(self, bug_id: int) -> list:
-        return self._list(["attachment", "list"], bug_id)
+        return self._list([*HYBRID_API, "attachment", "list"], bug_id)

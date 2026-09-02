@@ -92,10 +92,11 @@ def check_comment_transport(alias: str, bug: ExpectedBug, comments: list) -> Non
 
     `resolve_ids` has already established that the bug.comment event holds a completed
     record, so the comment is on the server. An insider read that does not carry its
-    marker therefore says the read path cannot reach it. bzr reads a thread over XML-RPC
-    Bug.comments (src/client/resources/comment.rs:62) and falls back to REST, which
-    returns the public comments alone -- so the cause is the image, and reporting it as a
-    divergence would claim a bzr defect against a correctly replayed fixture.
+    marker therefore says the read path cannot reach it. `ServerReader.comments` asks for
+    `--api hybrid`, so bzr does attempt XML-RPC Bug.comments
+    (src/client/resources/comment.rs:62); what remains is the fixture failing to answer it
+    and bzr falling back to REST, which returns the public comments alone. Reporting that
+    as a divergence would claim a bzr defect against a correctly replayed fixture.
     """
     text = "".join(str(entry.get("text", "")) for entry in comments)
     for comment in bug.comments:
@@ -103,12 +104,11 @@ def check_comment_transport(alias: str, bug: ExpectedBug, comments: list) -> Non
             raise VerifyError(
                 f"bug {alias!r}: the fixture cannot serve a full comment thread: the "
                 f"private comment [{comment.marker}] is journalled as written but absent "
-                "from the insider read. bzr reads a thread over XML-RPC Bug.comments and "
-                "falls back to REST, which returns the public comments alone; this image "
-                "has libsoap-lite-perl without XMLRPC::Lite "
+                "from the insider read, which asked for --api hybrid. XML-RPC needs "
+                "XMLRPC::Lite, which libsoap-lite-perl does not bring in "
                 "(Bugzilla/Install/Requirements.pm:303-310 requires them separately). "
-                "Add libxmlrpc-lite-perl to containers/bugzilla/Dockerfile and rerun "
-                "make up")
+                "Check that containers/bugzilla/Dockerfile installs libxmlrpc-lite-perl "
+                "and that the running image was built from it (make up)")
 
 
 class Verifier:
