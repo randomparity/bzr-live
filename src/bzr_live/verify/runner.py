@@ -1,11 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Mapping
 
 from ..provision.keys import KeyStore
 from ..replay.context import ReplayContext
-from ..scenario import CompletedRecord, JournalStore, ValidatedScenario
+from ..scenario import CompletedRecord, JournalStore, Reference, ValidatedScenario
 from . import Finding, VerifyError
+from .checks import (
+    check_attachments,
+    check_comments,
+    check_fields,
+    check_history,
+    check_links,
+    check_visibility,
+)
 from .expected import (
     INSIDER_GROUP,
     ExpectedBug,
@@ -14,7 +23,7 @@ from .expected import (
     link_edges,
     reachable,
 )
-from .observed import LINKS_MAX_NODES
+from .observed import LINKS_MAX_NODES, VIEW_FIELDS, ServerReader
 
 
 def check_reader_keys(expected: ExpectedScenario, keys: KeyStore) -> None:
@@ -126,17 +135,91 @@ class Verifier:
         self._expected = fold(scenario)
 
     def run(self) -> int:
-        # One wrapping site, so every precondition refusal names the scenario path
-        # without threading it through each message.
+        # One wrapping site, so every precondition refusal and every unreadable bug names
+        # the scenario path without threading it through each message.
         try:
             check_reader_keys(self._expected, self._keys)
             resolved = resolve_ids(self._scenario, self._store)
             check_link_bound(self._expected)
+            self._context.adopt(resolved)
+            findings, executed = self._read_all(resolved)
         except VerifyError as exc:
             raise VerifyError(f"{self._scenario_dir}: {exc}") from exc
-        self._context.adopt(resolved)
-        findings = check_roles(self._expected)
+        findings = check_roles(self._expected) + findings
         for finding in findings:
             self._out(f"verify: {self._scenario_dir}: {finding.subject}: "
                       f"{finding.check}: {finding.detail}")
-        return 1 if any(finding.kind == "divergence" for finding in findings) else 0
+        kinds = Counter(finding.kind for finding in findings)
+        self._out(f"verify: {executed} checks, {kinds['divergence']} divergences, "
+                  f"{kinds['unverifiable']} unverifiable")
+        return 1 if kinds["divergence"] else 0
+
+    def _reader(self, alias: str | None) -> ServerReader | None:
+        if alias is None:
+            return None
+        return ServerReader(self._context, Reference("actor", alias))
+
+    def _read_all(self, resolved: Mapping[str, int]) -> tuple[list[Finding], int]:
+        # An id the scenario never named still renders symbolically, so the inverse map
+        # covers only the bugs; attachment identities are located by marker, never by id.
+        alias_of = {value: key.split(":", 1)[1] for key, value in resolved.items()
+                    if key.startswith("bug:")}
+        # The insider sees everything the scenario declares; with no insider declared the
+        # outsider is the widest reader there is, and check_roles has already reported
+        # what that costs. check_reader_keys has proven whichever one this picks has a key.
+        reader = self._reader(self._expected.insider or self._expected.outsider)
+        if reader is None:
+            raise VerifyError("the scenario declares no actor, so nothing can read it "
+                              "back; declare at least one actor resource")
+        # The outsider reader exists only to prove a private comment is withheld. It
+        # costs nothing to build -- the per-bug guard below is what decides whether a
+        # read is issued as it -- so a scenario declaring no private comment never pays.
+        outsider = self._reader(self._expected.outsider)
+        edges = link_edges(self._expected.bugs)
+        findings: list[Finding] = []
+        executed = 0
+        for alias, bug in self._expected.bugs.items():
+            found, ran = self._one_bug(
+                bug, resolved[f"bug:{alias}"], reader, outsider, alias_of, edges[alias],
+                reachable(edges, alias))
+            findings += found
+            executed += ran
+        return findings, executed
+
+    def _one_bug(self, bug: ExpectedBug, bug_id: int, reader: ServerReader,
+                 outsider: ServerReader | None, alias_of: Mapping[int, str],
+                 edges: frozenset[tuple[str, str, str]],
+                 hops: Mapping[str, int]) -> tuple[list[Finding], int]:
+        """The six check families on one bug, and how many of them ran.
+
+        Every skip is decided from the fold, never from a reply, so a family is never
+        dropped on the strength of what the server happened to return -- and the count
+        this returns is the summary's claim that an executed family asserted something.
+        """
+        emails = self._expected.actor_emails
+        observed = reader.bug(bug_id, (*VIEW_FIELDS, *self._expected.custom_field_keys))
+        findings = check_fields(bug, observed, alias_of, emails)
+        executed = 1
+        if bug.history:
+            findings += check_history(bug, reader.history(bug_id), observed, emails)
+            executed += 1
+        # At an eccentricity of 1 or 0 the direct read already covers the neighbourhood.
+        # The skip takes declared_hops with it: a populated one beside an empty walk
+        # reports every node absent.
+        depth = max(hops.values(), default=0)
+        recursive = depth >= 2
+        findings += check_links(
+            bug.alias, edges, hops if recursive else {}, reader.links(bug_id),
+            reader.links(bug_id, depth=depth) if recursive else [], alias_of)
+        executed += 1
+        comments = reader.comments(bug_id)
+        check_comment_transport(bug.alias, bug, comments)
+        findings += check_comments(bug, comments, emails)
+        executed += 1
+        if outsider is not None and any(c.private for c in bug.comments):
+            findings += check_visibility(bug, outsider.comments(bug_id))
+            executed += 1
+        if bug.attachments:
+            findings += check_attachments(bug, reader.attachments(bug_id), emails)
+            executed += 1
+        return findings, executed

@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from bzr_live.provision import KeyStore
@@ -309,14 +310,196 @@ class VerifierPreconditionTest(_JournalFixture):
         self.assertIn(str(FIXTURE), message)
         self.assertIn("'create-checkout-race'", message)
 
-    def test_a_missing_insider_is_unverifiable_and_the_run_still_succeeds(self) -> None:
-        self.keys.store_actor_key("triager", "SECRET-KEY-triager")
+    def test_a_missing_outsider_reports_the_visibility_check_unverifiable(self) -> None:
+        # The fixture declares no insider, so the Verifier-level case below covers that
+        # arm; this pins the other one, whose reason is what the visibility check needs.
+        findings = check_roles(replace(self.expected, outsider=None))
+        outsider = [f for f in findings if f.subject == "outsider"]
+        self.assertEqual(len(outsider), 1, findings)
+        self.assertEqual(outsider[0].kind, "unverifiable")
+        self.assertEqual(outsider[0].check, "roles")
+        self.assertIn("private comment is withheld", outsider[0].detail)
+
+
+# The bug the replay fixture's journal resolves `bug:checkout-race` to.
+BUG_ID = 41
+
+# `bug view 41 --fields <VIEW_FIELDS + cf_risk>` as a fixture agreeing with
+# tests/fixtures/replay-scenario would answer it. Composed from the fold rather than read
+# live: this scenario is the unit suite's, and nothing replays it into the fixture. The
+# three shapes that are not the scenario's own text -- component and version as arrays,
+# estimated_time as an f64 -- follow bzr's serializer at 63abb94e, as
+# tests/test_verify_checks.py records for the live reply it does transcribe.
+BUG_VIEW_41 = {
+    "id": BUG_ID,
+    "summary": "Checkout races when two carts submit",
+    "status": "CONFIRMED",
+    "resolution": "",
+    "dupe_of": None,
+    "product": "checkout",
+    "component": ["cart"],
+    "version": ["v1"],
+    "assigned_to": "triager@example.test",
+    "keywords": ["regression"],
+    "blocks": [],
+    "depends_on": [],
+    "cc": ["reporter@example.test"],
+    "target_milestone": "m1",
+    "flags": [{"name": "review", "status": "?",
+               "requestee": "reporter@example.test"}],
+    "groups": [],
+    "estimated_time": 4.0,
+    "cf_risk": "high",
+}
+
+HISTORY_41 = [
+    {"when": "2026-09-02T10:00:01Z", "who": "triager@example.test", "field": "status",
+     "old_value": "UNCONFIRMED", "new_value": "CONFIRMED", "comment_id": None},
+    {"when": "2026-09-02T10:00:01Z", "who": "triager@example.test",
+     "field": "target_milestone", "old_value": "---", "new_value": "m1",
+     "comment_id": None},
+    {"when": "2026-09-02T10:00:02Z", "who": "triager@example.test", "field": "cf_risk",
+     "old_value": "---", "new_value": "high", "comment_id": None},
+    {"when": "2026-09-02T10:00:03Z", "who": "triager@example.test",
+     "field": "flagtypes.name", "old_value": "",
+     "new_value": "review?(reporter@example.test)", "comment_id": None},
+    {"when": "2026-09-02T10:00:05Z", "who": "triager@example.test",
+     "field": "attachments.isobsolete", "old_value": "0", "new_value": "1",
+     "comment_id": None},
+]
+
+COMMENTS_41 = [
+    {"id": 90, "bug_id": BUG_ID,
+     "text": "Two concurrent submissions leave the cart double-charged.",
+     "creator": "reporter@example.test", "creation_time": "2026-09-02T10:00:00Z",
+     "count": 0, "is_private": False, "attachment_id": None},
+    {"id": 91, "bug_id": BUG_ID,
+     "text": "Confirmed on staging.\n\n[bzr-live:replay-demo:comment-triage]",
+     "creator": "triager@example.test", "creation_time": "2026-09-02T10:00:04Z",
+     "count": 1, "is_private": False, "attachment_id": None},
+    {"id": 92, "bug_id": BUG_ID,
+     "text": "Wrote up the repro.\n\n[bzr-live:replay-demo:worktime-triage]",
+     "creator": "triager@example.test", "creation_time": "2026-09-02T10:00:06Z",
+     "count": 2, "is_private": False, "attachment_id": None},
+]
+
+# base64 of tests/fixtures/replay-scenario/assets/notes.txt, which is what the server
+# would hold: the loader derives the declared sha256 from those same bytes.
+NOTES_DATA = ("VHJpYWdlIG5vdGVzIGZvciB0aGUgY2hlY2tvdXQgcmFjZS4KClR3byBjb25jdXJyZW50IH"
+              "N1Ym1pc3Npb25zIGxlYXZlIHRoZSBjYXJ0IGRvdWJsZS1jaGFyZ2VkLgo=")
+
+ATTACHMENTS_41 = [
+    {"id": 7, "bug_id": BUG_ID, "file_name": "notes.txt",
+     "summary": "Superseded triage notes [bzr-live:replay-demo:attach-notes] "
+                "sha256=1c3de69e1fd22119333e3a6d48da405836f124529f998519345e44c3edb"
+                "564b6",
+     "content_type": "text/plain", "creator": "reporter@example.test",
+     "creation_time": "2026-09-02T10:00:05Z",
+     "last_change_time": "2026-09-02T10:00:05Z", "size": 94, "is_obsolete": True,
+     "is_private": False, "is_patch": False, "flags": [], "data": NOTES_DATA},
+]
+
+# The reply order Verifier._one_bug issues for this fixture's single bug: the three
+# unconditional families, then history (the fold carries five changes) and attachments
+# (it carries one). The recursive links read is skipped -- the bug has no edges, so its
+# eccentricity is 0 -- and so is the outsider read, the scenario declaring no private
+# comment. Five families, five spawns.
+AGREEING = [
+    (0, BUG_VIEW_41, None),
+    (0, HISTORY_41, None),
+    (0, [], None),
+    (0, COMMENTS_41, None),
+    (0, ATTACHMENTS_41, None),
+]
+CHECKS_RUN = 5
+
+
+class VerifierRunTest(_JournalFixture):
+    """Verifier.run over the replay fixture, driven by canned bzr replies."""
+
+    KEY = "SECRET-KEY-triager"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.keys.store_actor_key("triager", self.KEY)
         self._journal_every_event()
-        out: list[str] = []
-        self.assertEqual(self._verifier(out).run(), 0)
-        self.assertEqual(len(out), 1)
-        self.assertIn(str(FIXTURE), out[0])
-        self.assertIn("insider", out[0])
+        self.out: list[str] = []
+
+    def _run(self, replies) -> tuple[int, _FakeRun]:
+        run = _FakeRun(replies)
+        context = ReplayContext(
+            self.scenario, self.keys, bzr_path="bzr",
+            base_url="http://127.0.0.1:8080/", workspace=self.workspace, run=run)
+        verifier = Verifier(self.scenario, context, self.store, str(FIXTURE), self.keys,
+                            out=self.out.append)
+        return verifier.run(), run
+
+    @staticmethod
+    def _swap(replies, index, payload):
+        return [*replies[:index], (0, payload, None), *replies[index + 1:]]
+
+    def test_an_agreeing_fixture_reports_no_divergence(self) -> None:
+        code, run = self._run(AGREEING)
+        self.assertEqual(code, 0)
+        # The exact count, not a pattern: a pattern passes for an implementation that
+        # skipped the bug entirely, which is the failure the summary exists to expose.
+        # Three unverifiable: the missing insider role, remaining_hours, and worktime.
+        self.assertEqual(
+            self.out[-1], f"verify: {CHECKS_RUN} checks, 0 divergences, 3 unverifiable")
+        # One spawn per executed family, and the two skipped families cost none.
+        self.assertEqual(len(run.calls), CHECKS_RUN)
+        self.assertNotIn("--recursive", " ".join(sum((c["argv"] for c in run.calls), [])))
+
+    def test_the_conditional_reads_are_decided_by_the_fold(self) -> None:
+        _code, run = self._run(AGREEING)
+        issued = [" ".join(call["argv"][8:]) for call in run.calls]
+        self.assertEqual(len(issued), CHECKS_RUN)
+        self.assertTrue(issued[0].startswith("bug view"), issued)
+        self.assertEqual(issued[1], f"bug history -- {BUG_ID}")
+        self.assertEqual(issued[2], f"bug links -- {BUG_ID}")
+        # Both reads that carry private data ask for the transport that can serve it.
+        self.assertEqual(issued[3], f"--api hybrid comment list -- {BUG_ID}")
+        self.assertEqual(issued[4], f"--api hybrid attachment list -- {BUG_ID}")
+
+    def test_one_divergence_prints_one_line_and_returns_one(self) -> None:
+        replies = self._swap(AGREEING, 0,
+                             dict(BUG_VIEW_41, summary="Something else"))
+        code, _run = self._run(replies)
+        self.assertEqual(code, 1)
+        # The three unverifiable claims print alongside it, so the divergence is found
+        # by its check name rather than by an index that would move with them.
+        lines = [line for line in self.out if ": summary: " in line]
+        self.assertEqual(
+            lines,
+            [f"verify: {FIXTURE}: checkout-race: summary: declared Checkout races when "
+             "two carts submit, observed Something else"])
+        self.assertEqual(
+            self.out[-1], f"verify: {CHECKS_RUN} checks, 1 divergences, 3 unverifiable")
+
+    def test_an_unverifiable_claim_alone_still_returns_zero(self) -> None:
+        # The default-transport attachment shape (finding D9): the checksum becomes
+        # unverifiable, nothing diverges, and the run still succeeds.
+        stripped = {key: value for key, value in ATTACHMENTS_41[0].items()
+                    if key != "data"}
+        code, _run = self._run(self._swap(AGREEING, 4, [stripped]))
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.out[-1], f"verify: {CHECKS_RUN} checks, 0 divergences, 4 unverifiable")
+        self.assertTrue(
+            any("the reply carries no data" in line for line in self.out), self.out)
+
+    def test_a_missing_insider_is_unverifiable_and_the_run_still_succeeds(self) -> None:
+        self.assertIsNone(self.expected.insider)
+        code, _run = self._run(AGREEING)
+        self.assertEqual(code, 0)
+        self.assertIn("insider", self.out[0])
+        self.assertIn(str(FIXTURE), self.out[0])
+
+    def test_no_invocation_carries_an_api_key_in_its_argv(self) -> None:
+        _code, run = self._run(AGREEING)
+        for call in run.calls:
+            self.assertNotIn(self.KEY, " ".join(call["argv"]))
+            self.assertEqual(call["env"][KEY_ENV], self.KEY)
 
 
 if __name__ == "__main__":
