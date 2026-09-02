@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Operator-run live proof for issue #6: provisions and replays the replay fixture,
+# then asserts the three facts the unit suite cannot reach (an honest create with no
+# op_sys/rep_platform, the alias round-trip, and server-side alias uniqueness), and
+# probes docs/bzr-findings.md's D1 against the running server. Requires: make up
+# already healthy (start from CONFIRM_RESET=1 make reset for a fresh fixture --
+# Bugzilla reads Task 0's checksetup answers only at install), and BZR_LIVE_BZR
+# pointing at a bzr binary. This script never edits docs/bzr-findings.md; the
+# operator reads its "findings probe:" lines and transcribes any promotion by hand.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+cd "$ROOT"  # uv resolves the project from cwd
+BZR=${BZR_LIVE_BZR:?set BZR_LIVE_BZR to the bzr binary to validate with}
+SCENARIO="$ROOT/tests/fixtures/replay-scenario"
+STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-replay-smoke.XXXXXX")
+trap 'rm -rf "$STATE"' EXIT
+chmod 700 "$STATE"
+
+# The fixture's port lives in the checkout's .env; fall back to it when the shell
+# does not export BZ_PORT, so a customized port still reaches every host-side call.
+if [[ -z ${BZ_PORT:-} && -f "$ROOT/.env" ]]; then
+  BZ_PORT=$(grep -E '^BZ_PORT=' "$ROOT/.env" | tail -1 | cut -d= -f2)
+fi
+BASE_URL="http://127.0.0.1:${BZ_PORT:-8080}/"
+if [[ -z ${BZ_ADMIN_EMAIL:-} && -f "$ROOT/.env" ]]; then
+  BZ_ADMIN_EMAIL=$(grep -E '^BZ_ADMIN_EMAIL=' "$ROOT/.env" | tail -1 | cut -d= -f2)
+fi
+ADMIN_EMAIL=${BZ_ADMIN_EMAIL:-admin@bugzilla.test}
+
+echo "replay smoke: provisioning scenario resources"
+uv run --python 3.11 python -m bzr_live.provision "$SCENARIO" \
+  --state-root "$STATE/state" --bzr "$BZR" --project-root "$ROOT" \
+  --base-url "$BASE_URL"
+
+echo "replay smoke: replaying events (expect: the first bug.create to succeed with no"
+echo "op_sys/rep_platform declared, proving Task 0's checksetup defaults)"
+uv run --python 3.11 python -m bzr_live.replay replay "$SCENARIO" \
+  --state-root "$STATE/state" --bzr "$BZR" --base-url "$BASE_URL"
+
+# Read the expected server_alias and scenario name out of the loaded scenario rather
+# than recomputing the digest or pasting a literal -- the fixture's digest has
+# changed during this build and could again.
+read -r ALIAS SCENARIO_NAME <<<"$(uv run --python 3.11 python -c "
+from bzr_live.scenario import load_scenario
+s = load_scenario('$SCENARIO')
+create = next(e for e in s.events if e.action == 'bug.create')
+print(create.expected_postcondition['values']['server_alias'], s.name)
+")"
+
+JOURNAL_RECORD="$STATE/state/journal/$SCENARIO_NAME/create-checkout-race.000001.json"
+CREATE_BUG_ID=$(uv run --python 3.11 python -c "
+import json
+with open('$JOURNAL_RECORD') as f:
+    record = json.load(f)
+print(record['resolved_ids']['bug:checkout-race'])
+")
+
+TRIAGER_KEY=$(cat "$STATE/state/actor-keys/triager.key")
+REPORTER_KEY=$(cat "$STATE/state/actor-keys/reporter.key")
+
+echo "replay smoke: alias round-trip (finding D4)"
+view=$(BZR_LIVE_API_KEY=$TRIAGER_KEY "$BZR" --json \
+  --server-url "$BASE_URL" \
+  --server-api-key-env BZR_LIVE_API_KEY \
+  --server-email "$ADMIN_EMAIL" \
+  bug view -- "$ALIAS")
+VIEWED_ID=$(printf '%s\n' "$view" | uv run --python 3.11 python -c \
+  "import json, sys; print(json.load(sys.stdin)['id'])")
+if [[ "$VIEWED_ID" != "$CREATE_BUG_ID" ]]; then
+  echo "smoke failed: alias $ALIAS resolved to bug $VIEWED_ID, not the created bug $CREATE_BUG_ID" >&2
+  echo "$view" >&2
+  exit 1
+fi
+echo "replay smoke: alias $ALIAS round-trips to bug $CREATE_BUG_ID"
+
+echo "replay smoke: alias uniqueness (finding D4)"
+DUP_JSON="$STATE/duplicate-create.json"
+cat > "$DUP_JSON" <<JSON
+{"alias": "$ALIAS", "product": "checkout", "component": "cart",
+ "summary": "Duplicate alias probe",
+ "description": "Probing Bugzilla's alias uniqueness constraint.", "version": "v1"}
+JSON
+set +e
+dup_out=$(BZR_LIVE_API_KEY=$REPORTER_KEY "$BZR" --json \
+  --server-url "$BASE_URL" \
+  --server-api-key-env BZR_LIVE_API_KEY \
+  --server-email "$ADMIN_EMAIL" \
+  bug create "--from-json=$DUP_JSON" 2>&1)
+dup_status=$?
+set -e
+if [[ $dup_status -eq 0 ]]; then
+  echo "smoke failed: a second bug.create declaring alias $ALIAS succeeded" >&2
+  echo "$dup_out" >&2
+  exit 1
+fi
+echo "replay smoke: a second create declaring alias $ALIAS failed as expected (exit $dup_status)"
+
+echo "replay smoke: attachment summary TINYTEXT ceiling against the running server"
+SUMMARY_256=$(printf 'x%.0s' {1..256})
+set +e
+attach_out=$(BZR_LIVE_API_KEY=$TRIAGER_KEY "$BZR" --json \
+  --server-url "$BASE_URL" \
+  --server-api-key-env BZR_LIVE_API_KEY \
+  --server-email "$ADMIN_EMAIL" \
+  attachment upload "--summary=$SUMMARY_256" --content-type=text/plain \
+  -- "$CREATE_BUG_ID" "$SCENARIO/assets/notes.txt" 2>&1)
+attach_status=$?
+set -e
+echo "tinytext probe: 256-byte attachment summary exit $attach_status: $attach_out"
+
+echo "replay smoke: findings probes (this script writes nothing to"
+echo "docs/bzr-findings.md -- transcribe any promotion from *read* to *observed* by hand)"
+set +e
+flag_out=$(BZR_LIVE_API_KEY=$TRIAGER_KEY "$BZR" --json \
+  --server-url "$BASE_URL" \
+  --server-api-key-env BZR_LIVE_API_KEY \
+  --server-email "$ADMIN_EMAIL" \
+  bug update "--flag=needs-info?" -- "$CREATE_BUG_ID" 2>&1)
+flag_status=$?
+set -e
+echo "findings probe: D1 hyphenated flag type (--flag=needs-info?) exit $flag_status: $flag_out"
+
+echo "replay smoke: OK"

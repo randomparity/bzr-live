@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -1014,6 +1016,28 @@ class EngineTest(unittest.TestCase):
         # ... and reaches REST only in the JSON body, never the query string.
         self.assertEqual(opener.requests[0]["body"]["api_key"], "SECRET-KEY-triager")
         self.assertNotIn("SECRET-KEY", opener.requests[0]["url"])
+
+
+class MainTest(unittest.TestCase):
+    def test_missing_actor_key_exits_one_with_a_replay_failed_message(self) -> None:
+        from bzr_live.replay import __main__ as cli
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            code = cli.main([
+                "replay", str(FIXTURE), "--state-root", str(root / "state")])
+        self.assertEqual(code, 1)
+        self.assertTrue(errors.getvalue().startswith("replay failed:"))
+        self.assertIn("no API key for actor", errors.getvalue())
+
+    def test_the_journal_lands_under_the_scenario_name(self) -> None:
+        from bzr_live.replay import __main__ as cli
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        with contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["replay", str(FIXTURE), "--state-root", str(root / "state")])
+        self.assertTrue((root / "state" / "journal" / "replay-demo").is_dir())
 
 
 if __name__ == "__main__":

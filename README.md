@@ -93,3 +93,22 @@ disposable local fixture state; deleting it re-mints keys on the next run.
 
 `tests/provision_smoke.sh` runs the live two-run proof against a fresh fixture
 (`BZR_LIVE_BZR=<bzr binary> bash tests/provision_smoke.sh`).
+
+Scenario replay
+----------------
+
+Replay a validated scenario's events against actors provisioned above, journaling
+every attempt for safe resume:
+
+    uv run python -m bzr_live.replay replay tests/fixtures/replay-scenario \
+      --state-root ./state --bzr /path/to/bzr
+
+`replay` requires the fixture at its pristine baseline (no journal record and no
+server-side alias collision) and the scenario's actors already provisioned with API
+keys under the same state root; `resume` continues a run from its journal after an
+interruption, refusing if the scenario or fixture changed underneath it. Both exit 1
+with a `replay failed: ...` message on stderr naming the precondition or `bzr`
+limitation that stopped them.
+
+`tests/replay_smoke.sh` runs the live proof against a fresh fixture
+(`BZR_LIVE_BZR=<bzr binary> bash tests/replay_smoke.sh`).
