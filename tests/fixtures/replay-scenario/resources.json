@@ -1,0 +1,16 @@
+{"format_version": 1, "resources": [
+  {"kind": "actor", "name": "triager", "email": "triager@example.test",
+   "display_name": "Tessa Triager"},
+  {"kind": "actor", "name": "reporter", "email": "reporter@example.test",
+   "display_name": "Robin Reporter"},
+  {"kind": "product", "name": "checkout", "description": "Checkout product"},
+  {"kind": "component", "name": "cart", "product": {"ref": "product:checkout"},
+   "description": "Cart component", "default_assignee": {"ref": "actor:triager"}},
+  {"kind": "version", "name": "v1", "product": {"ref": "product:checkout"}},
+  {"kind": "milestone", "name": "m1", "product": {"ref": "product:checkout"}},
+  {"kind": "keyword", "name": "regression", "description": "Regression keyword"},
+  {"kind": "custom-field", "name": "risk", "field_type": "single-select",
+   "values": ["low", "high"]},
+  {"kind": "flag-type", "name": "review", "description": "Review flag", "target": "bug",
+   "products": [{"ref": "product:checkout"}], "components": [{"ref": "component:cart"}]}
+]}

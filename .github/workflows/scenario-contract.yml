@@ -13,6 +13,9 @@ on:
       - docs/adr/0003-scenario-contract-ci.md
       - docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md
       - docs/workflow/plans/2026-08-29-versioned-scenario-contract.md
+      - docs/adr/0006-actor-scoped-event-replay.md
+      - docs/workflow/specs/2026-09-01-replay-actor-scoped-events-design.md
+      - docs/workflow/plans/2026-09-01-replay-actor-scoped-events.md
   push:
     branches: [main]
     paths:
@@ -26,6 +29,9 @@ on:
       - docs/adr/0003-scenario-contract-ci.md
       - docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md
       - docs/workflow/plans/2026-08-29-versioned-scenario-contract.md
+      - docs/adr/0006-actor-scoped-event-replay.md
+      - docs/workflow/specs/2026-09-01-replay-actor-scoped-events-design.md
+      - docs/workflow/plans/2026-09-01-replay-actor-scoped-events.md
 
 permissions:
   contents: read

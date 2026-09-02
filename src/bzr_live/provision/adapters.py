@@ -41,6 +41,12 @@ def compose_project_name(root: str) -> str:
 
 _KEY_ENV = "BZR_LIVE_API_KEY"
 
+# Bugzilla per-resource fault codes. 51/105/106 are provisioning's not-found set; a bug
+# lookup answers 100 (invalid alias) or 101 (invalid ID) when the bug is not there, and 102
+# when the caller may not see it, which is deliberately NOT absence — see ADR 0006.
+_NOT_FOUND_CODES = frozenset({51, 105, 106})
+BUG_ABSENT_CODES = frozenset({100, 101})
+
 # docker compose's messages when the exec target does not exist. Matching them maps
 # a wrong --project-root to an actionable message instead of a generic failure.
 _NO_CONTAINER_MARKERS = ("is not running", "no such service", "no container found")
@@ -100,13 +106,16 @@ class BzrClient:
                 f"cannot run bzr binary {self._bzr!r} ({exc}); point --bzr at a "
                 "bzr executable") from None
 
-    def read(self, args: list[str], positionals: list[str] | None = None):
-        """A read exiting 2, or exiting 4 with a not-found API code, is absent.
+    def read(self, args: list[str], positionals: list[str] | None = None, *,
+             absent_codes: frozenset[int] = _NOT_FOUND_CODES):
+        """A read exiting 2, or exiting 4 with an `absent_codes` API code, is absent.
 
         Live-verified: a missing object is a server-side API error (exit 4)
         whose structured code rides stderr's last line. 51 (object), 105
         (unknown component), and 106 (unknown/inaccessible product) are the
-        not-found codes at the pinned Bugzilla (WebService/Constants.pm).
+        not-found codes at the pinned Bugzilla (WebService/Constants.pm), and
+        stay the default so provisioning is unchanged. A bug lookup passes
+        BUG_ABSENT_CODES instead.
         """
         done = self._invoke(args, positionals)
         if done.returncode == 0:
@@ -114,7 +123,7 @@ class BzrClient:
         if done.returncode == 2:
             return None
         stderr = done.stderr.decode("utf-8", "replace")
-        if done.returncode == 4 and _api_error_code(stderr) in (51, 105, 106):
+        if done.returncode == 4 and _api_error_code(stderr) in absent_codes:
             return None
         raise ProvisionError(
             f"bzr boundary failure (exit {done.returncode}) running "
