@@ -185,7 +185,10 @@ class SupportedPayloadTest(unittest.TestCase):
         self.assertIn("finding G9", str(caught.exception))
 
     def test_create_accepts_a_supported_payload(self) -> None:
-        HANDLERS["bug.create"].check_supported(self._event("bug.create", version="1.0"))
+        # The loader always sets `description`, defaulting to "" (loader.py:558), so a
+        # stand-in create carries one; `build` indexes it unconditionally too.
+        HANDLERS["bug.create"].check_supported(
+            self._event("bug.create", version="1.0", description="a race on checkout"))
 
     def test_update_rejects_groups(self) -> None:
         event = self._event("bug.update", groups=())
@@ -282,6 +285,9 @@ class SupportedPayloadTest(unittest.TestCase):
     def test_every_append_action_refuses_an_embedded_marker(self) -> None:
         embedded = "text with [bzr-live:demo:other] in it"
         for action, values in (
+            # bug.create is not an append, but Bugzilla stores its description as
+            # comment 0 and `bzr comment list` returns it, so it feeds the same search.
+            ("bug.create", {"version": "1.0", "description": embedded}),
             ("bug.comment", {"body": embedded, "private": False}),
             ("bug.worktime", {"comment": embedded, "hours": "1.0"}),
             ("bug.attach", {"description": embedded, "asset_sha256": "a" * 64}),
@@ -537,6 +543,19 @@ class ReconcileTest(unittest.TestCase):
         run = _FakeRun([(4, None, 100)])
         result = HANDLERS["bug.create"].reconcile(self._context(run), self._create_event())
         self.assertEqual(result.next_action, "retry")
+
+    def test_create_reconcile_stops_on_an_unusable_id(self) -> None:
+        # The fourth adopted-id site. `isinstance(True, int)` holds and `True > 0`, so a
+        # bool passed the old guard, reached _settle outside any try, and died in
+        # CompletedRecord -- wedging the event, since the in-flight record survives and
+        # every later resume re-enters the same path.
+        for reply in ({"id": True}, {"id": 0}, {"id": -1}):
+            with self.subTest(reply=reply):
+                run = _FakeRun([(0, reply, None)])
+                result = HANDLERS["bug.create"].reconcile(
+                    self._context(run), self._create_event())
+                self.assertEqual(result.next_action, "stop")
+                self.assertEqual(result.resolved_ids, {})
 
     def test_create_raises_when_the_bug_is_access_denied(self) -> None:
         run = _FakeRun([(4, None, 102)])     # not absence: the actor may not see it

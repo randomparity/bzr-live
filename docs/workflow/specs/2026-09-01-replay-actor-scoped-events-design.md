@@ -155,7 +155,7 @@ as refused is supported.
 
 | Action | Sent as | Refused, and whose limitation the message names |
 |---|---|---|
-| `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding exactly what the scenario declared: `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on` | `estimated_hours` / `remaining_hours` → bzr's create JSON has no such field, though Bugzilla accepts both ([G1]); `custom_fields` → bzr excludes `cf_*` from create by design ([G4]); `duplicate_of` → **Bugzilla's** own `Bug.create` has no `dupe_of`, so this one is not bzr's; null `version` → bzr silently substitutes `"unspecified"`, a version this fixture's products do not declare ([G9]) |
+| `bug.create` | `bzr bug create --from-json <tmpfile>`, the file holding exactly what the scenario declared: `alias` (the server alias), `product`, `component`, `summary`, `description`, `version`, `target_milestone`, `assignee`, `cc`, `keywords`, `groups`, `blocks`, `depends_on` | `estimated_hours` / `remaining_hours` → bzr's create JSON has no such field, though Bugzilla accepts both ([G1]); `custom_fields` → bzr excludes `cf_*` from create by design ([G4]); a `description` containing the literal `[bzr-live:` → **this engine's** own append marker, and Bugzilla stores the description as comment 0, which `bzr comment list` returns, so a declared token there could satisfy an append's reconciliation; `duplicate_of` → **Bugzilla's** own `Bug.create` has no `dupe_of`, so this one is not bzr's; null `version` → bzr silently substitutes `"unspecified"`, a version this fixture's products do not declare ([G9]) |
 | `bug.update` | `bzr bug update <id>` with `--summary`, `--status`, `--resolution`, `--assignee` or `--reset-assigned-to`, `--dupe-of`, `--target-milestone`, `--estimated-time`, `--remaining-time`, and `--cc-add/-remove`, `--keywords-add/-remove`, `--blocks-add/-remove`, `--depends-on-add/-remove` computed as deltas against `bzr bug view` | `groups` → `bzr bug view` does not return `groups`, so no delta can be computed and no result confirmed ([D3]); `version` → bzr's `bug update` has no version flag, though Bugzilla accepts one ([G2]); null `milestone` → bzr offers `--reset-assigned-to` but no milestone reset ([G3]); null `resolution` → **Bugzilla** clears it on transition to an open status, so declare the status change instead; null `duplicate_of` → **Bugzilla** clears a duplicate through a status transition (`clear_resolution` calls `_clear_dup_id` and throws unless the bug is already open), and `Bug.update` types `dupe_of` as `int` with no null form, so declare that status change instead; `duplicate_of` with `status` **or** `resolution` → both flags carry `conflicts_with = "dupe_of"`, deliberately ([G5]) |
 | `bug.comment` | `bzr comment add <id> --body-file=<tmpfile> [--private]` | declared text containing the literal `[bzr-live:` → **this engine's** own append marker; reconciliation could not tell a declared token from one it wrote, so the event is refused before it is sent |
 | `bug.attach` | `bzr attachment upload <id> <file> --summary=<description + marker + checksum> --content-type=<type> [--private]` | rendered summary longer than 255 **bytes** when UTF-8 encoded → **Bugzilla's** `attachments.description` is `TINYTEXT` (`Bugzilla/DB/Schema.pm:505`), not a bzr gap → "shorten the attachment description"; declared text containing the literal `[bzr-live:` → **this engine's** own append marker; reconciliation could not tell a declared token from one it wrote, so the event is refused before it is sent |
@@ -212,11 +212,15 @@ description's real budget is around 165.
 
 "Fail at the server" was the expectation; the live smoke's first run showed otherwise, and
 the correction makes the check more important rather than less. A 256-byte summary is
-**accepted** (exit 0) and stored at exactly 255 bytes — Bugzilla truncates above the
-database, which reports success, with the column `tinytext` and `sql_mode`
-`STRICT_TRANS_TABLES`. Since the reconciliation marker lives in that summary, an
-over-length summary would silently lose the handle append-class reconciliation matches on,
-and the run would look like it worked. The refusal is what prevents that.
+**accepted** (exit 0) and stored at exactly 255 bytes. Nothing above the column enforces
+the length: `attachments.description` is `TINYTEXT`, Bugzilla applies no length validator
+to it (`Bugzilla/Attachment.pm:578-584` trims and rejects only an empty value), and
+Bugzilla *removes* `STRICT_TRANS_TABLES`, `STRICT_ALL_TABLES` and `TRADITIONAL` from the
+session `sql_mode` (`Bugzilla/DB/MariaDB.pm:87-100` — "Disable ANSI and strict modes, else
+Bugzilla will crash"). So MariaDB accepts the write and silently shortens it. Since the
+reconciliation marker lives in that summary, an over-length summary would silently lose the
+handle append-class reconciliation matches on, and the run would look like it worked. The
+refusal is what prevents that, on both writers of the column.
 
 Deltas are computed against a fresh `bzr bug view` read taken immediately before the update,
 because Bugzilla's list fields are edited by add/remove and not by assignment. The engine
@@ -238,8 +242,14 @@ by comparing the declared value.
 - `bug.worktime` comment: `<declared comment>` + `"\n\n[" + marker + "]"`.
 - `bug.attach` summary: `<declared description> [<marker>] sha256=<asset_sha256>`.
 
-The marker is the loader's, so it is already namespaced by scenario and event name and
-cannot collide with another event's marker or with anything a pristine fixture holds.
+The marker is the loader's, so it is already namespaced by scenario and event name: two
+engine-written markers cannot collide, and neither can one collide with what a pristine
+fixture holds. Namespacing does not stop *declared* text from reproducing a marker,
+though — so every field whose text reaches the corpus the reconcilers search is refused at
+`check_supported` when it contains the sentinel `[bzr-live:`. That is the four append
+writers plus `bug.create`'s description, which Bugzilla stores as comment 0 and
+`bzr comment list` returns. The no-collision guarantee rests on those refusals, not on
+namespacing alone.
 
 Because the rendered attachment summary is not the declared description, `bug.attach`
 reconciles by marker containment, not equality.

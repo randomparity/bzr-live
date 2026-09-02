@@ -19,7 +19,9 @@ from ..scenario.journal import _ATTEMPT_FILE
 from .actions import AMBIGUOUS_HINT, HANDLERS, Invocation, Reconciliation
 from .context import ReplayContext, ReplayError
 
-_RECONCILED_EXIT = -1     # the invocation's status was never observed (ADR 0006)
+# Not "the invocation failed": ADR 0006 routes an exit-0 reply carrying no usable
+# identifier through reconciliation too, and that status was observed and was 0.
+_RECONCILED_EXIT = -1     # the invocation's status did not decide this record
 
 _Record = InFlightRecord | CompletedRecord | None
 

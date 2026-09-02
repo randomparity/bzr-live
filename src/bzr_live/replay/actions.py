@@ -283,6 +283,12 @@ class BugCreateHandler(ActionHandler):
                 event, "version",
                 "bzr silently substitutes the version 'unspecified', which this "
                 "fixture's products do not declare (finding G9)")
+        # Not an append, but its text lands in the corpus the append reconcilers search:
+        # Bugzilla stores the description as comment 0 (Bugzilla/Bug.pm:828 inserts it
+        # through Comment->insert_create_data; sub comments numbers from 0), and
+        # `bzr comment list` filters nothing out. A create description carrying an
+        # append's marker would satisfy that append's reconciliation.
+        _reject_embedded_marker(event, "description", values["description"])
 
     def build(self, context: ReplayContext, event: PlannedEvent) -> Invocation:
         values = event.expected_postcondition["values"]
@@ -329,7 +335,7 @@ class BugCreateHandler(ActionHandler):
                 "retry", payload, {}, f"event {event.name!r} did not commit")
         bug = _bug_object(payload)
         bug_id = bug.get("id") if bug is not None else None
-        if not isinstance(bug_id, int) or bug_id <= 0:
+        if not _usable_id(bug_id):
             return Reconciliation(
                 "stop", payload, {},
                 f"event {event.name!r}: bzr bug view returned no usable bug id; "
