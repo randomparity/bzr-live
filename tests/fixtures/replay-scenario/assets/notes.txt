@@ -1,0 +1,3 @@
+Triage notes for the checkout race.
+
+Two concurrent submissions leave the cart double-charged.

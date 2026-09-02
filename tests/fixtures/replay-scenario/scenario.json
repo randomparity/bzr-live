@@ -1,0 +1,6 @@
+{"format_version": 1, "name": "replay-demo",
+ "description": "Replay fixture: one bug touched by every supported action",
+ "assets": [
+   {"name": "notes", "path": "assets/notes.txt",
+    "sha256": "1c3de69e1fd22119333e3a6d48da405836f124529f998519345e44c3edb564b6"}
+ ]}
