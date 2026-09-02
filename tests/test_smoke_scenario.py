@@ -1,9 +1,28 @@
 """Offline invariants over the committed smoke scenario (issue #19).
 
-These assertions run with no server and no Docker. Three of them are guards: they
-encode constraints whose violation is silent on a live Bugzilla, so no amount of
-running the scenario would surface them. See
-docs/workflow/specs/2026-09-01-smoke-scenario-design.md, "Proof".
+These assertions run with no server and no Docker. Three are guards, and what each
+one buys differs -- the honest accounting, because an overstated rationale is how a
+test keeps being trusted for a reason it does not earn:
+
+- `test_private_comment_author_is_an_insider` moves a *loud* failure earlier.
+  Bugzilla's `Comment.pm::_check_isprivate` raises `user_not_insider` for a
+  non-insider, so a live replay would abort with an error; this catches it at
+  `make test` instead, without a container.
+- `test_attachment_summaries_fit` duplicates a precondition the engine already
+  enforces: `BugAttachHandler.check_supported` refuses an over-length rendered
+  summary, and `ReplayEngine._check_local_preconditions` runs `check_supported`
+  over every event before any mutation. Its value is the same shift -- offline
+  rather than mid-replay -- not extra coverage. It covers `bug.attach` only;
+  `AttachmentUpdateHandler` carries the same ceiling for `attachment.update`.
+- `test_creates_declaring_assignee_or_edges_are_privileged` is the only one aimed
+  at a *silent* server-side substitution (`Bugzilla/Bug.pm:1449-1454` and
+  `:1707-1709`). On the pinned image that substitution is currently unreachable:
+  stock `editbugs` carries `userregexp => '.*'` (`Bugzilla/Install.pm:134-138`), so
+  every account is granted it automatically. The assertion tests the *declared*
+  group set, which is the property the scenario controls, and it would bite if that
+  regexp were ever cleared.
+
+See docs/workflow/specs/2026-09-01-smoke-scenario-design.md, "Proof".
 """
 
 from __future__ import annotations
@@ -19,6 +38,11 @@ from bzr_live.replay.actions import (
 from bzr_live.scenario import load_scenario
 
 SCENARIO = Path(__file__).resolve().parent.parent / "scenarios" / "smoke"
+
+# Pinned so that editing the fixture is a deliberate two-file change. Every edit
+# changes this digest and invalidates any journal written against the old content
+# (ADR 0006), which is the consequence ADR 0007 records and this constant enforces.
+EXPECTED_DIGEST = "a222f8f884461f57fe6d3a6d96ede363f854266ddfcdfde3f736f47c4fbc1d9a"
 
 # The chain and the diamond, named once so a topology edit fails here rather than
 # in a test body that reads like an incantation.
@@ -85,8 +109,11 @@ class SmokeScenarioTest(unittest.TestCase):
     def _groups(self, actor_name):
         return {ref.name for ref in self.actors[actor_name].data["groups"]}
 
-    def test_loads_with_stable_digest(self):
-        self.assertEqual(load_scenario(SCENARIO).digest, self.scenario.digest)
+    def test_digest_matches_the_pinned_value(self):
+        self.assertEqual(
+            self.scenario.digest, EXPECTED_DIGEST,
+            "the fixture changed; update EXPECTED_DIGEST deliberately and note that "
+            "any journal written against the old content is now invalid")
 
     def test_twenty_bugs_across_two_products(self):
         self.assertEqual(len(self.creates), 20)
@@ -103,7 +130,6 @@ class SmokeScenarioTest(unittest.TestCase):
     def test_diamond_has_two_distinct_paths(self):
         paths = _paths(_blocks_graph(self.scenario), DIAMOND_APEX, DIAMOND_SINK)
         self.assertEqual(len(paths), 2, f"expected two paths, found {paths}")
-        self.assertNotEqual(paths[0], paths[1])
 
     def test_exactly_one_duplicate_assignment(self):
         duplicates = [
@@ -134,8 +160,10 @@ class SmokeScenarioTest(unittest.TestCase):
         self.assertEqual({event.action for event in self.scenario.events}, set(HANDLERS))
 
     def test_all_custom_field_types_assigned(self):
-        declared = {
-            resource.name for resource in self.scenario.resources
+        """Criterion 4 asks for all three *types*, not merely all declared fields."""
+        type_of = {
+            resource.name: resource.data["field_type"]
+            for resource in self.scenario.resources
             if resource.kind == "custom-field"
         }
         assigned = {
@@ -144,7 +172,10 @@ class SmokeScenarioTest(unittest.TestCase):
             if event.action == "bug.custom-field-set"
             for assignment in event.expected_postcondition["values"]["values"]
         }
-        self.assertEqual(assigned, declared)
+        self.assertEqual(assigned, set(type_of), "not every declared custom field is set")
+        self.assertEqual(
+            {type_of[name] for name in assigned},
+            {"text", "single-select", "multi-select"})
 
     # --- guards ----------------------------------------------------------------
 

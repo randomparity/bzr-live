@@ -40,26 +40,25 @@ the loader, the replay engine, the journal, or the provisioning executor is part
 work. Where an honest payload cannot be expressed, that is recorded as a finding in
 `docs/bzr-findings.md` rather than accommodated by widening the contract.
 
-Bug topology is declared mostly by `bug.update` rather than on the creates, for two reasons
-that are not about expressiveness. A create-only graph **is** expressible — the scenario's
+Bug topology is declared mostly by `bug.update` rather than on the creates, for one reason
+that is not about expressiveness. A create-only graph **is** expressible — the scenario's
 graph is acyclic, so a topological creation order exists, and since `depends_on` and `blocks`
 are inverse relations every edge can be spelled as the later bug's `depends_on`. It is
-rejected because:
+rejected because **a create-only graph never exercises the update path**:
+`BugUpdateHandler.build` computes a list delta and emits `--depends-on-add` /
+`--depends-on-remove` / `--blocks-add` / `--blocks-remove`
+(`src/bzr_live/replay/actions.py:396-405`), and `_UPDATE_COMPARE_SETS` reconciles those two
+fields (`actions.py:69-74`). For a fixture whose purpose is composition coverage, leaving
+both untested is a real loss. Two creates keep a backward edge, so the create-time path is
+covered too.
 
-- **Bugzilla silently drops create-time edges from an unprivileged reporter.**
-  `_check_dependencies` returns an empty pair unless the filer holds `editbugs`
-  (`Bugzilla/Bug.pm:1707-1709` on the pinned image), with no error. A fixture whose whole
-  graph rode on the creates would lose it silently the moment a reporter without `editbugs`
-  filed one of those bugs — and this scenario deliberately keeps an unprivileged reporter.
-  Declaring edges by `bug.update` moves them onto actors that necessarily hold `editbugs`.
-- **A create-only graph never exercises the update path.** `BugUpdateHandler.build` computes
-  a list delta and emits `--depends-on-add` / `--depends-on-remove` / `--blocks-add` /
-  `--blocks-remove` (`src/bzr_live/replay/actions.py:396-405`), and `_UPDATE_COMPARE_SETS`
-  reconciles those two fields (`actions.py:69-74`). For a fixture whose purpose is
-  composition coverage, leaving both untested is a real loss.
-
-Two creates keep a backward edge, so the create-time path is covered too; both are filed by
-actors holding `editbugs`, which the offline tier asserts rather than leaves to chance.
+An earlier draft of this record gave a second ground: that Bugzilla silently drops
+create-time edges from a filer without `editbugs` (`Bugzilla/Bug.pm:1707-1709`), and that
+this scenario keeps an unprivileged reporter. The mechanism is real, but the premise is not.
+Stock Bugzilla grants `editbugs` by `userregexp => '.*'` (`Bugzilla/Install.pm:134-138`), so
+on this pinned image every account holds it automatically — the live fixture shows
+`reporter@example.test` with an `editbugs` row of grant type `GRANT_REGEXP`. **There is no
+unprivileged actor on this image**, and the ground was withdrawn rather than left standing.
 
 The proof is two-tier. `tests/test_smoke_scenario.py` loads and plans the committed scenario
 with no server, asserting the topology and coverage invariants; it needs no Docker and runs
@@ -130,8 +129,7 @@ stated as narrowly as it is.
   (`events.jsonl:1:$.payload.blocks[0]: reference does not resolve`, run against
   `load_scenario` at 27d37a4), which constrains which of the two inverse spellings an edge
   uses, not which topologies are expressible; only a cycle is inexpressible. It is rejected
-  on the two grounds in Decision above — silent edge-dropping for an unprivileged filer
-  (`Bugzilla/Bug.pm:1707-1709`) and zero coverage of the update delta path
+  on the ground in Decision above — zero coverage of the update delta path
   (`src/bzr_live/replay/actions.py:396-405`) — not because it cannot be written.
 - **Add a loader affordance for forward references.** judgment: nothing here needs one. Every
   edge this scenario declares can be spelled backward, so the affordance would buy only the

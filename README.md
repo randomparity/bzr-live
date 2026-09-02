@@ -136,7 +136,7 @@ Smoke scenario
 --------------
 
 `scenarios/smoke/` is the committed 20-bug scenario. It spans two products and four
-components with five actors, and its 48 events exercise every supported action: a
+components with five actors, and its 47 events exercise every supported action: a
 cross-product dependency chain three deep, a diamond spanning both products, a duplicate
 pair, a reopening cycle, public and private comments, attachments with an obsolescence,
 flags with and without a requestee, work time, keywords, milestones, and text,
@@ -146,11 +146,14 @@ Two tiers prove it. The offline tier needs no server and runs with the rest of t
 
     uv run --python 3.11 python -m unittest tests.test_smoke_scenario
 
-Eleven assertions cover the topology and coverage invariants. Three are guards against
-Bugzilla behaviour that is silent server-side — the insider group behind private comments,
-the 255-byte attachment summary ceiling Bugzilla truncates rather than refuses, and the rule
-that any create declaring an assignee or a dependency edge must be filed by an actor holding
-`editbugs`, because Bugzilla otherwise substitutes or discards it without an error.
+Eleven assertions cover the topology and coverage invariants, including the scenario digest,
+which is pinned so that editing the fixture is a deliberate change. Three are guards: the
+insider group behind private comments, the 255-byte attachment summary ceiling, and the rule
+that any create declaring an assignee or a dependency edge is filed by an actor declaring
+`editbugs`. The first two move failures that a live replay would raise anyway into a
+container-free run; only the third targets a substitution Bugzilla makes silently, and on
+this image even that is unreachable, because stock Bugzilla grants `editbugs` to every
+account by regexp. The offline tier's value is speed and no Docker, not extra reach.
 
 The live tier provisions and replays the scenario against the running fixture:
 

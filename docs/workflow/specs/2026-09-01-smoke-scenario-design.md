@@ -27,15 +27,31 @@ determined by them, and none is stated in the existing docs.
 | 7 | `resolution`, `milestone` and `duplicate_of` cannot be cleared | `src/bzr_live/replay/actions.py:37-47` | Reopening is declared as a status change |
 | 8 | `bug.create` refuses an omitted `version` | `src/bzr_live/replay/actions.py:281-285` (finding G9) | Every create declares a version |
 | 9 | `insidergroup = admin` | `containers/bugzilla/checksetup_answers.txt:31` | The private-comment author is declared in `group:admin` |
+| 9b | `editbugs` is granted to every account by `userregexp => '.*'` | `Bugzilla/Install.pm:134-138`; verified on the live fixture, where `reporter@example.test` holds it by `GRANT_REGEXP` | No actor is effectively unprivileged, and no bug is ever `UNCONFIRMED` |
 | 10 | The rendered attachment summary is `<description> [<marker>] sha256=<64 hex>`, capped at 255 bytes | `src/bzr_live/replay/actions.py:13,81-82` | Attachment descriptions stay under 140 bytes |
 | 11 | Resource identity is `<kind>:<name>`, unique across the scenario | `src/bzr_live/scenario/loader.py:287-292` | Versions and milestones carry per-product names |
 | 12 | Declared text may not contain `[bzr-live:` | `src/bzr_live/replay/actions.py:169-178` | No summary, description, or comment body quotes a marker |
 
 ## Privilege model
 
-Bugzilla grants a new user no groups. Three memberships bind this fixture, and the reason
-to state them here is the opposite of the obvious one: **a missing membership is silent on
-the create path, not loud.** Bugzilla substitutes or drops and reports success.
+**Start here: on this image every account holds `editbugs`, whatever the scenario declares.**
+Stock Bugzilla defines `editbugs` with `userregexp => '.*'`
+(`Bugzilla/Install.pm:134-138`), and `containers/bugzilla/checksetup_answers.txt` does not
+override it, so `checksetup` grants it to every account at creation. Verified on the live
+fixture: `reporter@example.test` carries an `editbugs` row of grant type `GRANT_REGEXP`
+despite declaring no groups at all. `canconfirm` carries no such regexp and is granted only
+where declared.
+
+That single fact governs the rest of this section, and it is stated first because an earlier
+draft of this design got it wrong in the other direction — it described `reporter` as an
+unprivileged actor and built two confirm events and part of ADR 0007's rationale on that.
+There is no unprivileged actor here. Restoring one means clearing that regexp, a
+fixture-configuration change outside this issue's surface.
+
+What follows is therefore about what the scenario *declares*, and about what would happen on
+an image where the regexp were cleared. Three memberships bind the fixture, and the reason to
+state them is the opposite of the obvious one: **a missing membership is silent on the create
+path, not loud.** Bugzilla substitutes or drops and reports success.
 
 - **`editbugs`** — without it a user may edit only bugs they reported or are assigned. It
   also gates two things on *create*, both silently:
@@ -44,7 +60,10 @@ the create path, not loud.** Bugzilla substitutes or drops and reports success.
   every create-time `depends_on` and `blocks` (`:1707-1709`). Both verified by reading the
   pinned fixture image. `_check_keywords` and `_check_target_milestone` carry no such gate,
   so those two survive an unprivileged filer.
-- **`canconfirm`** — required to move a bug out of `UNCONFIRMED`.
+- **`canconfirm`** — required to move a bug out of `UNCONFIRMED`. Not load-bearing here:
+  `editbugs` alone already makes Bugzilla file a bug as `CONFIRMED`
+  (`Bugzilla/Bug.pm:1508-1522`), and every account has `editbugs`, so no bug in this
+  scenario is ever `UNCONFIRMED`.
 - **`timetrackinggroup`** — a Bugzilla *parameter*, not a membership, defaulting to
   `editbugs` (`Bugzilla/Config/GroupSecurity.pm:42-47` on the pinned image). It gates
   `work_time`, `estimated_time`, and `remaining_time`, so the estimate event and both
@@ -64,15 +83,14 @@ without creating them. Verified against the live fixture: provisioning an actor 
 `admin`, `editbugs`, and `canconfirm` succeeds, and a second run reports the actor
 `unchanged`, which is `_classify_actor` confirming every declared membership read back.
 
-**The invariant this forces.** Because the failure is silent, it cannot be left to the live
-run to notice. Any create that declares an `assignee` or a `depends_on`/`blocks` edge must
-be filed by an actor holding `editbugs`, and the offline tier asserts exactly that. Without
-it the fixture would be correct only by coincidence — as an earlier draft of this design
-was, filing bug 1 through the unprivileged `reporter` with `assignee: triager` while
-`cart`'s default assignee happened to be `triager` too.
-
-`reporter` is deliberately left unprivileged, keeping one honest non-privileged path, and
-therefore declares no assignee and no edges on anything it files.
+**The invariant this forces.** Any create that declares an `assignee` or a
+`depends_on`/`blocks` edge is filed by an actor that *declares* `editbugs`, and the offline
+tier asserts exactly that. Be precise about what that buys on this image: the regexp grant
+already makes the substitution unreachable, so the assertion is not currently preventing a
+live defect. It pins the scenario's own intent, and it is what would catch the defect if the
+regexp were cleared. `reporter` declares no groups and therefore declares no assignee and no
+edges on anything it files — a self-consistency property of the fixture, not a claim about
+its effective server-side privilege.
 
 If `bzr group add-user` cannot grant a system group, that is a finding for
 `docs/bzr-findings.md`, not a reason to promote every actor to admin.
@@ -117,7 +135,7 @@ Twenty bugs, created in this order. The order matters only where a create declar
 
 | # | Alias | Product/component | Reporter | Version | Notes |
 |---:|---|---|---|---|---|
-| 1 | `cart-double-charge` | checkout/cart | reporter | checkout-v1 | milestone `checkout-m1`, cc `reporter`, keyword `regression`. **No assignee**: `reporter` lacks `editbugs`, so Bugzilla would silently substitute the component default. `confirm-double-charge` sets the assignee later, from a privileged actor |
+| 1 | `cart-double-charge` | checkout/cart | reporter | checkout-v1 | milestone `checkout-m1`, cc `reporter`, keyword `regression`. **No assignee**: `reporter` declares no groups, and the scenario keeps declared assignees on actors that declare `editbugs` (see Privilege model). `triage-double-charge` sets it later |
 | 2 | `cart-empty-crash` | checkout/cart | reporter | checkout-v1 | |
 | 3 | `cart-slow-render` | checkout/cart | developer | checkout-v2 | keyword `perf` |
 | 4 | `cart-stale-total` | checkout/cart | triager | checkout-v1 | |
@@ -125,7 +143,7 @@ Twenty bugs, created in this order. The order matters only where a create declar
 | 6 | `cart-quantity-reset` | checkout/cart | reporter | checkout-v2 | |
 | 7 | `pay-token-leak` | checkout/payment | admin-ops | checkout-v1 | keyword `security`, assignee `developer` |
 | 8 | `pay-retry-loop` | checkout/payment | developer | checkout-v1 | |
-| 9 | `pay-decline-copy` | checkout/payment | reporter | checkout-v2 | carries the reopening cycle. Filed by `reporter` **deliberately**: `reporter` holds no `canconfirm`, so the bug lands `UNCONFIRMED` and the confirm event that follows is a real transition. Filed by a `canconfirm` actor it would land `CONFIRMED` already (`Bugzilla/Bug.pm:1508-1522`) and the confirm would write nothing while still reconciling green |
+| 9 | `pay-decline-copy` | checkout/payment | reporter | checkout-v2 | carries the reopening cycle. Lands `CONFIRMED` at create like every other bug here, because `editbugs` is regexp-granted to all accounts (see Privilege model), so no separate confirm event is declared for it |
 | 10 | `pay-timeout-3ds` | checkout/payment | reporter | checkout-v1 | |
 | 11 | `pay-refund-rounding` | checkout/payment | developer | checkout-v2 | |
 | 12 | `inv-tax-mismatch` | billing/invoicing | triager | billing-v1 | milestone `billing-m1` |
@@ -150,24 +168,30 @@ apex and one on the sink, so each edge is declared exactly once.
 **Duplicate pair.** `cart-dupe-report` is marked `duplicate_of` `cart-double-charge` by a
 `bug.update` carrying that field alone (constraint 6).
 
-**Reopening.** `pay-decline-copy` goes `UNCONFIRMED` (as filed) → `CONFIRMED` →
-`RESOLVED/FIXED` → `CONFIRMED` → `RESOLVED/FIXED`. The reopen is a status change, never a
-resolution clear (constraint 7). The bug's filer is unprivileged precisely so the first
-transition is real: Bugzilla lands a bug filed by an `editbugs` **or** `canconfirm` holder
-directly in `CONFIRMED` (`Bugzilla/Bug.pm:1508-1522`; the fixture's `bug_status` sortkeys are
-`UNCONFIRMED 100, CONFIRMED 200`), and a redundant same-status update is accepted rather than
-refused (`:1541-1543`), so it would reconcile green having written nothing.
+**Reopening.** `pay-decline-copy` goes `CONFIRMED` (as filed) → `RESOLVED/FIXED` →
+`CONFIRMED` → `RESOLVED/FIXED`. The reopen is a status change, never a resolution clear
+(constraint 7), and it is the scenario's only genuine status transition into an open state.
+
+No bug in this scenario is ever `UNCONFIRMED`, and none can be. Bugzilla lands a bug filed by
+an `editbugs` **or** `canconfirm` holder directly in `CONFIRMED`
+(`Bugzilla/Bug.pm:1508-1522`; the fixture's `bug_status` sortkeys are `UNCONFIRMED 100,
+CONFIRMED 200`), and `editbugs` is granted to every account by regexp — so an
+`UNCONFIRMED → CONFIRMED` event would be accepted (`:1541-1543` skips a same-status change)
+and reconcile green having written nothing. An earlier draft declared two such confirm
+events; both were verified inert against the live fixture's `bugs_activity` and removed.
+Restoring a genuine `UNCONFIRMED` path means clearing `editbugs`' `userregexp`, which is a
+fixture-configuration change outside this issue's surface.
 
 **Assignee breadth.** Two distinct actors are declared as assignee, which criterion 4 requires
 on the assignee axis and not only on the reporter axis: `developer` on `create-pay-token-leak`
-and on `confirm-double-charge`, and `releaser` on `assign-decline-copy` in phase 3. Component
+and on `triage-double-charge`, and `releaser` on `assign-decline-copy` in phase 3. Component
 default assignees would put bugs on `triager` and `developer` regardless, but a default is
 what Bugzilla substitutes, not what the scenario declares — the same distinction the privilege
 model above turns on.
 
 ## Event stream
 
-Forty-eight events in eight phases — 20 creates, 5 topology updates, 8 lifecycle updates,
+Forty-seven events in eight phases — 20 creates, 5 topology updates, 7 lifecycle updates,
 5 comments, 3 attachment events, 2 flags, 2 work-time entries, and 3 custom-field
 assignments. Every event name is unique and every marker derives from it
 (`src/bzr_live/scenario/loader.py:791`). The implementation plan carries the per-event
@@ -192,19 +216,26 @@ counts, the dependency chain, the diamond, the duplicate, the reopening, full `H
 coverage, and all three custom-field types. The implementation plan carries the method list
 with the exact predicate for each; it is not repeated here.
 
-Three of the eleven are **guard tests**, and they are the reason the offline tier exists at
-all — each encodes a constraint that would otherwise fail only against a live server, late,
-or would never be noticed:
+Three of the eleven are **guard tests**. What each actually buys differs, and stating it
+honestly matters more than the label:
 
-- **the private-comment author holds `group:admin`** — the fixture's private-comment path
-  depends on `insidergroup = admin` (constraint 9);
-- **every rendered attachment summary fits `ATTACHMENT_SUMMARY_BYTE_LIMIT`** — Bugzilla
-  truncates rather than refusing (constraint 10);
-- **every create declaring an assignee or an edge is filed by an `editbugs` actor** — the
-  invariant the privilege model above forces, guarding against silent server-side
-  substitution that no other tier can see.
+- **the private-comment author holds `group:admin`** — moves a *loud* failure earlier.
+  Bugzilla's `Comment.pm::_check_isprivate` raises `user_not_insider`, so a live replay
+  would abort; this catches it at `make test` with no container.
+- **every rendered attachment summary fits `ATTACHMENT_SUMMARY_BYTE_LIMIT`** — duplicates a
+  precondition the engine already enforces. `BugAttachHandler.check_supported` refuses an
+  over-length summary and `ReplayEngine._check_local_preconditions` runs `check_supported`
+  over every event before any mutation, so this too is a shift offline rather than added
+  coverage. It covers `bug.attach` only.
+- **every create declaring an assignee or an edge is filed by an actor declaring
+  `editbugs`** — the only one aimed at a genuinely *silent* server-side substitution
+  (constraint 8's `Bug.pm:1449-1454` and `:1707-1709`). Per constraint 9b that substitution
+  is unreachable on this image; the assertion pins the scenario's intent and would bite if
+  the regexp were cleared.
 
-Each guard gets its own deliberate fault injection during implementation. A guard that
+The offline tier's real value is therefore that a fixture defect fails in seconds at a desk
+rather than minutes into a container replay — not that it sees things the live run cannot.
+Each guard still gets its own deliberate fault injection during implementation: a guard that
 cannot be made to fail is not a guard.
 
 **Live tier — `tests/smoke_scenario.sh`, `make smoke`.** Provisions the scenario's resources

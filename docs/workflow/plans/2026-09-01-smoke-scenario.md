@@ -1,6 +1,6 @@
 # Implementation plan: smoke scenario (issue #19)
 
-**Goal.** Commit `scenarios/smoke/` — 20 bugs, 48 events, two products — and prove it loads
+**Goal.** Commit `scenarios/smoke/` — 20 bugs, 47 events, two products — and prove it loads
 offline and replays against the live pinned Bugzilla fixture through a real `bzr` binary.
 
 **Architecture and stack** are the spec's; this plan does not restate them. The one thing to
@@ -46,7 +46,7 @@ Only these four are not in that table:
 |---|---|---|
 | `scenarios/smoke/scenario.json` | new | Format version, scenario name `smoke`, description, asset manifest with SHA-256 digests |
 | `scenarios/smoke/resources.json` | new | The resource catalog: groups referenced, actors, products, components, versions, milestones, keywords, custom fields, flag types |
-| `scenarios/smoke/events.jsonl` | new | 48 ordered events, one JSON object per line |
+| `scenarios/smoke/events.jsonl` | new | 47 ordered events, one JSON object per line |
 | `scenarios/smoke/assets/triage-notes.txt` | new | Attachment payload for `cart-double-charge` |
 | `scenarios/smoke/assets/retry-fix.patch` | new | Attachment payload for `pay-retry-loop` |
 | `tests/test_smoke_scenario.py` | new | Offline invariants over the committed scenario |
@@ -143,7 +143,7 @@ From `src/bzr_live/replay`:
    silently while reporting success (`Bugzilla/Bug.pm:1449-1454`, `:1707-1709`). Both
    edge-carrying creates above are filed by privileged actors for exactly that reason:
    `create-inv-duplicate-line` by `triager`, `create-dun-grace-window` by `releaser`.
-   `create-cart-double-charge` declares **no** assignee; `confirm-double-charge` in phase 3
+   `create-cart-double-charge` declares **no** assignee; `triage-double-charge` in phase 3
    sets it from a privileged actor instead. The step-7 guard test enforces this over the
    whole event stream, so a later edit cannot quietly reintroduce it.
 
@@ -157,12 +157,11 @@ From `src/bzr_live/replay`:
    | `link-diamond-sink` | developer | `dun-wrong-locale` | `depends_on: [pay-retry-loop, inv-currency-drift]` |
    | `mark-duplicate` | triager | `cart-dupe-report` | `duplicate_of: cart-double-charge` — this field alone |
 
-   **Phase 3 — 8 lifecycle updates.**
+   **Phase 3 — 7 lifecycle updates.**
 
    | Event name | Actor | Bug | `set` |
    |---|---|---|---|
-   | `confirm-double-charge` | triager | `cart-double-charge` | `status: "CONFIRMED"`, `assignee: developer`, `cc: [triager, reporter]` |
-   | `confirm-decline-copy` | triager | `pay-decline-copy` | `status: "CONFIRMED"` |
+   | `triage-double-charge` | triager | `cart-double-charge` | `assignee: developer`, `cc: [triager, reporter]` — no `status`: every bug is filed CONFIRMED (spec constraint 9b), so a confirm would write nothing |
    | `resolve-decline-copy` | developer | `pay-decline-copy` | `status: "RESOLVED"`, `resolution: "FIXED"` |
    | `reopen-decline-copy` | triager | `pay-decline-copy` | `status: "CONFIRMED"` |
    | `refix-decline-copy` | developer | `pay-decline-copy` | `status: "RESOLVED"`, `resolution: "FIXED"` |
@@ -173,7 +172,7 @@ From `src/bzr_live/replay`:
    `assign-decline-copy` is what gives criterion 4 a second declared assignee; without it
    `developer` is the only actor the scenario ever names in that role, and the criterion would
    be met only by Bugzilla's component defaults — a substitution, not a declaration. Place it
-   after `confirm-decline-copy` and before `resolve-decline-copy`, so the bug is assigned
+   before `resolve-decline-copy`, so the bug is assigned
    before it is resolved. `triager` holds `editbugs`, so the privilege invariant is unaffected.
 
    **Phase 4 — 5 comments.** `bug.comment` with `bug`, `body`, `private`.
@@ -225,7 +224,7 @@ From `src/bzr_live/replay`:
       print(s.name, len(s.events), s.digest[:16])"
    ```
 
-   Expect `smoke 48 <16 hex chars>`. A `ScenarioValidationError` names the file, line, and
+   Expect `smoke 47 <16 hex chars>`. A `ScenarioValidationError` names the file, line, and
    JSON path to fix; fix the fixture, not the loader.
 
 7. **Write the failing test.** Create `tests/test_smoke_scenario.py` with a
@@ -325,7 +324,7 @@ From `src/bzr_live/replay`:
 
     Both exit 0. Commit as `feat(scenario): add the 20-bug smoke scenario and its offline proof`.
 
-**Acceptance criteria.** `scenarios/smoke/` loads with 48 events and 20 creates;
+**Acceptance criteria.** `scenarios/smoke/` loads with 47 events and 20 creates;
 `tests/test_smoke_scenario.py` passes with eleven tests; **all three** guard tests —
 `test_private_comment_author_is_an_insider`, `test_attachment_summaries_fit`, and
 `test_creates_declaring_assignee_or_edges_are_privileged` — were each observed failing
@@ -393,7 +392,7 @@ scenario. It ends at a `make smoke` that an operator can run and that reports a 
 
    Read the event count from the scenario the same way `tests/replay_smoke.sh:40-46` reads its
    values — a short `uv run --python 3.11 python -c` that loads the scenario — rather than
-   hardcoding 48, so the script does not drift from the fixture.
+   hardcoding 47, so the script does not drift from the fixture.
 
 2. **Check it parses and lints.**
 

@@ -22,8 +22,14 @@ chmod 700 "$STATE"
 
 # The fixture's port lives in the checkout's .env; fall back to it when the shell does
 # not export BZ_PORT, so a customized port still reaches every host-side call.
+# `|| true` is load-bearing: under `set -euo pipefail` a .env carrying no BZ_PORT= line
+# makes grep exit 1, pipefail propagates it, and the assignment kills the script before
+# the ${BZ_PORT:-8080} default below is ever reached -- turning a documented fallback
+# into a bare non-zero exit. `-f2-` keeps a value containing '='; the numeric guard then
+# rejects anything that would build a malformed URL.
 if [[ -z ${BZ_PORT:-} && -f "$ROOT/.env" ]]; then
-  BZ_PORT=$(grep -E '^BZ_PORT=' "$ROOT/.env" | tail -1 | cut -d= -f2)
+  BZ_PORT=$(grep -E '^BZ_PORT=' "$ROOT/.env" | tail -1 | cut -d= -f2- || true)
+  [[ ${BZ_PORT:-} =~ ^[0-9]+$ ]] || BZ_PORT=
 fi
 BASE_URL="http://127.0.0.1:${BZ_PORT:-8080}/"
 
@@ -33,14 +39,18 @@ BASE_URL="http://127.0.0.1:${BZ_PORT:-8080}/"
 # finding from a stale one. This is the first line for that reason.
 echo "smoke scenario: bzr under test: $("$BZR" --version)"
 
-# Read the event count from the loaded scenario rather than hardcoding it, so the
-# reported figure cannot drift from the fixture.
-EVENT_COUNT=$(uv run --python 3.11 python -c "
+# Read the counts from the loaded scenario rather than hardcoding them, so no reported
+# figure can drift from the fixture. The scenario path goes in as argv rather than being
+# interpolated into the Python source, so a path containing a quote cannot alter it.
+read -r EVENT_COUNT RESOURCE_COUNT ACTOR_COUNT <<<"$(uv run --python 3.11 python -c '
+import sys
 from bzr_live.scenario import load_scenario
-print(len(load_scenario('$SCENARIO').events))
-")
+s = load_scenario(sys.argv[1])
+print(len(s.events), len(s.resources),
+      sum(1 for r in s.resources if r.kind == "actor"))
+' "$SCENARIO")"
 
-echo "smoke scenario: provisioning 28 resources (5 actors across 2 products)"
+echo "smoke scenario: provisioning $RESOURCE_COUNT resources ($ACTOR_COUNT actors)"
 uv run --python 3.11 python -m bzr_live.provision "$SCENARIO" \
   --state-root "$STATE/state" --bzr "$BZR" --project-root "$ROOT" \
   --base-url "$BASE_URL"
@@ -51,7 +61,7 @@ uv run --python 3.11 python -m bzr_live.provision "$SCENARIO" \
 # (BSD date on Darwin, GNU date on the CI runner) but is not a documented prerequisite,
 # so fall back to whole seconds when it does not yield digits.
 REPLAY_START=$(date +%s%N)
-echo "smoke scenario: replaying $EVENT_COUNT events as 5 actors"
+echo "smoke scenario: replaying $EVENT_COUNT events as $ACTOR_COUNT actors"
 uv run --python 3.11 python -m bzr_live.replay replay "$SCENARIO" \
   --state-root "$STATE/state" --bzr "$BZR" --base-url "$BASE_URL"
 REPLAY_END=$(date +%s%N)
