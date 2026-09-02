@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import re
 import unittest
 from dataclasses import replace
 from pathlib import Path
 
 from bzr_live.scenario import load_scenario
-from bzr_live.verify.checks import chain_order, check_fields, check_history, check_links
+from bzr_live.verify.checks import (
+    chain_order,
+    check_attachments,
+    check_comments,
+    check_fields,
+    check_history,
+    check_links,
+    check_visibility,
+)
 from bzr_live.verify.expected import (
     ExpectedChange, ExpectedFlag, fold, link_edges, reachable)
 
@@ -624,6 +634,346 @@ class LinkCheckTest(unittest.TestCase):
             # is the one other number a detail may carry.
             residue = DEPTH.sub("", UNNAMED.sub("", finding.detail))
             self.assertIsNone(re.search(r"\d", residue), finding.detail)
+
+
+# `bzr --json --server-url http://127.0.0.1:8080 --api hybrid comment list 1` for
+# `cart-double-charge` on a replayed scenarios/smoke/, read live at the revision README
+# pins (63abb94e). The keys are the ones bzr emits and no others: an entry carries
+# `creation_time` and no `time` key at all, while the unauthenticated stock-REST reply
+# carries both -- a fixture written from the REST shape would not match the command under
+# test. No assertion here reads either: several of these comments land inside one second,
+# so `count` is the only ordering key.
+#
+# Counts 1 and 3 are Bugzilla's own injections, not the scenario's: marking bug 5 a
+# duplicate writes the notice at count 1, and the attachment upload writes one at count 3.
+# The declared comments are therefore neither a prefix of this list nor contiguous in it,
+# which is why every lookup goes through the marker token.
+COMMENTS_1 = [
+    {"id": 1, "bug_id": 1,
+     "text": "Two concurrent submissions of the same cart both succeed and the customer "
+             "is charged twice.",
+     "creator": "reporter@example.test", "creation_time": "2026-09-02T14:19:01Z",
+     "count": 0, "is_private": False, "attachment_id": None},
+    {"id": 22, "bug_id": 1,
+     "text": "*** Bug 5 has been marked as a duplicate of this bug. ***",
+     "creator": "triager@example.test", "creation_time": "2026-09-02T14:19:42Z",
+     "count": 1, "is_private": False, "attachment_id": None},
+    {"id": 23, "bug_id": 1,
+     "text": "Reproduced with two tabs on v1. The cart lock is taken after "
+             "authorisation, so both submissions see an unpaid cart.\n\n"
+             "[bzr-live:smoke:comment-triage-double-charge]",
+     "creator": "triager@example.test", "creation_time": "2026-09-02T14:19:54Z",
+     "count": 2, "is_private": False, "attachment_id": None},
+    {"id": 28, "bug_id": 1,
+     "text": "Created attachment 1\nTriage notes "
+             "[bzr-live:smoke:attach-triage-notes] "
+             "sha256=96a330b23f0ebeb73d94721fce926b0b49daacfc448696af2f373afb30b49681",
+     "creator": "triager@example.test", "creation_time": "2026-09-02T14:19:57Z",
+     "count": 3, "is_private": False, "attachment_id": 1},
+    {"id": 30, "bug_id": 1,
+     "text": "Traced the lock ordering and drafted the fix.\n\n"
+             "[bzr-live:smoke:worktime-double-charge]",
+     "creator": "developer@example.test", "creation_time": "2026-09-02T14:20:02Z",
+     "count": 4, "is_private": False, "attachment_id": None},
+]
+
+# `... --api hybrid comment list 7` for `pay-token-leak`, read with no API key -- the
+# shape an actor outside the insider group sees. The declared private comment is absent,
+# which is what check_visibility asserts; comment 0 is public and remains readable.
+COMMENTS_7_OUTSIDER = [
+    {"id": 7, "bug_id": 7,
+     "text": "The payment gateway token appears in plaintext in the request log at info "
+             "level.",
+     "creator": "admin-ops@example.test", "creation_time": "2026-09-02T14:19:11Z",
+     "count": 0, "is_private": False, "attachment_id": None},
+]
+
+# The private comment as the thread would carry it, appended to the live outsider reply.
+# Constructed, not transcribed: the whole point of the two cases below is a fixture that
+# should not serve this entry to an outsider, so no live reply exhibits it.
+PRIVATE_ENTRY = {
+    "id": 24, "bug_id": 7,
+    "text": "Log retention for the affected hosts is 30 days; rotating the gateway "
+            "credentials before disclosure.\n\n"
+            "[bzr-live:smoke:comment-private-token-leak]",
+    "creator": "admin-ops@example.test", "creation_time": "2026-09-02T14:19:56Z",
+    "count": 1, "is_private": True, "attachment_id": None,
+}
+
+# `... --api hybrid attachment list 1`, read live at 63abb94e. `data` is present only
+# because of `--api hybrid`: at the default transport bzr detects rest from the server's
+# 5.2+ version and the REST arm sets exclude_fields=data, so the same command returns this
+# entry with every other key and no `data` at all (finding D9). The checksum cases below
+# would all silently become the unverifiable case on a payload transcribed from that
+# reply, which is what blocked this task until the transport decision was taken.
+ATTACHMENT_DATA = (
+    "Q2hlY2tvdXQgZG91YmxlLWNoYXJnZSB0cmlhZ2Ugbm90ZXMKPT09PT09PT09PT09PT09PT09"
+    "PT09PT09PT09PT09PT09PT0KClJlcHJvZHVjZWQgb24gdGhlIHYxIGNoZWNrb3V0IHBhdGgg"
+    "d2l0aCB0d28gYnJvd3NlciB0YWJzIHN1Ym1pdHRpbmcgdGhlIHNhbWUKY2FydCB3aXRoaW4g"
+    "cm91Z2hseSAyMDBtcyBvZiBlYWNoIG90aGVyLiBCb3RoIHN1Ym1pc3Npb25zIHdlcmUgYWNj"
+    "ZXB0ZWQgYW5kIHRoZQpjdXN0b21lciB3YXMgY2hhcmdlZCB0d2ljZS4KCldoYXQgd2Uga25v"
+    "dzoKCi0gVGhlIGNhcnQgbG9jayBpcyB0YWtlbiBhZnRlciB0aGUgcGF5bWVudCBhdXRob3Jp"
+    "c2F0aW9uLCBub3QgYmVmb3JlIGl0LgotIFRoZSBzZWNvbmQgc3VibWlzc2lvbiBzZWVzIGEg"
+    "Y2FydCB0aGF0IHN0aWxsIHJlYWRzIGFzIHVucGFpZC4KLSBSZWZ1bmRzIGhhdmUgdG8gYmUg"
+    "aXNzdWVkIGJ5IGhhbmQgdG9kYXk7IHRoZXJlIGlzIG5vIGF1dG9tYXRpYyByZXZlcnNhbC4K"
+    "Ck5leHQgc3RlcHM6IGNvbmZpcm0gd2hldGhlciB0aGUgYmlsbGluZyBzaWRlIG9ic2VydmVz"
+    "IG9uZSBpbnZvaWNlIG9yIHR3bywgYW5kCndoZXRoZXIgdGhlIGR1bm5pbmcgcmV0cnkgcGF0"
+    "aCBjYW4gY29tcG91bmQgdGhlIHByb2JsZW0uCg==")
+
+SUMMARY_1 = ("Triage notes [bzr-live:smoke:attach-triage-notes] "
+             "sha256=96a330b23f0ebeb73d94721fce926b0b49daacfc448696af2f373afb30b49681")
+
+ATTACHMENTS_1 = [
+    {"id": 1, "bug_id": 1, "file_name": "triage-notes.txt", "summary": SUMMARY_1,
+     "content_type": "text/plain", "creator": "triager@example.test",
+     "creation_time": "2026-09-02T14:19:57Z",
+     "last_change_time": "2026-09-02T14:20:00Z", "size": 622, "is_obsolete": True,
+     "is_private": False, "is_patch": False, "flags": [], "data": ATTACHMENT_DATA},
+]
+
+TRIAGE_MARKER = "bzr-live:smoke:comment-triage-double-charge"
+PRIVATE_MARKER = "bzr-live:smoke:comment-private-token-leak"
+
+
+class CommentCheckTest(unittest.TestCase):
+    """check_comments against the transcribed thread for bug 1."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        expected = fold(load_scenario(str(SMOKE)))
+        cls.bug = expected.bugs["cart-double-charge"]
+        cls.leak = expected.bugs["pay-token-leak"]
+        cls.emails = expected.actor_emails
+
+    def _check(self, comments=None, *, bug=None):
+        return check_comments(self.bug if bug is None else bug,
+                              COMMENTS_1 if comments is None else comments, self.emails)
+
+    def _only(self, comments=None, *, bug=None):
+        findings = self._check(comments, bug=bug)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(findings[0].kind, "divergence")
+        return findings[0]
+
+    def _replace_text(self, marker: str, text: str) -> list:
+        return [dict(entry, text=text) if f"[{marker}]" in entry["text"] else entry
+                for entry in COMMENTS_1]
+
+    def test_the_live_thread_matches_the_declared_one(self) -> None:
+        # Bugzilla's duplicate notice at count 1 and attachment notice at count 3 sit
+        # between the declared comments; the marker lookup steps over both, and the
+        # ordering guard reads the non-contiguous counts 2 and 4 as ordered.
+        self.assertEqual(self._check(), [])
+
+    def test_a_differing_comment_zero_text_diverges(self) -> None:
+        comments = [dict(COMMENTS_1[0], text="Something else entirely."), *COMMENTS_1[1:]]
+        finding = self._only(comments)
+        self.assertEqual(finding.subject, "cart-double-charge")
+        self.assertEqual(finding.check, "comments")
+        self.assertIn("comment 0 text:", finding.detail)
+        self.assertIn("Something else entirely.", finding.detail)
+
+    def test_a_comment_zero_written_by_another_actor_diverges(self) -> None:
+        comments = [dict(COMMENTS_1[0], creator="triager@example.test"),
+                    *COMMENTS_1[1:]]
+        finding = self._only(comments)
+        self.assertEqual(
+            finding.detail,
+            "comment 0 creator: declared reporter@example.test, observed "
+            "triager@example.test")
+
+    def test_a_thread_with_no_comment_zero_diverges(self) -> None:
+        finding = self._only(COMMENTS_1[1:])
+        self.assertEqual(finding.detail,
+                         "declared a create description, observed no comment 0")
+
+    def test_a_marker_observed_no_times_names_it(self) -> None:
+        finding = self._only(
+            [entry for entry in COMMENTS_1 if f"[{TRIAGE_MARKER}]" not in entry["text"]])
+        self.assertEqual(finding.detail,
+                         f"[{TRIAGE_MARKER}] declared once, observed 0 times")
+
+    def test_a_marker_observed_twice_names_it(self) -> None:
+        duplicated = [*COMMENTS_1, dict(COMMENTS_1[2], id=99, count=5)]
+        finding = self._only(duplicated)
+        self.assertEqual(finding.detail,
+                         f"[{TRIAGE_MARKER}] declared once, observed 2 times")
+
+    def test_a_comment_attributed_to_another_actor_diverges(self) -> None:
+        comments = [dict(entry, creator="releaser@example.test")
+                    if f"[{TRIAGE_MARKER}]" in entry["text"] else entry
+                    for entry in COMMENTS_1]
+        finding = self._only(comments)
+        self.assertEqual(
+            finding.detail,
+            f"[{TRIAGE_MARKER}] creator: declared triager@example.test, observed "
+            "releaser@example.test")
+
+    def test_a_public_comment_observed_private_diverges(self) -> None:
+        comments = [dict(entry, is_private=True)
+                    if f"[{TRIAGE_MARKER}]" in entry["text"] else entry
+                    for entry in COMMENTS_1]
+        finding = self._only(comments)
+        self.assertEqual(
+            finding.detail,
+            f"[{TRIAGE_MARKER}] is_private: declared False, observed True")
+
+    def test_a_private_comment_observed_public_diverges(self) -> None:
+        # pay-token-leak is the scenario's one private comment. Reading it back with
+        # is_private False means the fixture stored it as a public comment, which the
+        # visibility check alone would never catch: it is present either way.
+        comments = [*COMMENTS_7_OUTSIDER, dict(PRIVATE_ENTRY, is_private=False)]
+        finding = self._only(comments, bug=self.leak)
+        self.assertEqual(finding.subject, "pay-token-leak")
+        self.assertEqual(
+            finding.detail,
+            f"[{PRIVATE_MARKER}] is_private: declared True, observed False")
+
+    def test_comments_observed_out_of_declaration_order_diverge(self) -> None:
+        # The triage comment is declared before the work-time comment; swapping their
+        # counts leaves both present and correctly attributed, so only the ordering
+        # guard can see it.
+        swapped = []
+        for entry in COMMENTS_1:
+            if f"[{TRIAGE_MARKER}]" in entry["text"]:
+                swapped.append(dict(entry, count=4))
+            elif "[bzr-live:smoke:worktime-double-charge]" in entry["text"]:
+                swapped.append(dict(entry, count=2))
+            else:
+                swapped.append(entry)
+        finding = self._only(swapped)
+        self.assertIn("is declared after", finding.detail)
+        self.assertIn("bzr-live:smoke:worktime-double-charge", finding.detail)
+
+
+class VisibilityCheckTest(unittest.TestCase):
+    """check_visibility against a reply read as an actor outside the insider group."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        expected = fold(load_scenario(str(SMOKE)))
+        cls.bug = expected.bugs["cart-double-charge"]
+        cls.leak = expected.bugs["pay-token-leak"]
+
+    def test_an_outsider_reply_withholding_the_private_comment_is_clean(self) -> None:
+        self.assertEqual(check_visibility(self.leak, COMMENTS_7_OUTSIDER), [])
+
+    def test_an_outsider_reply_carrying_the_private_comment_diverges(self) -> None:
+        findings = check_visibility(self.leak,
+                                    [*COMMENTS_7_OUTSIDER, PRIVATE_ENTRY])
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(findings[0].kind, "divergence")
+        self.assertEqual(findings[0].subject, "pay-token-leak")
+        self.assertEqual(findings[0].check, "visibility")
+        self.assertIn(f"[{PRIVATE_MARKER}]", findings[0].detail)
+        self.assertIn("declared private", findings[0].detail)
+
+    def test_an_outsider_reply_carrying_every_public_marker_is_clean(self) -> None:
+        self.assertEqual(check_visibility(self.bug, COMMENTS_1), [])
+
+    def test_an_outsider_reply_missing_a_public_comment_diverges(self) -> None:
+        # The other direction, and the reason this check is not just "no private marker
+        # appears": a fixture that withheld the whole thread would otherwise pass.
+        withheld = [entry for entry in COMMENTS_1
+                    if f"[{TRIAGE_MARKER}]" not in entry["text"]]
+        findings = check_visibility(self.bug, withheld)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn(f"[{TRIAGE_MARKER}]", findings[0].detail)
+        self.assertIn("declared public", findings[0].detail)
+
+
+class AttachmentCheckTest(unittest.TestCase):
+    """check_attachments against the transcribed reply for bug 1."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        expected = fold(load_scenario(str(SMOKE)))
+        cls.bug = expected.bugs["cart-double-charge"]
+        cls.emails = expected.actor_emails
+
+    def _check(self, **overrides):
+        entry = {**ATTACHMENTS_1[0], **overrides}
+        return check_attachments(self.bug, [entry], self.emails)
+
+    def _only(self, **overrides):
+        findings = self._check(**overrides)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(findings[0].subject, "cart-double-charge")
+        self.assertEqual(findings[0].check, "attachments")
+        return findings[0]
+
+    def test_the_live_reply_matches_the_declared_attachment(self) -> None:
+        # obsolete=True is the state after attachment.update, not the upload's own.
+        self.assertEqual(self._check(), [])
+
+    def test_a_differing_summary_diverges(self) -> None:
+        # The marker still locates the entry, so a summary the attachment.update was
+        # meant to leave behind is compared rather than silently unmatched.
+        finding = self._only(summary=SUMMARY_1.replace("Triage notes", "Old notes"))
+        self.assertIn("summary:", finding.detail)
+        self.assertIn("Old notes", finding.detail)
+
+    def test_a_differing_creator_diverges(self) -> None:
+        finding = self._only(creator="reporter@example.test")
+        self.assertEqual(
+            finding.detail,
+            "attachment 'triage-notes' creator: declared triager@example.test, "
+            "observed reporter@example.test")
+
+    def test_a_differing_content_type_diverges(self) -> None:
+        finding = self._only(content_type="application/octet-stream")
+        self.assertEqual(
+            finding.detail,
+            "attachment 'triage-notes' content_type: declared text/plain, "
+            "observed application/octet-stream")
+
+    def test_a_differing_is_private_diverges(self) -> None:
+        finding = self._only(is_private=True)
+        self.assertEqual(finding.detail,
+                         "attachment 'triage-notes' is_private: declared False, "
+                         "observed True")
+
+    def test_a_differing_is_obsolete_diverges(self) -> None:
+        finding = self._only(is_obsolete=False)
+        self.assertEqual(finding.detail,
+                         "attachment 'triage-notes' is_obsolete: declared True, "
+                         "observed False")
+
+    def test_a_marker_observed_no_times_names_it(self) -> None:
+        findings = check_attachments(self.bug, [], self.emails)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(
+            findings[0].detail,
+            "[bzr-live:smoke:attach-triage-notes] declared once, observed 0 times")
+
+    def test_corrupted_content_names_both_digests(self) -> None:
+        corrupted = base64.b64encode(b"not the declared bytes").decode("ascii")
+        finding = self._only(data=corrupted)
+        expected = hashlib.sha256(b"not the declared bytes").hexdigest()
+        self.assertEqual(
+            finding.detail,
+            f"attachment 'triage-notes' sha256: declared {self.bug.attachments[0].sha256}"
+            f", observed {expected}")
+
+    def test_data_that_is_not_base64_diverges_rather_than_raising(self) -> None:
+        finding = self._only(data="not base64 at all!!")
+        self.assertEqual(finding.detail,
+                         "attachment 'triage-notes': the reply's data is not valid "
+                         "base64")
+
+    def test_a_reply_with_no_data_is_unverifiable_and_the_rest_still_runs(self) -> None:
+        # The default-transport shape (finding D9). The checksum is the only claim it
+        # costs: the metadata comparisons must still bite, or a fixture reverting to
+        # `--api rest` would quietly stop asserting anything about an attachment.
+        entry = {key: value for key, value in ATTACHMENTS_1[0].items() if key != "data"}
+        findings = check_attachments(self.bug, [dict(entry, is_obsolete=False)],
+                                     self.emails)
+        self.assertEqual(len(findings), 2, findings)
+        kinds = {finding.kind: finding for finding in findings}
+        self.assertEqual(set(kinds), {"divergence", "unverifiable"})
+        self.assertIn("is_obsolete:", kinds["divergence"].detail)
+        self.assertIn("the reply carries no data", kinds["unverifiable"].detail)
+        self.assertIn("finding D9", kinds["unverifiable"].detail)
 
 
 if __name__ == "__main__":

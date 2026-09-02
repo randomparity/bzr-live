@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from itertools import permutations
 
 from . import Finding
-from .expected import CHAIN_FIELDS, ExpectedBug, ExpectedChange, ExpectedFlag
+from .expected import (
+    CHAIN_FIELDS,
+    INSIDER_GROUP,
+    ExpectedAttachment,
+    ExpectedBug,
+    ExpectedChange,
+    ExpectedComment,
+    ExpectedFlag,
+)
 
 
 def _show(value: object) -> str:
@@ -444,3 +455,152 @@ def check_links(alias: str, declared_direct: frozenset[tuple[str, str, str]],
     """
     return [*_direct(alias, declared_direct, direct, alias_of),
             *_reachability(alias, declared_hops, walk, alias_of)]
+
+
+def _located(entries: list, key: str, marker: str) -> list[Mapping[str, object]]:
+    """The entries whose `key` carries the marker token.
+
+    Every append-class event stamps `[<marker>]` into the body or summary it writes
+    (src/bzr_live/replay/actions.py), so the token is the only handle that survives a
+    replay without depending on a generated id or on the reply's order.
+    """
+    token = f"[{marker}]"
+    return [entry for entry in entries
+            if isinstance(entry, Mapping) and token in str(entry.get(key, ""))]
+
+
+def _entry_fields(bug: ExpectedBug, check: str, subject: str,
+                  entry: Mapping[str, object],
+                  declared: Mapping[str, object]) -> list[Finding]:
+    return [Finding("divergence", bug.alias, check,
+                    f"{subject} {key}: {_detail(value, entry.get(key))}")
+            for key, value in declared.items() if entry.get(key) != value]
+
+
+def _comment_zero(bug: ExpectedBug, declared: ExpectedComment, entries: list,
+                  emails: Mapping[str, str]) -> list[Finding]:
+    """The create description, which Bugzilla stores as comment 0 (Bug.pm:828)."""
+    entry = next((e for e in entries
+                  if isinstance(e, Mapping) and e.get("count") == 0), None)
+    if entry is None:
+        return [Finding("divergence", bug.alias, "comments",
+                        "declared a create description, observed no comment 0")]
+    return _entry_fields(bug, "comments", "comment 0", entry,
+                         {"creator": emails[declared.author], "text": declared.text})
+
+
+def _comment_order(bug: ExpectedBug,
+                   matched: list[tuple[str, object]]) -> list[Finding]:
+    """Declaration order against the `count` values, the reply's only ordering key.
+
+    No assertion compares a timestamp: `bzr` emits `creation_time` alone and the fixture
+    posts several comments inside one second, so only `count` orders a thread.
+    """
+    findings = []
+    for (before, earlier), (marker, count) in zip(matched, matched[1:]):
+        if isinstance(count, int) and isinstance(earlier, int) and count < earlier:
+            findings.append(Finding(
+                "divergence", bug.alias, "comments",
+                f"[{marker}] is declared after [{before}] but observed at count "
+                f"{count}, ahead of its count {earlier}"))
+    return findings
+
+
+def check_comments(bug: ExpectedBug, comments: list,
+                   emails: Mapping[str, str]) -> list[Finding]:
+    """One bug's declared thread against one insider `comment list` reply.
+
+    Comments are located by marker token, never by index or id: Bugzilla injects its own
+    comments into the thread -- the duplicate notice at `*** Bug N has been marked as a
+    duplicate ***` and the `Created attachment N` notice -- so the declared comments are
+    not a prefix of the observed ones and their counts are not contiguous.
+    """
+    findings: list[Finding] = []
+    matched: list[tuple[str, object]] = []
+    for declared in bug.comments:
+        if declared.marker is None:
+            findings += _comment_zero(bug, declared, comments, emails)
+            continue
+        entries = _located(comments, "text", declared.marker)
+        if len(entries) != 1:
+            findings.append(Finding(
+                "divergence", bug.alias, "comments",
+                f"[{declared.marker}] declared once, observed {len(entries)} times"))
+            continue
+        findings += _entry_fields(
+            bug, "comments", f"[{declared.marker}]", entries[0],
+            {"creator": emails[declared.author], "is_private": declared.private})
+        matched.append((declared.marker, entries[0].get("count")))
+    return findings + _comment_order(bug, matched)
+
+
+def check_visibility(bug: ExpectedBug, comments: list) -> list[Finding]:
+    """One bug's thread as an actor outside the insider group reads it.
+
+    Both directions are divergences. A private comment the outsider can read is the
+    leak the scenario declares against; a public one they cannot read is an
+    over-restrictive fixture, which would otherwise let a thread that hides everything
+    pass this check.
+    """
+    text = "".join(str(entry.get("text", "")) for entry in comments
+                   if isinstance(entry, Mapping))
+    findings = []
+    for declared in bug.comments:
+        if declared.marker is None:
+            continue
+        readable = f"[{declared.marker}]" in text
+        if declared.private == readable:
+            state = "readable by" if readable else "withheld from"
+            findings.append(Finding(
+                "divergence", bug.alias, "visibility",
+                f"[{declared.marker}] is declared "
+                f"{'private' if declared.private else 'public'} but is {state} an actor "
+                f"outside the {INSIDER_GROUP!r} group"))
+    return findings
+
+
+def _checksum(bug: ExpectedBug, declared: ExpectedAttachment,
+              entry: Mapping[str, object]) -> list[Finding]:
+    subject = f"attachment {declared.alias!r}"
+    if "data" not in entry:
+        return [Finding(
+            "unverifiable", bug.alias, "attachments",
+            f"{subject}: the reply carries no data, so the stored bytes cannot be "
+            "hashed; bzr requests data only on the XML-RPC arm (finding D9)")]
+    try:
+        raw = base64.b64decode(str(entry["data"]), validate=True)
+    except (binascii.Error, ValueError):
+        return [Finding("divergence", bug.alias, "attachments",
+                        f"{subject}: the reply's data is not valid base64")]
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest == declared.sha256:
+        return []
+    return [Finding("divergence", bug.alias, "attachments",
+                    f"{subject} sha256: {_detail(declared.sha256, digest)}")]
+
+
+def check_attachments(bug: ExpectedBug, attachments: list,
+                      emails: Mapping[str, str]) -> list[Finding]:
+    """One bug's declared attachments against one `attachment list` reply.
+
+    The summary carries the marker and the declared digest, so metadata and content are
+    both anchored to the scenario rather than to an id the server generated.
+    """
+    findings = []
+    for declared in bug.attachments:
+        entries = _located(attachments, "summary", declared.marker)
+        if len(entries) != 1:
+            findings.append(Finding(
+                "divergence", bug.alias, "attachments",
+                f"[{declared.marker}] declared once, observed {len(entries)} times"))
+            continue
+        findings += _entry_fields(
+            bug, "attachments", f"attachment {declared.alias!r}", entries[0], {
+                "summary": declared.summary,
+                "creator": emails[declared.author],
+                "content_type": declared.content_type,
+                "is_private": declared.private,
+                "is_obsolete": declared.obsolete,
+            })
+        findings += _checksum(bug, declared, entries[0])
+    return findings
