@@ -152,8 +152,8 @@ visibility from an actor outside the insider group, and attachment metadata and 
 checksums. Four of the six are skipped on a bug that declares nothing for them — the
 summary's check count is the number that actually ran, so a run that skipped a bug cannot
 report the same number as one that did not. It prints one line per finding, then a summary
-line, and exits 1 if any finding
-is a **divergence** — the fixture disagreeing with the scenario. A finding may instead be
+line, and exits 1 if any finding is a **divergence** — the fixture disagreeing with the
+scenario. A finding may instead be
 **unverifiable**, meaning `bzr` or Bugzilla cannot read the declared value back on this
 path; those are counted, printed with their reason, and do not fail the run. Each one is
 recorded in [docs/bzr-findings.md](docs/bzr-findings.md) or against a tracking issue.
