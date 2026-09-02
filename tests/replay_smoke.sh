@@ -111,6 +111,9 @@ echo "tinytext probe: 256-byte attachment summary exit $attach_status: $attach_o
 
 echo "replay smoke: findings probes (this script writes nothing to"
 echo "docs/bzr-findings.md -- transcribe any promotion from *read* to *observed* by hand)"
+echo "findings probe: not probed -- D3 G1 G2 G3 G4 G5 G6 G9 (source-read entries whose"
+echo "  live probe syntax is unverified here; e.g. G2's --version would collide with"
+echo "  bzr's own global --version flag rather than exercise bug update's)"
 set +e
 flag_out=$(BZR_LIVE_API_KEY=$TRIAGER_KEY "$BZR" --json \
   --server-url "$BASE_URL" \
