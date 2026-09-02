@@ -1614,7 +1614,10 @@ reply, so nothing is skipped on the strength of what the server happened to retu
 - `attachments` runs only for a bug the fold gives at least one attachment — two of the
   smoke scenario's twenty;
 - the recursive `links` read runs only when the root's eccentricity in the declared graph
-  is 2 or more; at 1 or 0 the direct read already covers the whole neighbourhood;
+  is 2 or more; at 1 or 0 the direct read already covers the whole neighbourhood. **When it
+  is skipped, pass an empty `declared_hops` together with the empty `walk`** — a populated
+  `declared_hops` beside an empty `walk` correctly reports every node absent, so the two
+  arguments have to be skipped as a pair. Task 5 pinned this with a test;
 - `history` runs, and `check_history` with it, only for a bug whose fold carries at least
   one `ExpectedChange` — **six** of the smoke scenario's twenty: `cart-double-charge`,
   `pay-decline-copy`, `pay-retry-loop`, `pay-token-leak`, `inv-tax-mismatch` and
