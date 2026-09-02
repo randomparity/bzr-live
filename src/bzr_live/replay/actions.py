@@ -49,6 +49,30 @@ _UPDATE_NO_CLEAR = {
 # (src/cli/bug/update.rs:85 and :92), so clap rejects either pairing at parse time.
 _UPDATE_DUPE_CONFLICTS = ("status", "resolution")
 
+# bzr bug view never serializes either, so nothing declared here can be read back;
+# check_supported has already refused the fields (version, groups) and the None forms
+# (resolution, milestone, duplicate_of) that would otherwise need a place here too.
+_UPDATE_ALWAYS_RETRY = ("estimated_hours", "remaining_hours")
+
+# Declared field -> (bzr bug view key, projection of the declared value for comparison).
+# Reference values compare after resolution, per the spec's "Reconciliation" section.
+_UPDATE_COMPARE = {
+    "summary": ("summary", lambda context, value: value),
+    "status": ("status", lambda context, value: value),
+    "resolution": ("resolution", lambda context, value: value),
+    "assignee": ("assigned_to", lambda context, value: context.actor_email(value)),
+    "duplicate_of": ("dupe_of", lambda context, value: context.resolve(value)),
+    "milestone": ("target_milestone", lambda context, value: value.name),
+}
+
+# Bugzilla list fields compare as sets: the delta bzr applies is order-independent.
+_UPDATE_COMPARE_SETS = {
+    "cc": ("cc", lambda context, ref: context.actor_email(ref)),
+    "keywords": ("keywords", lambda context, ref: ref.name),
+    "depends_on": ("depends_on", lambda context, ref: context.resolve(ref)),
+    "blocks": ("blocks", lambda context, ref: context.resolve(ref)),
+}
+
 
 def render_marker(text: str, marker: str) -> str:
     return f"{text}\n\n[{marker}]"
@@ -65,6 +89,19 @@ class Invocation:
     positionals: tuple[str, ...] = ()
     target_id: int | None = None            # bug id, for the REST boundary
     values: Mapping[str, object] | None = None   # REST body, without the api_key
+
+
+@dataclass(frozen=True, slots=True)
+class Reconciliation:
+    next_action: str                 # "advance" | "retry" | "stop"
+    output: JsonValue
+    resolved_ids: Mapping[str, int]
+    detail: str
+
+
+AMBIGUOUS_HINT = (
+    "the fixture cannot be reconciled automatically; reset it "
+    "(CONFIRM_RESET=1 make reset) and replay")
 
 
 def _bzr(operation: str, args, positionals=()) -> Invocation:
@@ -97,6 +134,47 @@ def _bug_object(payload: JsonValue) -> dict | None:
     return None
 
 
+def _attachment_object(payload: JsonValue) -> dict | None:
+    """The one attachment object `bzr attachment view` returns for a single ID, or None.
+
+    Same reasoning as `_bug_object`: exactly one shape is accepted so a reply-shape
+    change surfaces instead of being silently absorbed.
+    """
+    if isinstance(payload, dict) and "id" in payload:
+        return payload
+    return None
+
+
+def _marker_count(entries, field: str, marker: str) -> tuple[int, int | None]:
+    token = f"[{marker}]"
+    hits = [entry for entry in entries or []
+            if isinstance(entry, dict) and token in (entry.get(field) or "")]
+    if len(hits) != 1:
+        return len(hits), None
+    return 1, hits[0].get("id")
+
+
+def _append_result(event: PlannedEvent, count: int, entry_id, output: JsonValue) -> Reconciliation:
+    if count == 1:
+        return Reconciliation("advance", output, {}, "")
+    if count == 0:
+        return Reconciliation(
+            "retry", output, {}, f"event {event.name!r} did not commit")
+    return Reconciliation(
+        "stop", output, {},
+        f"event {event.name!r} matches {count} results for marker "
+        f"{event.reconciliation_marker!r}; {AMBIGUOUS_HINT}")
+
+
+def _entries(payload: JsonValue) -> list:
+    """The list `comment list` / `attachment list` returns, or an empty one.
+
+    One shape, for the same reason as `_bug_object`: a wrapper branch here would be
+    dead code that silently absorbs a reply-shape change instead of surfacing it.
+    """
+    return payload if isinstance(payload, list) else []
+
+
 def _unsupported(event: PlannedEvent, field: str, limitation: str) -> ReplayError:
     # The register pointer is appended only for a bzr-grounded limitation, which is
     # exactly the set that names an entry. A Bugzilla-grounded refusal has no entry to
@@ -120,6 +198,9 @@ class ActionHandler:
 
     def resolved_ids(self, event: PlannedEvent, output: JsonValue) -> dict[str, int]:
         return {}
+
+    def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation:
+        raise NotImplementedError(self.action)
 
 
 class BugCreateHandler(ActionHandler):
@@ -174,6 +255,22 @@ class BugCreateHandler(ActionHandler):
             raise ReplayError(
                 f"event {event.name!r}: bzr bug create returned no bug id")
         return {f"bug:{event.creates.name}": bug["id"]}
+
+    def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation:
+        values = event.expected_postcondition["values"]
+        payload = context.read_bug(event.actor, [values["server_alias"]])
+        if payload is None:
+            return Reconciliation(
+                "retry", payload, {}, f"event {event.name!r} did not commit")
+        bug = _bug_object(payload)
+        bug_id = bug.get("id") if bug is not None else None
+        if not isinstance(bug_id, int) or bug_id <= 0:
+            return Reconciliation(
+                "stop", payload, {},
+                f"event {event.name!r}: bzr bug view returned no usable bug id; "
+                f"{AMBIGUOUS_HINT}")
+        return Reconciliation(
+            "advance", payload, {f"bug:{event.creates.name}": bug_id}, "")
 
 
 class BugUpdateHandler(ActionHandler):
@@ -241,6 +338,33 @@ class BugUpdateHandler(ActionHandler):
             args += [f"{remove_flag}={item}" for item in remove]
         return _bzr("bug update", args, [bug_id])
 
+    def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation:
+        values = event.expected_postcondition["values"]
+        bug_id = context.resolve(event.expected_postcondition["target"])
+        bug = _bug_object(context.read_bug(event.actor, [str(bug_id)]))
+        if bug is None:
+            return Reconciliation(
+                "retry", bug, {}, f"event {event.name!r}: bug {bug_id} is unreadable")
+        for field in values:
+            if field in _UPDATE_ALWAYS_RETRY or (field == "assignee" and values[field] is None):
+                return Reconciliation(
+                    "retry", bug, {},
+                    f"event {event.name!r}: declared {field!r} cannot be read back")
+            if field in _UPDATE_COMPARE:
+                key, project = _UPDATE_COMPARE[field]
+                if project(context, values[field]) != bug.get(key):
+                    return Reconciliation(
+                        "retry", bug, {},
+                        f"event {event.name!r}: declared {field!r} differs from the fixture")
+            elif field in _UPDATE_COMPARE_SETS:
+                key, project = _UPDATE_COMPARE_SETS[field]
+                declared = {project(context, ref) for ref in values[field]}
+                if declared != set(bug.get(key) or []):
+                    return Reconciliation(
+                        "retry", bug, {},
+                        f"event {event.name!r}: declared {field!r} differs from the fixture")
+        return Reconciliation("advance", bug, {}, "")
+
 
 class BugCommentHandler(ActionHandler):
     action = "bug.comment"
@@ -255,6 +379,13 @@ class BugCommentHandler(ActionHandler):
         if values["private"]:
             args.append("--private")
         return _bzr("comment add", args, [bug_id])
+
+    def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation:
+        bug_id = context.resolve(event.expected_postcondition["target"])
+        payload = context.client(event.actor).read(
+            ["comment", "list"], positionals=[str(bug_id)])
+        count, entry_id = _marker_count(_entries(payload), "text", event.reconciliation_marker)
+        return _append_result(event, count, entry_id, payload)
 
 
 class BugAttachHandler(ActionHandler):
@@ -291,6 +422,24 @@ class BugAttachHandler(ActionHandler):
                 f"event {event.name!r}: bzr attachment upload returned no attachment id")
         return {f"attachment:{event.creates.name}": output["id"]}
 
+    def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation:
+        values = event.expected_postcondition["values"]
+        bug_id = context.resolve(values["bug"])
+        payload = context.client(event.actor).read(
+            ["attachment", "list"], positionals=[str(bug_id)])
+        count, entry_id = _marker_count(
+            _entries(payload), "summary", event.reconciliation_marker)
+        if count == 1:
+            return Reconciliation(
+                "advance", payload, {f"attachment:{event.creates.name}": entry_id}, "")
+        if count == 0:
+            return Reconciliation(
+                "retry", payload, {}, f"event {event.name!r} did not commit")
+        return Reconciliation(
+            "stop", payload, {},
+            f"event {event.name!r} matches {count} results for marker "
+            f"{event.reconciliation_marker!r}; {AMBIGUOUS_HINT}")
+
 
 class BugWorktimeHandler(ActionHandler):
     action = "bug.worktime"
@@ -304,6 +453,14 @@ class BugWorktimeHandler(ActionHandler):
         return _bzr("bug update", [
             "bug", "update", f"--work-time={values['hours']}",
             f"--comment-file={path}"], [bug_id])
+
+    def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation:
+        values = event.expected_postcondition["values"]
+        bug_id = context.resolve(values["bug"])
+        payload = context.client(event.actor).read(
+            ["comment", "list"], positionals=[str(bug_id)])
+        count, entry_id = _marker_count(_entries(payload), "text", event.reconciliation_marker)
+        return _append_result(event, count, entry_id, payload)
 
 
 class BugCustomFieldHandler(ActionHandler):
@@ -323,6 +480,26 @@ class BugCustomFieldHandler(ActionHandler):
             InvocationMetadata(
                 REST_BOUNDARY, f"PUT rest/bug/{bug_id}", tuple(sorted(body)), ()),
             target_id=bug_id, values=body)
+
+    def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation:
+        values = event.expected_postcondition["values"]
+        bug_id = context.resolve(values["bug"])
+        bug = _bug_object(context.read_bug(event.actor, [str(bug_id)]))
+        if bug is None:
+            return Reconciliation(
+                "retry", bug, {}, f"event {event.name!r}: bug {bug_id} is unreadable")
+        for assignment in values["values"]:
+            key = custom_field_name(assignment["field"].name)
+            declared = assignment["value"]
+            if isinstance(declared, tuple):
+                matches = set(declared) == set(bug.get(key) or [])
+            else:
+                matches = declared == bug.get(key)
+            if not matches:
+                return Reconciliation(
+                    "retry", bug, {},
+                    f"event {event.name!r}: declared {key!r} differs from the fixture")
+        return Reconciliation("advance", bug, {}, "")
 
 
 class BugFlagHandler(ActionHandler):
@@ -349,6 +526,34 @@ class BugFlagHandler(ActionHandler):
             spec += f"({context.actor_email(values['requestee'])})"
         return _bzr("bug update", ["bug", "update", f"--flag={spec}"], [bug_id])
 
+    def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation:
+        values = event.expected_postcondition["values"]
+        bug_id = context.resolve(values["bug"])
+        bug = _bug_object(context.read_bug(event.actor, [str(bug_id)]))
+        if bug is None:
+            return Reconciliation(
+                "retry", bug, {}, f"event {event.name!r}: bug {bug_id} is unreadable")
+        flag_name = values["flag_type"].name
+        status = values["status"]
+        flags = [flag for flag in (bug.get("flags") or []) if isinstance(flag, dict)]
+        if status == "X":
+            # A clear leaves no entry with this type name behind; comparing for a
+            # present X entry would make a flag-clear unable to reconcile at all.
+            matches = not any(flag.get("name") == flag_name for flag in flags)
+        else:
+            requestee_email = (
+                context.actor_email(values["requestee"])
+                if values["requestee"] is not None else None)
+            matches = any(
+                flag.get("name") == flag_name and flag.get("status") == status
+                and (requestee_email is None or flag.get("requestee") == requestee_email)
+                for flag in flags)
+        if matches:
+            return Reconciliation("advance", bug, {}, "")
+        return Reconciliation(
+            "retry", bug, {},
+            f"event {event.name!r}: declared flag {flag_name!r} differs from the fixture")
+
 
 class AttachmentUpdateHandler(ActionHandler):
     action = "attachment.update"
@@ -361,6 +566,26 @@ class AttachmentUpdateHandler(ActionHandler):
         if "description" in values:
             args.append(f"--summary={values['description']}")
         return _bzr("attachment update", args, [attachment_id])
+
+    def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation:
+        values = event.expected_postcondition["values"]
+        attachment_id = context.resolve(values["attachment"])
+        payload = context.client(event.actor).read(
+            ["attachment", "view"], positionals=[str(attachment_id)])
+        attachment = _attachment_object(payload)
+        if attachment is None:
+            return Reconciliation(
+                "retry", payload, {},
+                f"event {event.name!r}: attachment {attachment_id} is unreadable")
+        if attachment.get("is_obsolete") != values["obsolete"]:
+            return Reconciliation(
+                "retry", payload, {},
+                f"event {event.name!r}: declared 'obsolete' differs from the fixture")
+        if "description" in values and attachment.get("summary") != values["description"]:
+            return Reconciliation(
+                "retry", payload, {},
+                f"event {event.name!r}: declared 'description' differs from the fixture")
+        return Reconciliation("advance", payload, {}, "")
 
 
 HANDLERS: dict[str, ActionHandler] = {

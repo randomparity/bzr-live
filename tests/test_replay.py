@@ -375,5 +375,177 @@ class BuildTest(unittest.TestCase):
                 self.assertNotIn("SECRET-KEY", argument)
 
 
+class ReconcileTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = _state_root(self)
+        self.keys = KeyStore(self.root)
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        self.workspace = workspace.name
+        self.scenario = load_scenario(FIXTURE)
+        for resource in self.scenario.resources:
+            if resource.kind == "actor":
+                self.keys.store_actor_key(resource.name, "SECRET-KEY")
+
+    def _context(self, run) -> ReplayContext:
+        context = ReplayContext(
+            self.scenario, self.keys, bzr_path="bzr",
+            base_url="http://127.0.0.1:8080/", workspace=self.workspace, run=run)
+        # Every reconcile test below but the bug.create ones targets the bug the
+        # fixture's create-checkout-race event creates; adopt the same id BuildTest
+        # uses throughout so each test can call reconcile without repeating this.
+        context.adopt({"bug:checkout-race": 41})
+        return context
+
+    def _event(self, name: str):
+        return next(event for event in self.scenario.events if event.name == name)
+
+    def _create_event(self):
+        return self._event("create-checkout-race")
+
+    def _comment_event(self):
+        return self._event("comment-triage")
+
+    def _obsolete_event(self):
+        return self._event("obsolete-notes")
+
+    def _set_event(self, values):
+        # Hand-built the way Task 3 hand-built a PlannedEvent for its delta test: no
+        # fixture bug.update event declares a postcondition free of remaining_hours,
+        # which bzr bug view never serializes and would force retry regardless of
+        # what this checks.
+        marker = "bzr-live:replay-demo:update-status"
+        return PlannedEvent(
+            name="update-status",
+            actor=Reference("actor", "triager"),
+            action="bug.update",
+            action_class="idempotent-set",
+            payload={},
+            dependencies=(),
+            reconciliation_marker=marker,
+            expected_postcondition={
+                "action": "bug.update",
+                "target": Reference("bug", "checkout-race"),
+                "values": values,
+                "marker": marker,
+            },
+            creates=None,
+        )
+
+    def _flag_event(self, status):
+        # Hand-built: the fixture's only bug.flag event, flag-review, declares status
+        # "?", so a status-X (clear) postcondition has no fixture event to adopt.
+        marker = "bzr-live:replay-demo:flag-status"
+        return PlannedEvent(
+            name="flag-status",
+            actor=Reference("actor", "triager"),
+            action="bug.flag",
+            action_class="idempotent-set",
+            payload={},
+            dependencies=(),
+            reconciliation_marker=marker,
+            expected_postcondition={
+                "action": "bug.flag",
+                "target": Reference("bug", "checkout-race"),
+                "values": {
+                    "bug": Reference("bug", "checkout-race"),
+                    "flag_type": Reference("flag-type", "review"),
+                    "status": status,
+                    "requestee": None,
+                },
+                "marker": marker,
+            },
+            creates=None,
+        )
+
+    def test_create_adopts_an_existing_alias(self) -> None:
+        run = _FakeRun([(0, {"id": 41, "summary": "Checkout race"}, None)])
+        result = HANDLERS["bug.create"].reconcile(self._context(run), self._create_event())
+        self.assertEqual(result.next_action, "advance")
+        self.assertEqual(result.resolved_ids, {"bug:checkout-race": 41})
+
+    def test_create_retries_when_the_alias_is_absent(self) -> None:
+        # An unknown alias is exit 4 + api_code 100, asserted against a live Bugzilla in
+        # bzr's tests/functional/phases/08e-bugs-restricted-access.sh:289-292 (101 for a
+        # numeric id); ReplayContext.read_bug is what maps it to absent.
+        run = _FakeRun([(4, None, 100)])
+        result = HANDLERS["bug.create"].reconcile(self._context(run), self._create_event())
+        self.assertEqual(result.next_action, "retry")
+
+    def test_create_raises_when_the_bug_is_access_denied(self) -> None:
+        run = _FakeRun([(4, None, 102)])     # not absence: the actor may not see it
+        with self.assertRaises(ProvisionError):
+            HANDLERS["bug.create"].reconcile(self._context(run), self._create_event())
+
+    def test_append_adopts_exactly_one_marker(self) -> None:
+        run = _FakeRun(
+            [(0, [{"id": 5, "text": "body\n\n[bzr-live:replay-demo:comment-triage]"}], None)])
+        result = HANDLERS["bug.comment"].reconcile(self._context(run), self._comment_event())
+        self.assertEqual(result.next_action, "advance")
+
+    def test_append_retries_when_no_marker_is_present(self) -> None:
+        run = _FakeRun([(0, [{"id": 5, "text": "unrelated"}], None)])
+        result = HANDLERS["bug.comment"].reconcile(self._context(run), self._comment_event())
+        self.assertEqual(result.next_action, "retry")
+
+    def test_append_stops_on_two_markers(self) -> None:
+        marked = {"id": 5, "text": "[bzr-live:replay-demo:comment-triage]"}
+        run = _FakeRun([(0, [marked, dict(marked, id=6)], None)])
+        result = HANDLERS["bug.comment"].reconcile(self._context(run), self._comment_event())
+        self.assertEqual(result.next_action, "stop")
+        self.assertIn("CONFIRM_RESET=1 make reset", result.detail)
+
+    def test_set_advances_when_the_postcondition_matches(self) -> None:
+        run = _FakeRun(
+            [(0, {"id": 41, "status": "CONFIRMED", "target_milestone": "m1"}, None)])
+        event = self._set_event(
+            {"status": "CONFIRMED", "milestone": Reference("milestone", "m1")})
+        result = HANDLERS["bug.update"].reconcile(self._context(run), event)
+        self.assertEqual(result.next_action, "advance")
+
+    def test_set_retries_when_the_postcondition_differs(self) -> None:
+        run = _FakeRun(
+            [(0, {"id": 41, "status": "IN_PROGRESS", "target_milestone": "m1"}, None)])
+        event = self._set_event(
+            {"status": "CONFIRMED", "milestone": Reference("milestone", "m1")})
+        result = HANDLERS["bug.update"].reconcile(self._context(run), event)
+        self.assertEqual(result.next_action, "retry")
+        self.assertIn("status", result.detail)
+
+    def test_set_retries_when_a_declared_field_is_unreadable(self) -> None:
+        # update-triage is the fixture's own bug.update event; it declares
+        # remaining_hours, which bzr bug view never serializes, so even a reply that
+        # matches every other declared field still forces retry.
+        run = _FakeRun(
+            [(0, {"id": 41, "status": "CONFIRMED", "target_milestone": "m1"}, None)])
+        result = HANDLERS["bug.update"].reconcile(
+            self._context(run), self._event("update-triage"))
+        self.assertEqual(result.next_action, "retry")
+
+    def test_flag_clear_advances_on_absence(self) -> None:
+        # Status X is the one flag postcondition proved by absence: the declared clear
+        # committed exactly when no entry with that type name is present.
+        run = _FakeRun([(0, {"id": 41, "flags": []}, None)])
+        result = HANDLERS["bug.flag"].reconcile(self._context(run), self._flag_event("X"))
+        self.assertEqual(result.next_action, "advance")
+
+    def test_attachment_update_reads_the_attachment_by_id(self) -> None:
+        # The summary must equal the description obsolete-notes declares, because
+        # reconcile compares it: build emits --summary=<description>, so a reply whose
+        # summary still held the old value is a declared change that did not commit.
+        run = _FakeRun([
+            (0, {"id": 7, "summary": "Superseded triage notes", "is_obsolete": True},
+             None)])
+        context = self._context(run)
+        # The id table is keyed by the *attachment alias* the attach event declares
+        # (`triage-notes`), not by the asset name (`notes`) -- the same distinction that
+        # governs asset_file's key. obsolete-notes resolves attachment:triage-notes.
+        context.adopt({"attachment:triage-notes": 7})
+        result = HANDLERS["attachment.update"].reconcile(context, self._obsolete_event())
+        self.assertEqual(result.next_action, "advance")
+        self.assertEqual(run.calls[0]["argv"][-2:], ["--", "7"])
+        self.assertIn("view", run.calls[0]["argv"])
+
+
 if __name__ == "__main__":
     unittest.main()
