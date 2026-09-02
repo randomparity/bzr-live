@@ -1137,13 +1137,17 @@ Creates the first family in `src/bzr_live/verify/checks.py`. Tests the first par
 **Interfaces this task publishes.**
 
 ```python
-def check_fields(bug: ExpectedBug, observed: dict,
-                 alias_of: Mapping[int, str]) -> list[Finding]: ...
+def check_fields(bug: ExpectedBug, observed: dict, alias_of: Mapping[int, str],
+                 emails: Mapping[str, str]) -> list[Finding]: ...
 ```
 
 The caller reads the bug with `VIEW_FIELDS + expected.custom_field_keys`, so every
 declared `cf_*` name is requested by name; `bzr` warns on stderr for a field it does not
-know and returns the rest, which keeps the list declarative.
+know and returns the rest, which keeps the list declarative. It passes
+`expected.actor_emails` as `emails`: rule 7 below compares a declared flag requestee by
+email and `ExpectedFlag.requestee` holds the actor **alias**, which this plan already
+states at the fold rules above — the earlier signature here omitted the map that
+projection needs.
 
 ### Step 3.1 — the failing tests
 
