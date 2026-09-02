@@ -66,6 +66,15 @@ unverifiable claims separately; the exit status follows divergences alone.
 The fold is unit-testable with no fixture running, which is where most of the verifier's
 logic lives and where its tests are cheapest.
 
+History proves what Bugzilla records, and it records less than the scenario declares.
+There is no `dupe_of` row — `bug history 5` returns only the `status` and `resolution`
+changes the duplicate marking drove — so a duplicate is proven through `bug links` and the
+`dupe_of` field, not through history. And a set field writes one row per event with its
+added members comma-joined, not one row per member: `bug history 18` returns
+`depends_on '' -> '8, 14'` for an event declaring two. The fold expects one change per
+event per set field, and compares the added members as a set so the join order is never
+asserted.
+
 Containment assertions cannot catch a spurious extra history record or an extra comment.
 That is the price of not modelling Bugzilla's own writes, and the field-value checks —
 which are equality — still catch the state such a record would have produced.

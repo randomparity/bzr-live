@@ -50,9 +50,12 @@ Refuse before issuing any read, naming the scenario path in every message:
    `scenario_digest` equals the scenario digest and whose `next_safe_action` is
    `advance`. Anything else — absent, in-flight, `retry`, `stop` — refuses with the event
    name and what is missing. A partially replayed scenario has no expected final state.
-3. Each reader actor the scenario **does** declare has an API key in the key store. A
-   *missing role* is not a precondition failure — it falls through to the
-   `unverifiable` path below — because a scenario is free to declare only insiders.
+3. Each reader actor the scenario **does** declare has an API key in the key store. This
+   is an explicit `KeyStore` lookup in the runner, before any reader is constructed —
+   not left to `ReplayContext.client`, which raises a `ReplayError` pointing at
+   provisioning from inside the first read. A *missing role* is not a precondition
+   failure: it falls through to the `unverifiable` path below, because a scenario is free
+   to declare only insiders.
 4. The expected reachable node count from every link root is at most `1000`
    (`LINKS_MAX_NODES`, `bzr` `src/types/bug/links.rs:13`). Above that `bzr bug links`
    truncates its walk and warns on stderr, which `BzrClient.read` discards on exit 0, so
@@ -126,8 +129,16 @@ behaviour:
   (`src/bzr_live/replay/actions.py:397-409`), not against the previous declaration, so
   the two agree only while the fold models every server-side addition. The requestee rule
   above is the one such addition this scenario exercises. Removals are not asserted in
-  history — the attribution assertion is containment over `(who, field, new_value)`, and
-  a removal's `new_value` is the residue rather than the removed member.
+  history — the attribution assertion is containment, and a removal's `new_value` is the
+  residue rather than the removed member.
+
+  An event contributes **one** history expectation per set field, not one per added
+  member. Bugzilla writes one `bugs_activity` row per field per change with the added
+  members comma-joined: `bug history 18` returns a single `depends_on '' -> '8, 14'` for
+  `link-diamond-sink`, which declares two. The expectation carries the added members as a
+  **set**, and the check splits the observed `new_value` on `", "` before comparing, so
+  the join order is never asserted — which matters, because nothing establishes what
+  order Bugzilla joins in.
 
   Every declared value arrives as a `Reference`. It projects to `emails[ref.name]` for an
   actor-kinded field — `assignee`, `cc`, a flag `requestee` — and to `ref.name` otherwise
@@ -199,50 +210,40 @@ its field values. History expectations come from `bug.update`, `bug.flag`,
 **Attribution** is multiset containment: every declared change must appear at least as many
 times as it was declared, as `(who, field, projected new_value)`. Containment rather than
 equality, because the server adds records the scenario did not declare — the inverse
-`blocks` edge on the other bug, the `cc` record beside a flag, the `resolution` record
-beside a `dupe_of`. `who` is the declaring actor's email.
+`blocks` edge on the other bug, the `cc` record beside a flag, and the `status` and
+`resolution` records a duplicate marking drives. `who` is the declaring actor's email.
 
-The projection drops the value for fields whose history value is a generated numeric ID
-(`depends_on`, `blocks`, `dupe_of`) — those assert `(who, field)` only. It keeps the value
-for the symbolic ones: `summary`, `status`, `resolution`, `assigned_to`,
-`target_milestone`, `keywords` (each added keyword is its own record: `'' -> 'perf'`),
-`cc` (email), `flagtypes.name` (`review?(releaser@example.test)`), `attachments.isobsolete`
+The projection drops the value for `depends_on` and `blocks`, whose history values are
+generated numeric IDs — those assert `(who, field)` only. It keeps the value for the
+symbolic ones: `summary`, `status`, `resolution`, `assigned_to`, `target_milestone`,
+`keywords` and `cc` (the added members as a set, per the rule above),
+`flagtypes.name` (`review?(releaser@example.test)`), `attachments.isobsolete`
 (`'0' -> '1'`), and each `cf_*` (a multi-select renders comma-space joined:
 `'' -> 'cart, payment'`). Every rendering listed here was read from a live reply, not from
 `bzr` source.
 
+A declared `duplicate_of` contributes **no** history expectation. Bugzilla writes no
+`dupe_of` row: `bug history 5` returns exactly `triager | resolution | '' -> 'DUPLICATE'`
+and `triager | status | 'CONFIRMED' -> 'RESOLVED'` — the changes the marking drove — and
+nothing else. The duplicate edge is proven by check 3 and by the `dupe_of` field in check
+1, which is where the completion criterion asks for it.
+
 **Ordering** applies to the scalar chain fields — `status`, `resolution`, `assigned_to`,
 `target_milestone`, `summary` — where each record's `old_value` is the previous record's
-`new_value`. Records are grouped by `when` and the buckets ordered by `when`; the search
-then looks for an ordering that permutes each bucket internally, links head to tail across
-every bucket, and ends at the field's current value from `bug view`. The reconstructed
-`who` sequence must contain the declared actor sequence as a subsequence.
+`new_value`. It runs for a field only when the fold declares at least one change to it
+**and** the reply carries at least one record for it; a field with neither has no ordering
+to prove, and reporting one would fail every bug whose summary was set at create and never
+changed.
 
-The search is global, not bucket by bucket, and that is the load-bearing part.
-`bzr bug history 9` returns `triager|status RESOLVED->CONFIRMED` and
-`developer|status CONFIRMED->RESOLVED` sharing `2026-09-02T14:19:48Z`, then
-`developer|status CONFIRMED->RESOLVED` at `:49Z`. That first bucket admits both orderings
-on its own; only the `:49Z` record rules one out, because after
-`triager, developer` the chain stands at `RESOLVED` and the next record's `old_value` is
-`CONFIRMED`. A reconstruction that commits per bucket answers "ambiguous" here, where a
-unique ordering exists. Verified against the live reply: the search returns
-`developer → triager → developer` for both `status` and `resolution`, which is the
-declared sequence. How many records share a `bug_when` depends on how fast the replay
-ran, so the premise the design rests on is the stable one — records sharing a `bug_when`
-come back in an order Bugzilla does not define — not any particular collision.
-
-Candidate orderings are deduplicated by their `(who, old_value, new_value)` sequence, so
-two records identical in all three are interchangeable rather than two answers; without
-that, any bucket holding a repeated change is ambiguous by construction.
-
-No assertion compares a timestamp; `when` is a sort key and a search bound only. The
-reconstruction has three non-answers: no ordering links (a divergence), more than one
-links, and a search larger than its budget. The last two are reported `unverifiable` for
-that field rather than guessed.
-
-`comment_id` is never asserted. It is best-effort correlation by `(who, second)` and is
-observably wrong when an actor makes a commenting and a non-commenting change in the same
-second — see *New finding* below.
+The contract: records are ordered by linking `old_value` to `new_value` across the whole
+list, anchored at the tail on the field's current value from `bug view`; buckets of equal
+`when` are permuted internally; `when` is a sort key and a search bound and is never
+compared. The reconstructed `who` sequence must contain the declared actor sequence as a
+subsequence. The reconstruction has three named non-answers — no ordering links (a
+divergence), more than one links, and a search beyond its bounds — and the last two are
+reported `unverifiable` for that field rather than guessed. Why the search is global
+rather than per bucket, and why candidates are deduplicated, is ADR 0008's ground; it is
+not restated here.
 
 ### 3. Topology — `bug links`
 
@@ -316,7 +317,11 @@ One line per finding:
 verify: <scenario_dir>: <alias>: <check>: <detail>
 ```
 
-then `verify: <n> checks, <m> divergences, <k> unverifiable`. Exit 1 if `m > 0`, else 0.
+then `verify: <n> checks, <m> divergences, <k> unverifiable`, where `<n>` is the number of
+`(bug, check family)` pairs actually executed. That definition is what makes the summary
+readable: a bug the verifier skipped moves the number, so a green run cannot look
+identical to one that asserted nothing — the failure the replay's own `47 events executed`
+summary has. Exit 1 if `m > 0`, else 0.
 A precondition refusal exits 1 with a single `verify failed: <reason>` line, matching how
 `replay` reports one today.
 
@@ -339,14 +344,13 @@ A precondition refusal exits 1 with a single `verify failed: <reason>` line, mat
 **Live**: `make smoke` runs `verify` after the replay, inside the same state root, and
 fails the script on a non-zero exit.
 
-**Read budget.** Each read is a `bzr` process spawn plus an HTTP round trip, measured at
-roughly 0.34s for a `bug view` and 0.75s each for `history`, `links`, `comment list` and
-`attachment list` against this fixture. Twenty bugs at five reads apiece would add on the
-order of 70–90s to a smoke run that `README.md` currently records as 78.14s for the
-replay. The two skips above — no `attachment list` for a bug with no declared attachment,
-no recursive `links` read at eccentricity 1 — remove about a third of the calls. The
-stage still lengthens `make smoke` materially, so `README.md`'s published figure is
-re-measured with the verify stage in place, the way the fixture change before it was.
+**Read budget.** Each check read is a `bzr` process spawn plus an HTTP round trip, and the
+verify stage issues several per bug across twenty bugs, so it adds enough wall time that
+`README.md`'s published smoke figure stops being true. Two skips keep it down — no
+`attachment list` for a bug with no declared attachment, no recursive `links` read at
+eccentricity 1 — and the figure is re-measured from the run that adds the stage, the way
+the fixture change before it was. No estimate is published here: the measurement belongs
+to that run.
 
 ## New finding for `docs/bzr-findings.md`
 
