@@ -171,7 +171,8 @@ That is down from four: retargeting the design at the supported `bzr` revision t
   `refix-decline-copy` (`RESOLVED`) on the same bug, so the first two postconditions are
   false against the final state `bzr bug view 9` returns.
 - **Assert history ordering by the reply's record order.** verified: `bzr bug history 9`
-  (bzr 0.8.2 `ae39fbd8`, 2026-09-02) returns two status records sharing
+  (re-verified at bzr 0.8.3-dev `63abb94e`; first read at `0.8.2 ae39fbd8`, below the
+  supported floor) returns two status records sharing
   `2026-09-02T14:19:48Z` — `triager RESOLVED->CONFIRMED` then
   `developer CONFIRMED->RESOLVED` — in the opposite order to the one they happened in,
   because Bugzilla's `ORDER BY bug_when` leaves ties unordered. How many records share a

@@ -145,7 +145,13 @@ Per bug the fold carries: `product`, `component`, `summary`, `version`, `milesto
 and an ordered `history` list of declared changes.
 
 Three server behaviours are **modelled in the fold**, not tolerated at comparison time,
-each observed live against `scenarios/smoke/` on 2026-09-02 with `bzr 0.8.2 (ae39fbd8)`:
+each observed live against `scenarios/smoke/` on 2026-09-02 and **re-verified at
+`bzr 0.8.3-dev (63abb94e)`**, the revision `README.md` proves `make smoke` at. The first
+reading was taken at `0.8.2 (ae39fbd8)`, below that floor; all three still hold —
+`bug view 8` returns `cc: ['releaser@example.test']` where the scenario declared none,
+`bug view 12` returns `blocks: [1, 15]` from edges declared on the other endpoints, and
+neither `bug view 1` nor any other reply carries a `duplicates` key while `bug view 5`
+carries `dupe_of: 1`:
 
 - **A flag requestee joins the CC list.** `flag-review-request` declares no CC on
   `pay-retry-loop`; `bzr bug view 8` returns `cc: ['releaser@example.test']` and
