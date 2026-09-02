@@ -1,14 +1,18 @@
 # Implementation plan: smoke scenario (issue #19)
 
-**Goal.** Commit `scenarios/smoke/` — 20 bugs, 47 events, two products — and prove it loads
+**Goal.** Commit `scenarios/smoke/` — 20 bugs, 48 events, two products — and prove it loads
 offline and replays against the live pinned Bugzilla fixture through a real `bzr` binary.
 
 **Architecture and stack** are the spec's; this plan does not restate them. The one thing to
 carry into every task: the fixture is data validated by the existing loader, and no module
 under `src/` changes.
 
-Expected implementation size: 320–430 changed lines (M) — derived from the file map below: five
-fixture files (~140 lines), two proof files (~220), and Makefile/README edits (~40).
+Expected implementation size: 480–560 changed lines (M) — derived from the file map below:
+five fixture files (250–320 lines, dominated by 28 pretty-printed resources and 48 event
+lines), two proof files (~220), and Makefile/README edits (~30). The band stays M: the volume
+is declarative data, the cyclomatic surface is two files, and no reviewed logic path changes.
+An earlier 320–430 understated the fixture against this repository's existing formatting,
+which the scope audit measured against `tests/fixtures/replay-scenario/`.
 
 Spec: [`docs/workflow/specs/2026-09-01-smoke-scenario-design.md`](../specs/2026-09-01-smoke-scenario-design.md).
 Decision record: [`docs/adr/0007-committed-smoke-scenario.md`](../../adr/0007-committed-smoke-scenario.md).
@@ -42,7 +46,7 @@ Only these four are not in that table:
 |---|---|---|
 | `scenarios/smoke/scenario.json` | new | Format version, scenario name `smoke`, description, asset manifest with SHA-256 digests |
 | `scenarios/smoke/resources.json` | new | The resource catalog: groups referenced, actors, products, components, versions, milestones, keywords, custom fields, flag types |
-| `scenarios/smoke/events.jsonl` | new | 47 ordered events, one JSON object per line |
+| `scenarios/smoke/events.jsonl` | new | 48 ordered events, one JSON object per line |
 | `scenarios/smoke/assets/triage-notes.txt` | new | Attachment payload for `cart-double-charge` |
 | `scenarios/smoke/assets/retry-fix.patch` | new | Attachment payload for `pay-retry-loop` |
 | `tests/test_smoke_scenario.py` | new | Offline invariants over the committed scenario |
@@ -153,7 +157,7 @@ From `src/bzr_live/replay`:
    | `link-diamond-sink` | developer | `dun-wrong-locale` | `depends_on: [pay-retry-loop, inv-currency-drift]` |
    | `mark-duplicate` | triager | `cart-dupe-report` | `duplicate_of: cart-double-charge` — this field alone |
 
-   **Phase 3 — 7 lifecycle updates.**
+   **Phase 3 — 8 lifecycle updates.**
 
    | Event name | Actor | Bug | `set` |
    |---|---|---|---|
@@ -164,6 +168,13 @@ From `src/bzr_live/replay`:
    | `refix-decline-copy` | developer | `pay-decline-copy` | `status: "RESOLVED"`, `resolution: "FIXED"` |
    | `estimate-double-charge` | developer | `cart-double-charge` | `estimated_hours: "8"`, `remaining_hours: "6"` |
    | `retarget-double-charge` | releaser | `cart-double-charge` | `milestone: checkout-m2`, `keywords: [regression, perf]` |
+   | `assign-decline-copy` | triager | `pay-decline-copy` | `assignee: releaser` |
+
+   `assign-decline-copy` is what gives criterion 4 a second declared assignee; without it
+   `developer` is the only actor the scenario ever names in that role, and the criterion would
+   be met only by Bugzilla's component defaults — a substitution, not a declaration. Place it
+   after `confirm-decline-copy` and before `resolve-decline-copy`, so the bug is assigned
+   before it is resolved. `triager` holds `editbugs`, so the privilege invariant is unaffected.
 
    **Phase 4 — 5 comments.** `bug.comment` with `bug`, `body`, `private`.
 
@@ -214,7 +225,7 @@ From `src/bzr_live/replay`:
       print(s.name, len(s.events), s.digest[:16])"
    ```
 
-   Expect `smoke 47 <16 hex chars>`. A `ScenarioValidationError` names the file, line, and
+   Expect `smoke 48 <16 hex chars>`. A `ScenarioValidationError` names the file, line, and
    JSON path to fix; fix the fixture, not the loader.
 
 7. **Write the failing test.** Create `tests/test_smoke_scenario.py` with a
@@ -314,7 +325,7 @@ From `src/bzr_live/replay`:
 
     Both exit 0. Commit as `feat(scenario): add the 20-bug smoke scenario and its offline proof`.
 
-**Acceptance criteria.** `scenarios/smoke/` loads with 47 events and 20 creates;
+**Acceptance criteria.** `scenarios/smoke/` loads with 48 events and 20 creates;
 `tests/test_smoke_scenario.py` passes with eleven tests; **all three** guard tests —
 `test_private_comment_author_is_an_insider`, `test_attachment_summaries_fit`, and
 `test_creates_declaring_assignee_or_edges_are_privileged` — were each observed failing
@@ -361,20 +372,28 @@ scenario. It ends at a `make smoke` that an operator can run and that reports a 
      different one. A run whose output does not name the revision cannot tell a live finding
      from a stale one;
    - run provisioning, then replay, printing a progress line before each;
-   - time **only the replay**: set `SECONDS=0` on the line immediately before the
-     `python -m bzr_live.replay` invocation and nowhere else, then print
-     `smoke scenario: replayed <n> events in <SECONDS>s`, with `<n>` read from the loaded
-     scenario rather than hardcoded. Without that reset `SECONDS` counts from shell start,
-     so the figure would silently include provisioning twenty-eight resources — plausibly
-     the larger of the two intervals — under a label that says "replayed". `SECONDS` has
-     one-second granularity; if the replay lands under a second, report the provisioning
-     interval separately rather than publishing `0s` as a measurement;
+   - time **only the replay**, at sub-second resolution. Capture `date +%s%N` immediately
+     before and immediately after the `python -m bzr_live.replay` invocation and report the
+     difference in seconds to two decimals, then print
+     `smoke scenario: replayed <n> events in <elapsed>s`, with `<n>` read from the loaded
+     scenario rather than hardcoded. Do **not** use bash's `SECONDS`: it counts from shell
+     start, so without a reset the figure silently includes provisioning twenty-eight
+     resources — plausibly the larger interval — under a label saying "replayed", and even
+     reset it has one-second granularity, which can publish `0s` as though it were a
+     measurement.
+
+     `%N` is available on both targets — verified `/bin/date +%s%N` on Darwin 25 (BSD date,
+     which rejects `--version`) and GNU date on the `ubuntu-24.04` runner — but it is not in
+     the README's stated prerequisites, so degrade rather than assume: if the captured value
+     is not all digits, fall back to whole seconds from `date +%s` and label the figure as
+     second-resolution. `EPOCHREALTIME` is not an option; this repository targets Bash 3.2+
+     and it is unset there (confirmed on bash 3.2.57);
    - print `smoke scenario: OK` on success;
    - never write to `docs/bzr-findings.md`.
 
    Read the event count from the scenario the same way `tests/replay_smoke.sh:40-46` reads its
    values — a short `uv run --python 3.11 python -c` that loads the scenario — rather than
-   hardcoding 47, so the script does not drift from the fixture.
+   hardcoding 48, so the script does not drift from the fixture.
 
 2. **Check it parses and lints.**
 

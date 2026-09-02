@@ -20,11 +20,13 @@ committed scenarios live relative to the existing unit-test fixtures, whether th
 hand-authored or generated, and how a fixture that can only be fully exercised against a
 running Bugzilla gets a proof that CI can also run.
 
-A fourth question is forced by the contract rather than chosen. The loader adds a created
-identity to the resolvable set only after the creating event has validated
-(`src/bzr_live/scenario/loader.py:810`), so an event cannot cite a bug that a later event
-creates. Any topology richer than a chain in creation order has to be expressed some other
-way.
+A fourth question is raised by the contract without being settled by it. The loader adds a
+created identity to the resolvable set only after the creating event has validated
+(`src/bzr_live/scenario/loader.py:810`), so an event cannot cite a bug a later event creates.
+That constrains how an edge is spelled — it must be the later bug's `depends_on` if it is
+declared on a create at all — but not which topologies are expressible: any acyclic graph has
+a topological creation order. So *where* topology is declared stays a decision, and the
+Decision below makes it on grounds that have nothing to do with expressiveness.
 
 ## Decision
 
@@ -112,7 +114,7 @@ stated as narrowly as it is.
   `load`/`replay`/`verify` commands take a scenario path an operator types.
 - **Generate the fixture from a Python script at build time.** judgment: a generator makes
   the committed artifact a program rather than data, so reviewing what the fixture declares
-  means running it, and a 47-event stream is small enough to read. The epic's requirement
+  means running it, and a 48-event stream is small enough to read. The epic's requirement
   that generated server IDs never appear in committed fixture files needs no separate audit
   either way — every reference position is typed, and `loader.py:162-172` refuses anything
   that is not a `{"ref": ...}` object, so a baked-in id cannot load at all.
@@ -131,6 +133,8 @@ stated as narrowly as it is.
   on the two grounds in Decision above — silent edge-dropping for an unprivileged filer
   (`Bugzilla/Bug.pm:1707-1709`) and zero coverage of the update delta path
   (`src/bzr_live/replay/actions.py:396-405`) — not because it cannot be written.
-- **Add a loader affordance for forward references.** judgment: it would trade a validation
-  guarantee that currently catches typos for the convenience of declaring an edge in one
-  place instead of two, on a contract this issue is explicitly not chartered to change.
+- **Add a loader affordance for forward references.** judgment: nothing here needs one. Every
+  edge this scenario declares can be spelled backward, so the affordance would buy only the
+  freedom to write an edge in whichever direction reads best, at the cost of a validation
+  guarantee that currently catches a typo'd alias — on a contract this issue is explicitly
+  not chartered to change.

@@ -125,7 +125,7 @@ Twenty bugs, created in this order. The order matters only where a create declar
 | 6 | `cart-quantity-reset` | checkout/cart | reporter | checkout-v2 | |
 | 7 | `pay-token-leak` | checkout/payment | admin-ops | checkout-v1 | keyword `security`, assignee `developer` |
 | 8 | `pay-retry-loop` | checkout/payment | developer | checkout-v1 | |
-| 9 | `pay-decline-copy` | checkout/payment | triager | checkout-v2 | carries the reopening cycle |
+| 9 | `pay-decline-copy` | checkout/payment | reporter | checkout-v2 | carries the reopening cycle. Filed by `reporter` **deliberately**: `reporter` holds no `canconfirm`, so the bug lands `UNCONFIRMED` and the confirm event that follows is a real transition. Filed by a `canconfirm` actor it would land `CONFIRMED` already (`Bugzilla/Bug.pm:1508-1522`) and the confirm would write nothing while still reconciling green |
 | 10 | `pay-timeout-3ds` | checkout/payment | reporter | checkout-v1 | |
 | 11 | `pay-refund-rounding` | checkout/payment | developer | checkout-v2 | |
 | 12 | `inv-tax-mismatch` | billing/invoicing | triager | billing-v1 | milestone `billing-m1` |
@@ -150,12 +150,24 @@ apex and one on the sink, so each edge is declared exactly once.
 **Duplicate pair.** `cart-dupe-report` is marked `duplicate_of` `cart-double-charge` by a
 `bug.update` carrying that field alone (constraint 6).
 
-**Reopening.** `pay-decline-copy` goes `CONFIRMED` → `RESOLVED/FIXED` → `CONFIRMED` →
-`RESOLVED/FIXED`. The reopen is a status change, never a resolution clear (constraint 7).
+**Reopening.** `pay-decline-copy` goes `UNCONFIRMED` (as filed) → `CONFIRMED` →
+`RESOLVED/FIXED` → `CONFIRMED` → `RESOLVED/FIXED`. The reopen is a status change, never a
+resolution clear (constraint 7). The bug's filer is unprivileged precisely so the first
+transition is real: Bugzilla lands a bug filed by an `editbugs` **or** `canconfirm` holder
+directly in `CONFIRMED` (`Bugzilla/Bug.pm:1508-1522`; the fixture's `bug_status` sortkeys are
+`UNCONFIRMED 100, CONFIRMED 200`), and a redundant same-status update is accepted rather than
+refused (`:1541-1543`), so it would reconcile green having written nothing.
+
+**Assignee breadth.** Two distinct actors are declared as assignee, which criterion 4 requires
+on the assignee axis and not only on the reporter axis: `developer` on `create-pay-token-leak`
+and on `confirm-double-charge`, and `releaser` on `assign-decline-copy` in phase 3. Component
+default assignees would put bugs on `triager` and `developer` regardless, but a default is
+what Bugzilla substitutes, not what the scenario declares — the same distinction the privilege
+model above turns on.
 
 ## Event stream
 
-Forty-seven events in eight phases — 20 creates, 5 topology updates, 7 lifecycle updates,
+Forty-eight events in eight phases — 20 creates, 5 topology updates, 8 lifecycle updates,
 5 comments, 3 attachment events, 2 flags, 2 work-time entries, and 3 custom-field
 assignments. Every event name is unique and every marker derives from it
 (`src/bzr_live/scenario/loader.py:791`). The implementation plan carries the per-event
