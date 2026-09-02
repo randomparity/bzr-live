@@ -8,8 +8,11 @@ Every entry names the `bzr` source that establishes it, at a commit, and says wh
 behaviour was **observed** against a running fixture or **read** from source. An entry that
 has only been read is marked so. `make replay-smoke` is what produces the evidence to promote
 it: the script prints each probe's observed exit code and message, and a maintainer transcribes
-the result here. The script does not edit this file — the class of an entry is a judgement
-call, as D2 becoming G7 and the withdrawal of G8 both show.
+the result here. Today it probes D1 only and prints the remaining source-read entries by name
+as unprobed, because a probe whose syntax nobody has validated produces misleading evidence —
+so the absence of a probe line for an entry means it was not exercised, not that it passed.
+The script does not edit this file — the class of an entry is a judgement call, as D2 becoming
+G7 and the withdrawal of G8 both show.
 
 Citations are against `randomparity/bzr` at `b80303b7` unless stated otherwise. Before
 filing anything upstream, check it against `bzr`'s own `docs/adr/` and its open issues:
