@@ -6,18 +6,18 @@ mutate, restore, re-verify, resume.
 
 **Architecture.** Two GitHub Actions workflow files gain path entries; the existing
 `x86_64-linux` job in `container-lifecycle.yml` gains three steps; `tests/smoke_scenario.sh`
-gains five stages after its verify stage, all inside one invocation because the state root
-they share dies with the script's EXIT trap; `README.md` states what CI now proves and which
-runner is unavailable for the arm64 half. One new unit test asserts the path filters and the
-pinned revision, because `make check` reads no YAML.
+gains five stages after its verify stage, all inside one invocation (see the spec's *Script
+stages*); `README.md` states what CI now proves and which runner is unavailable for the
+arm64 half. One new unit test asserts the path filters, the workflow files' structure and
+the pinned revision, because `make check` reads no YAML.
 
 **Tech stack.** Bash (`set -euo pipefail`), Python 3.11 under `uv` with no runtime
 dependencies, GitHub Actions, Docker Compose, `cargo` on the runner.
 
-Expected implementation size: 190–250 changed lines (M) — derived from the file map below:
-~14 lines of path entries, ~22 lines of job steps, ~70 lines of shell stages, ~85 lines of
-new test, ~35 lines of README. The `effort:S` label on issue #25 sized the two workflow
-edits; the new test file and the script stages are what put it in M.
+Expected implementation size: 250–310 changed lines (M) — summed from the embedded blocks
+below: 12 lines of path entries, ~27 lines of job steps, ~86 lines of shell stages, ~139
+lines of new test, ~35 lines of README. The `effort:S` label on issue #25 sized the two
+workflow edits; the test file and the script stages are what put it in M.
 
 Spec: [`docs/workflow/specs/2026-09-02-ci-scenario-gate-design.md`](../specs/2026-09-02-ci-scenario-gate-design.md).
 Decision record: [`docs/adr/0010-ci-gated-live-scenario-proof.md`](../../adr/0010-ci-gated-live-scenario-proof.md).
@@ -115,6 +115,29 @@ def path_filters(workflow: Path) -> dict[str, list[str]]:
     return filters
 
 
+_INDENT = re.compile(r"^( *)\S")
+
+
+class WorkflowFilesAreStructurallySound(unittest.TestCase):
+    """Nothing local parses these files, and a broken one does not fail loudly.
+
+    A workflow GitHub cannot parse, or whose filters stopped matching, simply runs no
+    job -- which from the outside looks exactly like a gate that passed. These are the
+    structural facts a dependency-free line-oriented reader can still hold.
+    """
+
+    def test_no_tabs_and_every_indent_is_even(self) -> None:
+        for name in ("scenario-contract.yml", "container-lifecycle.yml"):
+            text = (WORKFLOWS / name).read_text(encoding="utf-8")
+            for number, line in enumerate(text.splitlines(), 1):
+                self.assertNotIn("\t", line, f"{name}:{number} contains a tab")
+                indent = _INDENT.match(line)
+                if indent is not None:
+                    self.assertEqual(
+                        len(indent.group(1)) % 2, 0,
+                        f"{name}:{number} is indented by an odd number of spaces")
+
+
 class ScenarioTreeIsGated(unittest.TestCase):
     def test_the_parse_sees_the_filters_it_is_asked_about(self) -> None:
         """Guard the parser itself: a regex that matched nothing would pass every
@@ -155,9 +178,10 @@ Run:
 
     uv run --python 3.11 python -m unittest tests.test_ci_workflow_gates -v
 
-Expect `test_the_parse_sees_the_filters_it_is_asked_about` to pass and the other two to
-fail, each naming the workflow and trigger whose list lacks the entry. A failure in the
-first test means the parse is wrong, not the workflow — fix the parse before continuing.
+Expect `test_no_tabs_and_every_indent_is_even` and
+`test_the_parse_sees_the_filters_it_is_asked_about` to pass, and the other two to fail,
+each naming the workflow and trigger whose list lacks the entry. A failure in the parse
+guard means the parse is wrong, not the workflow — fix the parse before continuing.
 
 ### Step 1.3 — add the entries
 
@@ -182,14 +206,14 @@ line 38):
 
     uv run --python 3.11 python -m unittest tests.test_ci_workflow_gates -v
 
-Expect `OK` and three tests run.
+Expect `OK` and four tests run.
 
 ### Step 1.5 — guardrails and commit
 
     make check
     make test
 
-Expect `make check` silent and exit 0, and `make test` to end `OK` with three more tests
+Expect `make check` silent and exit 0, and `make test` to end `OK` with four more tests
 than the 382 that ran before this change. Commit as
 `ci: gate the scenarios tree in both workflows`.
 
@@ -199,26 +223,40 @@ workflow also names `tests/smoke_scenario.sh` and this change's three design doc
 
 ## Task 2 — prove the checkpoint round trip inside the smoke run
 
-**Where this fits.** The stages issue #25 lists after `verify`. They must run inside
-`tests/smoke_scenario.sh` because `verify` and `resume` read the journal and actor keys in
-the state root that script mktemps at line 20 and removes on the EXIT trap at line 21.
+**Where this fits.** The stages issue #25 lists after `verify`, which must run inside
+`tests/smoke_scenario.sh` for the reason the spec's *Script stages* gives.
 
 **Interfaces.** Consumes, from the existing script: `$ROOT`, `$BZR`, `$SCENARIO`, `$STATE`,
 `$BASE_URL`, and `elapsed_since <start-ns>` defined at line 79. Provides nothing to later
 tasks except the stages themselves, which Task 3's job step invokes through `make smoke`.
 
-### Step 2.1 — append the stages
+### Step 2.1 — canonicalize the state root, then append the stages
 
-Append to `tests/smoke_scenario.sh`, after the existing `echo "smoke scenario: verified in
-${VERIFY_ELAPSED}s"` line and before the final `echo "smoke scenario: OK"`:
+First, in `tests/smoke_scenario.sh`, insert one assignment between the existing `STATE=$(mktemp
+-d …)` at line 20 and the `trap 'rm -rf "$STATE"' EXIT` at line 21, so it reads:
+
+```bash
+STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-smoke-scenario.XXXXXX")
+# scripts/checkpoint requires every path argument to equal its own resolve()
+# (src/bzr_live/checkpoint.py:155-167), and on macOS TMPDIR sits under the
+# /var -> /private/var symlink, so the mktemp spelling is refused with
+# "paths: store must be canonical". Resolve once here rather than leaving two spellings of
+# one directory in the script; tests/checkpoint_smoke.sh:5-6 does the same, for the same
+# caller. Nothing above this line uses $STATE, and the EXIT trap below expands it at exit.
+STATE=$(cd "$STATE" && pwd -P)
+trap 'rm -rf "$STATE"' EXIT
+```
+
+Then append, after the existing `echo "smoke scenario: verified in ${VERIFY_ELAPSED}s"` line
+and before the final `echo "smoke scenario: OK"`:
 
 ```bash
 # --- checkpoint round trip over the verified fixture --------------------------------
 # Issue #25 asks the live path to prove that a saved checkpoint restores the state the
-# scenario declares. These stages run here, in the replay's own state root, because
-# `verify` and `resume` read the journal and the actor keys that root holds and the EXIT
-# trap above removes it when this script ends. The store is a sibling of the state root:
-# scripts/checkpoint refuses a store that contains the runner state or the reverse.
+# scenario declares. These stages run in the replay's own state root because `verify` and
+# `resume` read the journal and actor keys it holds. The store is a sibling of that root:
+# scripts/checkpoint refuses a store containing the runner state or the reverse
+# (src/bzr_live/checkpoint.py:334-335).
 STORE="$STATE/store"
 mkdir "$STORE"
 echo "smoke scenario: saving checkpoint 'smoke' over the verified fixture"
@@ -243,12 +281,10 @@ read -r PROBE_ALIAS PROBE_ACTOR PROBE_EMAIL <<<"$PROBE"
 PROBE_KEY=$(cat "$STATE/state/actor-keys/$PROBE_ACTOR.key")
 
 # A summary the scenario does not declare, written only after the scenario's own
-# verification has passed and reverted by the restore below. Every declared summary is one
-# of the scalars compared against `bug view` (src/bzr_live/verify/checks.py:70-73), so a
-# restore that reverted nothing leaves a divergence the re-verify reports rather than a
-# stage that passes without proving anything. An appended comment would not: check_comments
-# locates each declared comment by marker and orders only those (:509-534), because
-# Bugzilla posts its own notices into the thread.
+# verification has passed and reverted by the restore below. `summary` is the field because
+# every declared summary is one of the scalars compared against `bug view`
+# (src/bzr_live/verify/checks.py:70-73); ADR 0010 decision 5 records why, and which
+# alternatives verify would not have caught.
 PROBE_SUMMARY="checkpoint probe: not the summary $PROBE_ALIAS declares"
 echo "smoke scenario: mutating $PROBE_ALIAS's summary as $PROBE_ACTOR"
 BZR_LIVE_API_KEY=$PROBE_KEY "$BZR" --json \
@@ -312,11 +348,10 @@ in <t>s` again reporting 0 divergences; the resume summary reporting every event
 complete; and `smoke scenario: OK`. Record each duration — they are the arm64 evidence
 Task 3 writes into `README.md` and the input to the CI budget claim.
 
-A failure at the re-verify naming a `summary` divergence on `$PROBE_ALIAS` means the
-restore did not revert the probe; that is a real finding about `scripts/checkpoint`, not a
-reason to weaken the stage. A failure at `verify` or `resume` naming a mode-0700
-requirement on the state root means the restore did not preserve the runner tree's modes —
-also a finding, recorded in the pull request.
+Two failures here are findings about `scripts/checkpoint`, not reasons to weaken the stage:
+a `summary` divergence on `$PROBE_ALIAS` at the re-verify means the restore did not revert
+the probe, and a mode-0700 complaint from `verify` or `resume` means it did not preserve the
+runner tree's modes. Record either in the pull request.
 
 ### Step 2.4 — commit
 
@@ -334,11 +369,38 @@ merge gate, plus the documentation criteria.
 **Interfaces.** Consumes `path_filters` from Task 1's module and `make smoke` from Task 2.
 Provides nothing to later tasks.
 
-### Step 3.1 — write the failing pin test
+### Step 3.1 — write the failing pin and step-order tests
 
 Append to `tests/test_ci_workflow_gates.py`, before the `if __name__` block:
 
 ```python
+_STEP_NAME = re.compile(r"^      - name: (.+)$")
+
+
+class LiveJobSteps(unittest.TestCase):
+    def test_the_live_job_declares_every_step_in_order(self) -> None:
+        """The order is a design decision, not an accident: `make smoke` documents a
+        fresh fixture as its precondition, so it runs against the one `make up` just
+        installed rather than whatever `make checkpoint-smoke` leaves behind. A step
+        whose indent slipped also disappears from this list rather than passing."""
+        lines = (WORKFLOWS / "container-lifecycle.yml").read_text(
+            encoding="utf-8").splitlines()
+        names = [match.group(1)
+                 for match in map(_STEP_NAME.match, lines) if match is not None]
+        self.assertEqual(names, [
+            "Check out repository",
+            "Verify checked out commit",
+            "Install uv and Python",
+            "Verify native architecture",
+            "Run lifecycle contract checks",
+            "Install the pinned bzr build",
+            "Start the fixture",
+            "Exercise the live scenario smoke path",
+            "Exercise checkpoint round trip",
+            "Clean project resources",
+        ])
+
+
 class PinnedBzrRevision(unittest.TestCase):
     """CI's pin and the revision README claims the scenario is proven at are one fact.
 
@@ -362,8 +424,9 @@ class PinnedBzrRevision(unittest.TestCase):
 
     uv run --python 3.11 python -m unittest tests.test_ci_workflow_gates -v
 
-Expect `test_ci_pins_the_revision_the_readme_proves` to fail on
-`expected exactly one pinned bzr revision` (0 != 1).
+Expect `test_ci_pins_the_revision_the_readme_proves` to fail on `expected exactly one
+pinned bzr revision` (0 != 1), and `test_the_live_job_declares_every_step_in_order` to fail
+with the three new step names missing from the observed list.
 
 ### Step 3.3 — add the job steps
 
@@ -374,14 +437,17 @@ checks` step and the `Exercise checkpoint round trip` step:
       - name: Install the pinned bzr build
         # libdbus-1-dev is not preinstalled on GitHub's Ubuntu images; bzr's own CI
         # installs it in every job that compiles (randomparity/bzr
-        # .github/workflows/ci.yml:21-22). The revision is the one README.md states this
-        # scenario is proven at, pinned by full SHA with --locked so the build is
-        # content-addressed. The prefix is outside the workspace because compose.yaml
-        # builds from context "." and this repository has no .dockerignore.
+        # .github/workflows/ci.yml:21-22). cargo and rustup are preinstalled, but the
+        # toolchain the image defaults to drifts, so 1.89.0 -- the channel the pinned
+        # tree's own rust-toolchain.toml names -- is requested explicitly. The revision is
+        # the one README.md states this scenario is proven at, pinned by full SHA with
+        # --locked. The prefix is outside the workspace because compose.yaml builds from
+        # context "." and this repository has no .dockerignore.
         run: |
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
-          cargo install --git https://github.com/randomparity/bzr \
+          rustup toolchain install 1.89.0 --profile minimal
+          cargo +1.89.0 install --git https://github.com/randomparity/bzr \
             --rev 63abb94e7e14a2db79efe0ddf0011a1f32ed8640 \
             --locked --root "$RUNNER_TEMP/bzr" bzr
 
@@ -405,7 +471,7 @@ whatever `make checkpoint-smoke` leaves behind.
 
     uv run --python 3.11 python -m unittest tests.test_ci_workflow_gates -v
 
-Expect `OK` and four tests run.
+Expect `OK` and six tests run.
 
 ### Step 3.5 — update README.md
 
@@ -431,16 +497,33 @@ In the "Smoke scenario" section:
     make check
     make test
 
-Expect both green, with `make test` reporting four more tests than the 382 on `main`.
+Expect both green, with `make test` reporting six more tests than the 382 on `main`.
 Commit as `ci: run the live scenario smoke path in the x86_64 job`.
 
 ### Step 3.7 — measure the CI run
 
 After the pull request opens, read the `Container lifecycle / x86_64-linux` job's total
 duration and each new step's duration from the run summary, and record them in the pull
-request body against the 45-minute budget. If the job exceeds the budget, report the
-measurement rather than raising `timeout-minutes`: the budget is issue #25's stated
-constraint.
+request body against the 45-minute budget and the 3.5-5.8 minute pre-change baseline.
+
+Never raise `timeout-minutes`: the 45-minute budget is issue #25's stated constraint. If
+the measured run exceeds it, apply the remedy ADR 0010's rejected-alternatives list already
+holds ready -- cache the built prefix, keyed on the pinned SHA, so the compile is a
+first-run cost:
+
+```yaml
+      - name: Restore the pinned bzr build
+        id: bzr-cache
+        uses: actions/cache@<pinned full SHA> # <version tag>
+        with:
+          path: ${{ runner.temp }}/bzr
+          key: bzr-${{ runner.os }}-63abb94e7e14a2db79efe0ddf0011a1f32ed8640
+```
+
+with `if: steps.bzr-cache.outputs.cache-hit != 'true'` on the install step. Resolve
+`actions/cache`'s current release and its commit SHA at that moment rather than from this
+plan, promote the rejected bullet to a decision, and say in the pull request what the
+measurement was that forced it.
 
 **Acceptance criteria.** The `x86_64-linux` job installs a full-SHA-pinned `bzr`, starts
 the fixture and runs `make smoke` to completion; the job stays inside 45 minutes and the

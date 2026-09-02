@@ -48,16 +48,28 @@ verification has passed, and is reverted before the re-verify.
 Those last four are this change's own inputs, listed the way that workflow already lists
 ADR 0005 and its spec. `src/**` is deliberately not added; ADR 0010 records the residual.
 
+`make check` reads no YAML — it runs `bash -n`, shellcheck, `compileall` and `docker
+compose config` (`Makefile:38-57`) — so a dropped entry or a mis-indented step in either
+file passes every local gate, and a workflow GitHub cannot parse or whose filters no longer
+match looks from the outside exactly like a gate that passed. `tests/test_ci_workflow_gates.py`
+holds what a dependency-free line-oriented reader can hold: the entries are present, no line
+carries a tab, every indent is even, the live job's steps appear in the order this design
+depends on, and the workflow's pinned `bzr` revision is the one `README.md` claims.
+
 ### Job steps (R2, R3)
 
 Three steps go into the existing `x86_64-linux` job, between `Run lifecycle contract checks`
 and `Exercise checkpoint round trip`:
 
 1. **Install the pinned bzr** — `sudo apt-get update && sudo apt-get install -y
-   libdbus-1-dev pkg-config`, then `cargo install --git https://github.com/randomparity/bzr
-   --rev 63abb94e7e14a2db79efe0ddf0011a1f32ed8640 --locked --root "$RUNNER_TEMP/bzr" bzr`.
-   The prefix is outside the workspace because `compose.yaml:20-21` builds from context `.`
-   and the repository has no `.dockerignore`.
+   libdbus-1-dev pkg-config`, then `rustup toolchain install 1.89.0 --profile minimal`,
+   then `cargo +1.89.0 install --git https://github.com/randomparity/bzr --rev
+   63abb94e7e14a2db79efe0ddf0011a1f32ed8640 --locked --root "$RUNNER_TEMP/bzr" bzr`. The
+   prefix is outside the workspace because `compose.yaml:20-21` builds from context `.` and
+   the repository has no `.dockerignore`. `cargo` and `rustup` are runner-image
+   prerequisites, not things this job installs: GitHub's `ubuntu-24.04` image ships both,
+   and the toolchain it defaults to drifts with the image, which is why `1.89.0` — the
+   channel the pinned tree's own `rust-toolchain.toml` names — is requested explicitly.
 2. **Start the fixture** — `make up`.
 3. **Exercise the live scenario smoke path** — `BZR_LIVE_BZR="$RUNNER_TEMP/bzr/bin/bzr"
    make smoke`.
@@ -73,19 +85,21 @@ same invocation because the state root the earlier stages wrote dies with the sc
 trap.
 
 - **save** — `scripts/checkpoint save smoke --store "$STATE/store" --runner-state
-  "$STATE/state"`. The store is a sibling of the state root: `scripts/checkpoint` refuses
-  a store and runner state that overlap.
+  "$STATE/state"`. Two constraints bind those arguments, both in `checkpoint.py`: store and
+  runner state must not overlap (`:334-335`), which siblings satisfy, and each must equal
+  its own `resolve()` (`:155-167`), which the script's `mktemp` root does not on macOS
+  because `TMPDIR` sits under the `/var` → `/private/var` symlink. The script therefore
+  canonicalizes `$STATE` at its `mktemp`, as `tests/checkpoint_smoke.sh:5-6` does.
 - **mutate** — read the first `bug.create` event's declared alias and actor out of the
   loaded scenario, and its actor email out of the scenario's resources, then send
-  `bug update --summary=<probe text>` as that actor with `--server-api-key-env`.
+  `bug update --summary=<probe text>` as that actor with `--server-api-key-env`. ADR 0010
+  decision 5 records why the summary is the field chosen.
 - **read back** — `bug view` the same alias and require the observed summary to equal the
-  probe text. This proves the mutation reached the server, so a restore that reverts
-  nothing cannot be mistaken for one that reverted something.
+  probe text, so a restore that reverts nothing cannot be mistaken for one that did.
 - **restore** — `scripts/checkpoint restore smoke` with the same store and runner state.
 - **re-verify and resume** — `verify` again against the same state root, then `resume`.
-  `verify` exits non-zero on any divergence, and the declared summary is one of the scalars
-  it compares, so a restore that did not revert the mutation fails here. `resume` reads
-  every event's journal record as already complete and sends no mutation.
+  `verify` exits non-zero on any divergence, so an unreverted mutation fails here. `resume`
+  reads every event's journal record as already complete and sends no mutation.
 
 Every stage is bare — no pipe, no `|| true` — so `set -euo pipefail` fails the script and
 therefore the job.
@@ -110,7 +124,7 @@ rewritten to state what actually holds after this change.
 | Provision, replay or verify diverges on x86_64 | The script exits non-zero with the stage's own message. That is issue #7's evidence, whichever way it lands. |
 | Checkpoint save or restore fails | `scripts/checkpoint` exits non-zero; the job fails and `make clean` removes the volumes. |
 | Restore silently reverts nothing | The re-verify reports a `summary` divergence and exits 1. |
-| The job exceeds 45 minutes | GitHub cancels it. The first run's measured duration is reported on the pull request. |
+| The job exceeds 45 minutes | GitHub cancels it, and `scenarios/**` becomes a red gate rather than a passing one. The budget is not asserted here: the job measures 3.5–5.8 minutes today across its last eight runs, leaving ~39 minutes; the addition is one uncached release build of 293 packages plus provisioning, one replay (72.63s on an M5 Max), two verify passes (56.91s each there), two stack stop/start cycles and a journal-only resume. That is plausibly inside the budget and plausibly not, and the first CI run is what settles it. If it overruns, the remedy is to cache the built prefix on the pinned SHA — the ADR's rejected bullet holds it ready — not to raise `timeout-minutes`, which is issue #25's stated constraint. |
 
 ## Threat model
 

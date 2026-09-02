@@ -41,15 +41,21 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
    smoke step runs before `make checkpoint-smoke`, so `make smoke` meets its documented
    fresh-fixture precondition without depending on what another test leaves behind.
 
-3. **Obtain `bzr` with `cargo install --git https://github.com/randomparity/bzr --rev
-   63abb94e7e14a2db79efe0ddf0011a1f32ed8640 --locked bzr`**, into a prefix under
-   `$RUNNER_TEMP`. The revision is the one `README.md` states the scenario is proven at.
-   Default features stay on, and the job installs `libdbus-1-dev pkg-config` first, so the
-   binary CI proves is configured exactly as the operator's.
+3. **Obtain `bzr` with `cargo +1.89.0 install --git https://github.com/randomparity/bzr
+   --rev 63abb94e7e14a2db79efe0ddf0011a1f32ed8640 --locked bzr`**, into a prefix under
+   `$RUNNER_TEMP`, after `rustup toolchain install 1.89.0` and an apt install of
+   `libdbus-1-dev pkg-config`. Three things are pinned: the source revision `README.md`
+   states the scenario is proven at, the dependency set (`--locked`), and the compiler —
+   `1.89.0` is what the pinned tree's own `rust-toolchain.toml` and its `Cargo.toml`
+   `rust-version` name. Default features stay on, matching upstream's native x86_64 Linux
+   build. The runner image supplies `cargo` and `rustup`; the job installs neither.
 
 4. **Put the whole sequence in `tests/smoke_scenario.sh`**, unconditionally, so `make smoke`
    is one path that CI and operators both run. The stages after `verify` are: save a
-   checkpoint over the verified fixture, mutate it, restore, re-verify, resume.
+   checkpoint over the verified fixture, mutate it, restore, re-verify, resume. That script's
+   state root is canonicalized at its `mktemp`, because `src/bzr_live/checkpoint.py:155-167`
+   requires every path argument to equal its own `resolve()` and macOS `TMPDIR` sits under
+   the `/var` → `/private/var` symlink — `tests/checkpoint_smoke.sh:5-6` already does this.
 
 5. **Mutate by rewriting one bug's `summary`** — the first `bug.create` the scenario
    declares, addressed by its declared alias and filed as its own actor. Every declared
@@ -66,10 +72,15 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
   in `Scenario contract` and the live tier in `Container lifecycle`. ADR 0007's second
   consequence — "It is not yet a CI gate for fixture-only edits" — stops holding from this
   change forward.
-- The live job now compiles a second repository's source. Its cost is bounded by a full
-  SHA and `--locked`, and by `permissions: contents: read` with no secret in the job, but
-  it is a real new input to this repository's CI and the pin needs raising by hand when
-  `README.md`'s proven revision moves.
+- The live job now compiles a second repository's source, uncached, on every triggering
+  pull request: 293 packages in release mode at the pinned revision. What it can reach is
+  bounded by the full SHA, `--locked`, `permissions: contents: read` and no secret in the
+  job; what it costs is not bounded at all, and the first CI run is the measurement. If
+  that run puts the job over 45 minutes, the pre-agreed remedy is to cache the built
+  prefix on the pinned SHA — see the rejected bullet, which states why it is not paid for
+  up front.
+- Two pins now need raising by hand together when `README.md`'s proven revision moves: the
+  `--rev` SHA and, if the new tree's `rust-toolchain.toml` moves, the `1.89.0` toolchain.
 - **A change under `src/bzr_live/replay/` or `src/bzr_live/verify/` still does not run the
   live job.** Adding `src/**` to `container-lifecycle.yml` would put a ~20-minute live job
   on nearly every pull request, which issue #25 does not ask for. The residual is real and
@@ -116,6 +127,18 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
   judgment: it buys a property the source already settles (rejected bullet above) at the
   cost of a second full verify pass in a job with a 45-minute ceiling; a cheap `bug view`
   read-back proves the mutation reached the server.
+- **Cache the compiled prefix with `actions/cache`, keyed on the pinned SHA.** judgment:
+  it would make the compile a first-run cost, and the pin makes the key exact — but the
+  build's cost is unmeasured, and paying for a cache before knowing whether the job needs
+  one adds a third-party action and a cross-run artifact to a fixture whose `AGENTS.md`
+  asks for the simple implementation. Held as the named remedy if the first CI run
+  overruns, rather than adopted blind. `randomparity/bzr`'s own CI uses
+  `Swatinem/rust-cache` (`.github/workflows/ci.yml:24-26`) for its far more frequent jobs.
+- **Land the path filters alone and leave the live sequence operator-run.** judgment: it
+  closes the gap this record opens with — a fixture-only pull request running no job — at
+  none of the cost the live half carries. Rejected because issue #25's second Expected
+  paragraph asks for the live x86_64 path in the same breath as the filters, and issue
+  #7's guarantee is the half that has no evidence.
 - **Run the live tier on a GitHub-hosted arm64 macOS runner.** verified: GitHub's
   runners reference states nested virtualization is unsupported on arm64 macOS runners
   (Apple Virtualization Framework), and container operations are Linux-only
