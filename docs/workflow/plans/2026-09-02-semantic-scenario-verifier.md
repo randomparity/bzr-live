@@ -1539,10 +1539,16 @@ Completes `src/bzr_live/verify/runner.py`, edits `src/bzr_live/replay/__main__.p
 ```python
 class Verifier:
     def __init__(self, scenario: ValidatedScenario, context: ReplayContext,
-                 store: JournalStore, scenario_dir: str, *,
+                 store: JournalStore, scenario_dir: str, keys: KeyStore, *,
                  out: Callable[[str], None] = print) -> None: ...
     def run(self) -> int: ...
 ```
+
+`keys` is passed in rather than reached through `ReplayContext`. The charter lists
+`src/bzr_live/replay/context.py` as a dependency this issue **reads and does not modify**,
+and `__main__.py` already builds the `KeyStore` at line 31 before it constructs the
+context — so the accessor a `self._context.keys` read would need is surface this change
+does not have to take, for a value the one caller already holds.
 
 ### Step 7.1 — the failing runner tests
 
@@ -1613,7 +1619,7 @@ In `src/bzr_live/replay/__main__.py`, change `choices=("replay", "resume")` to
 ```python
                 if options.command == "verify":
                     return Verifier(
-                        scenario, context, store, options.scenario_dir).run()
+                        scenario, context, store, options.scenario_dir, keys).run()
                 engine = ReplayEngine(scenario, context, store, journal)
                 getattr(engine, options.command)()
 ```

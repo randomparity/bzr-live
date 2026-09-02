@@ -115,12 +115,13 @@ class Verifier:
     """One replayed scenario checked against the fixture its journal was written for."""
 
     def __init__(self, scenario: ValidatedScenario, context: ReplayContext,
-                 store: JournalStore, scenario_dir: str, *,
+                 store: JournalStore, scenario_dir: str, keys: KeyStore, *,
                  out: Callable[[str], None] = print) -> None:
         self._scenario = scenario
         self._context = context
         self._store = store
         self._scenario_dir = scenario_dir
+        self._keys = keys
         self._out = out
         self._expected = fold(scenario)
 
@@ -128,7 +129,7 @@ class Verifier:
         # One wrapping site, so every precondition refusal names the scenario path
         # without threading it through each message.
         try:
-            check_reader_keys(self._expected, self._context.keys)
+            check_reader_keys(self._expected, self._keys)
             resolved = resolve_ids(self._scenario, self._store)
             check_link_bound(self._expected)
         except VerifyError as exc:

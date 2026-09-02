@@ -74,11 +74,6 @@ class ReplayContext:
         return self._clients[actor.name]
 
     @property
-    def keys(self) -> KeyStore:
-        """The key store itself, for a caller that must check a key without using it."""
-        return self._keys
-
-    @property
     def known_secrets(self) -> frozenset[str]:
         return frozenset(self._keys_seen.values())
 

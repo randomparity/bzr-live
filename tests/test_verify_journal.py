@@ -297,7 +297,7 @@ class VerifierPreconditionTest(_JournalFixture):
         context = ReplayContext(
             self.scenario, self.keys, bzr_path="bzr",
             base_url="http://127.0.0.1:8080/", workspace=self.workspace, run=forbid)
-        return Verifier(self.scenario, context, self.store, str(FIXTURE),
+        return Verifier(self.scenario, context, self.store, str(FIXTURE), self.keys,
                         out=out.append)
 
     def test_a_precondition_refusal_names_the_scenario_directory(self) -> None:
