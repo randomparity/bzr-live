@@ -4,6 +4,12 @@
 # readback. Requires: make up already healthy (start from CONFIRM_RESET=1 make
 # reset for a fresh fixture), and BZR_LIVE_BZR pointing at a bzr binary carrying
 # the component default_assigned_to fix.
+#
+# Runs on bash 3.2 -- macOS /bin/bash, the `bash` the Makefile's smoke recipes
+# resolve to on the development host. So: no bash 4+ syntax here, and no version
+# precondition either. That bash also discards a fatal `set -u` error's status
+# before the EXIT trap runs, which is why cleanup carries a completion sentinel
+# rather than only the status it was handed (issue #29).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -11,7 +17,17 @@ cd "$ROOT"  # uv resolves the project from cwd
 BZR=${BZR_LIVE_BZR:?set BZR_LIVE_BZR to the bzr binary to validate with}
 SCENARIO="$ROOT/tests/fixtures/provision-scenario"
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-provision-smoke.XXXXXX")
-trap 'rm -rf "$STATE"' EXIT
+COMPLETED=0
+cleanup() {
+  local status=$?
+  rm -rf -- "$STATE"
+  if [ "$status" -eq 0 ] && [ "$COMPLETED" -ne 1 ]; then
+    echo "smoke failed: provision smoke exited before finishing; see the error above" >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 chmod 700 "$STATE"
 
 # The fixture's port lives in the checkout's .env; fall back to it when the shell
@@ -84,4 +100,5 @@ if [[ $notes_ok -ne 0 ]] \
   exit 1
 fi
 
+COMPLETED=1
 echo "provision smoke: OK"
