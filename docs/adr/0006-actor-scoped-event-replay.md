@@ -170,10 +170,14 @@ auth method, whose query-parameter credential this fixture does parse as real au
 gets a 200 carrying the value. Bugzilla instead omits `estimated_time` and `remaining_time`
 from an otherwise-successful **200** for a caller who has not cleared `timetrackinggroup`,
 so no error status ever fires that retry. **Under D8 a read is confirmable when Bugzilla
-either does not gate the field against an anonymous caller or refuses the whole read with
-an error status that fires the retry; it is unconfirmable when Bugzilla answers 200 and
-silently omits the field.** That is a property of the request rather than of the field: the
-loudness in the `groups` case comes from the bug's visibility, not from `groups` itself.
+either does not gate the field against an anonymous caller, or refuses the whole read with
+an error status that fires the retry *and* the credential that retry carries is authorized
+for the bug; it is unconfirmable when Bugzilla answers 200 and silently omits the field.**
+That is a property of the request rather than of the field: the loudness in the `groups`
+case comes from the bug's visibility, not from `groups` itself. The second disjunct's
+added clause is not hypothetical — when the retry's credential is *not* authorized, the
+fallback draws 401 in its turn and finding D10 below reports the first attempt's error
+instead, which is the failure the third residual describes.
 The grounds were never the same, and the single shared rationale over the always-retry set
 is what let D3's staleness cover both time fields at once; each now names its own.
 
@@ -379,6 +383,24 @@ defaults to reset *to*, and `resolution` and `dupe_of` are cleared by a status t
   silently diverge. **Withdrawn by the amendment above (issue #27):** `bzr` serializes
   `groups` from `a7f6ab70` on (`src/types/bug.rs:242` at `63abb94e`), so the delta is
   computable and the set is confirmable, and the declared set is now applied in full.
+- **Keep refusing a declared `groups` update, re-grounded on the fixture gap rather than on
+  D3, until `containers/` provisions a settable bug group.** verified: the gap is real —
+  `group_control_map` is empty on this fixture and every `checksetup` group has
+  `isbuggroup = 0`, so an authenticated `groups.add` returns Bugzilla error 120 — but the
+  operator's 2026-09-02 narrowing of issue #27 scopes that provisioning out and asks for the
+  refusal removed on D3's staleness alone. A refusal is also the wrong instrument for it:
+  the ground would be Bugzilla's own configuration, not a `bzr` limitation, and
+  `AGENTS.md` puts a fixture-configuration gap in `containers/` rather than in a
+  client-side refusal.
+- **Compare the declared `groups` set by containment, as `cc` is compared.** judgment:
+  containment would silently accept a bug carrying groups the scenario never declared, and
+  the widening it guards against — a product's mandatory or default bug groups — cannot
+  occur while `group_control_map` is empty. Recorded as the residual above rather than
+  pre-emptively weakened.
+- **Record the withdrawal in a new ADR 0011 rather than amending this one in place.**
+  judgment: the decision changes this record's own refusal table and its own rejected
+  alternative, so a separate record would leave both reading as current; ADR 0008 set the
+  in-place precedent for exactly this situation when its first live run corrected it.
 - **A separate reconciliation index beside the journal.** judgment: a second source of truth
   for what the journal records already answer, and one more file to keep consistent with it.
 - **Auto-retry a failed event inside the same run.** judgment: an unbounded loop against a

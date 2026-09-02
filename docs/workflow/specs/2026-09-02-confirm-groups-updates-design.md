@@ -67,12 +67,20 @@ DEBUG bzr::client::transport: auth fallback response url=".../rest/bug/3" status
 
 ### Why `estimated_time` does not recover the same way
 
+Every row carries the *same* valid admin key; only the way it is presented differs, which
+is the whole of the contrast.
+
 | Probe | `estimated_time` |
 |---|---|
-| `bug view --fields=id,estimated_time`, default transport | absent |
-| `--api xmlrpc bug view --fields=id,estimated_time` | `8.0` |
-| `GET /rest/bug/1?...` with `X-BUGZILLA-API-KEY` header | absent |
+| `bug view --fields=id,estimated_time`, default transport, key via `--server-api-key-env` | absent |
+| `--api xmlrpc bug view --fields=id,estimated_time`, same key | `8.0` |
+| `GET /rest/bug/1?...` with the key in an `X-BUGZILLA-API-KEY` header | absent |
 | `GET /rest/bug/1?...&Bugzilla_api_key=<key>` | `8` |
+
+Rows 2 and 4 are not a transport that reads more fields; they are the two paths on which
+the key is actually *authenticated*. A run carrying no credential at all reproduces rows 1
+and 3 exactly, which is what makes the point: on the default transport the presented key
+changes nothing.
 
 Bugzilla gates the time-tracking fields on `timetrackinggroup` (`editbugs` on this image)
 and, for a caller that does not clear it, omits them from an otherwise-**successful 200**.
@@ -82,10 +90,13 @@ stays unread.
 **That contrast is the rule this design takes**, and it is a property of the *request*
 rather than of the field. Under D8 a read is confirmable when Bugzilla either does not gate
 the field against an anonymous caller — `groups` on an unrestricted bug — or refuses the
-whole read with an error status that fires `bzr`'s alternate-auth retry, whose query-
-parameter credential this fixture does parse as real auth. It is unconfirmable when
-Bugzilla answers **200** and silently omits the field, which is what it does to the
-time-tracking fields for a caller that has not cleared `timetrackinggroup`.
+whole read with an error status that fires `bzr`'s alternate-auth retry **and** the
+credential that retry carries is authorized for the bug; this fixture does parse that
+query-parameter credential as real auth. It is unconfirmable when Bugzilla answers **200**
+and silently omits the field, which is what it does to the time-tracking fields for a
+caller that has not cleared `timetrackinggroup`. Where the retry's credential is *not*
+authorized, the fallback 401s in its turn and finding D10 reports the first attempt's error
+instead — the residual the ADR records.
 
 The loudness in the `groups` case therefore comes from the bug's *visibility*, not from
 anything about the field: `bug_access_denied` maps to `STATUS_NOT_AUTHORIZED`
@@ -121,15 +132,10 @@ Per `actions.py:18-22` its rationale names Bugzilla and cites no findings entry.
    that matches the field's shape, and putting it in the scalar table would compare a
    `tuple` of references against a JSON list and never match.
 
-   It compares by **equality**, like `keywords`, not by containment like `cc` — and that
-   choice has a stated ground, because Bugzilla can widen the set behind the caller's back.
-   `Bugzilla/Bug.pm:1883` unions a product's mandatory groups into the set on every create
-   and update, and `:1860-1864` adds every `is_default` group when the caller names none,
-   either of which would make the observed set a strict superset of the declared one.
-   Equality is taken because this fixture has no mandatory or default bug group — its
-   `group_control_map` is empty — so the widening cannot occur. A product that gains one
-   must move `groups` to containment beside `cc`, for exactly the reason `checks.py:80-83`
-   already records there.
+   It compares by **equality**, like `keywords`, not by containment like `cc`: Bugzilla can
+   widen the set behind the caller (`Bugzilla/Bug.pm:1883` and `:1860-1864`), but only
+   through a product's mandatory or default bug groups, which this fixture has none of. The
+   ADR records that as a rejected alternative and as a residual.
 
 4. **Give each `_UPDATE_ALWAYS_RETRY` field its own rationale.** The tuple stays a tuple —
    the file's own convention (lines 15-17) keeps grounds in comments rather than in
@@ -199,26 +205,19 @@ added and none widened. Group *semantics* are Bugzilla's, and nothing here asser
 Unit only. No scenario under `scenarios/` declares a bug `groups` value, so the live tier
 does not exercise this path and `make smoke` is unchanged by it.
 
-Two existing tests assert the behaviour being removed and must be corrected in the same
-commits, not left to fail: `tests/test_replay.py:193-198`
-(`test_update_rejects_groups`, which asserts both `"groups"` and `"finding D3"` in the
-refusal message) is replaced by its acceptance counterpart, and the stale D3 comments at
-`tests/test_replay.py:640-642` and `tests/test_verify_expected.py:172-174` become false the
-moment the refusal goes. The fold test needs a fixture, because
-`tests/test_verify_expected.py` folds only from fixture directories: a new
-`tests/fixtures/verify-groups-update/` rather than an edit to `verify-cc-order`, whose
-`test_created_groups_are_folded_as_an_asserted_field` asserts a create-only groups set that
-a groups update in the same fixture would destroy.
+Existing tests and comments assert the behaviour being removed and are corrected in the
+same commits rather than left to fail; the fold test needs a new fixture directory, since
+`tests/test_verify_expected.py` folds only from those. The plan's file map names each.
 
 | Test | Proves |
 |---|---|
 | `check_supported` accepts a `bug.update` declaring `groups` | the refusal is gone |
-| `check_supported` still refuses `version` | the rest of the table is intact |
+| `check_supported` still refuses `version` — the existing `test_update_rejects_version` covers this and needs no new test | the rest of the table is intact |
 | `build` emits `--groups-add` / `--groups-remove` from the observed delta | criterion 2 — nothing declared is dropped |
 | `build` emits neither flag when declared and observed already agree | the delta is a delta |
 | `reconcile` advances on a matching `groups` set, retries on a differing one | criterion 1 |
 | the fold carries a declared `groups` update into `names["groups"]` and one `ExpectedChange` | criterion 3 — the regression test the issue asks for |
-| both time fields still reconcile as `retry` | criterion 4 |
+| `reconcile` retries on a declared `estimated_hours`, as it already does on `remaining_hours` | criterion 4 — `estimated_hours` has no update-path coverage today |
 
 The fold test is the one the issue names specifically, so it asserts the value and not just
 the key's presence: a fold that dropped the update would leave `names["groups"]` holding
@@ -226,13 +225,12 @@ the *created* set, which a test asserting only "the key exists" would pass.
 
 ## Follow-up this design does not take
 
-**No bug group in this fixture is settable on any product.** Measured: `group_control_map`
-is empty and every group `checksetup` creates has `isbuggroup = 0`, so an authenticated
-`groups.add` returns Bugzilla error 120 for any group name. Nothing in `containers/`,
-`bridge.pl`, or the provisioning boundaries writes that mapping, so a scenario that
-declared a bug `groups` value could not execute against the fixture today even after this
-change.
+**No bug group in this fixture is settable on any product**, so a scenario declaring a bug
+`groups` value could not execute against it even after this change. Per `AGENTS.md` ("Fix
+the fixture in the fixture") the gap belongs in `containers/`, not in a client-side
+refusal, and it is out of this issue's narrowed scope. Reported as a follow-up rather than
+taken here.
 
-Per `AGENTS.md` ("Fix the fixture in the fixture") that gap belongs in `containers/`, not
-in a client-side refusal — and it is out of this issue's narrowed scope, which no scenario
-currently exercises. Reported as a follow-up rather than taken here.
+The ADR 0006 amendment is the durable record: it states the measurement, the three
+residuals that wait on this gap, and why `groups` compares by equality while it holds. Read
+it there rather than here.
