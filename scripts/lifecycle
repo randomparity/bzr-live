@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Operator entry point behind make init, up, down, doctor, reset and clean.
+#
+# Runs on bash 3.2 -- macOS /bin/bash, which is what this script's `env bash` shebang
+# resolves to on the development host. So: no bash 4+ syntax here. That bash also
+# discards a fatal `set -u` error's status before the EXIT trap runs, which is why
+# cleanup carries a completion sentinel rather than only the status it was handed
+# (issue #32, applying the pattern issue #29 measured).
 set -euo pipefail
 
 COMMAND=${1:-}
@@ -22,6 +29,7 @@ ENV_FILE="$ROOT/.env"
 ACTIVE_TEMP=
 LOCK_HELD=0
 LOCK_DIR=
+COMPLETED=0
 
 cleanup() {
   local status=$?
@@ -31,6 +39,11 @@ cleanup() {
   if [[ $LOCK_HELD == 1 ]]; then
     rm -f "$LOCK_DIR/owner"
     rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+  if [ "$status" -eq 0 ] && [ "$COMPLETED" -ne 1 ]; then
+    printf '%s failed: exited before finishing. Next action: inspect the error above and retry.\n' \
+      "$COMMAND" >&2
+    status=1
   fi
   exit "$status"
 }
@@ -197,3 +210,5 @@ case "$COMMAND" in
     rm -f "$ENV_FILE" || die clean 'remove .env manually after verifying Compose cleanup' 'cannot remove .env'
     ;;
 esac
+
+COMPLETED=1
