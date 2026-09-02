@@ -509,6 +509,24 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(result.next_action, "stop")
         self.assertIn("CONFIRM_RESET=1 make reset", result.detail)
 
+    def test_append_stops_when_the_reply_does_not_answer(self) -> None:
+        # An unanswered read is not proof of absence. It used to collapse into the empty
+        # list, which retries -- re-sending the comment, upload or --work-time whose
+        # marker rides it, on the one class that must never be blindly repeated.
+        run = _FakeRun([(2, None, None)])
+        result = HANDLERS["bug.comment"].reconcile(self._context(run), self._comment_event())
+        self.assertEqual(result.next_action, "stop")
+        self.assertIn("did not answer", result.detail)
+        self.assertIn("CONFIRM_RESET=1 make reset", result.detail)
+
+    def test_append_raises_when_the_bug_cannot_be_listed(self) -> None:
+        # 51 is Bugzilla's generic object_does_not_exist and is in BzrClient.read's
+        # default absent set, which would silently answer None here. The append
+        # reconcilers pass an empty set instead, so an unreadable bug raises.
+        run = _FakeRun([(4, None, 51)])
+        with self.assertRaises(ProvisionError):
+            HANDLERS["bug.comment"].reconcile(self._context(run), self._comment_event())
+
     def test_attach_adopts_the_matched_attachment_id(self) -> None:
         event = self._event("attach-notes")
         run = _FakeRun(

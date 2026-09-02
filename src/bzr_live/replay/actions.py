@@ -103,6 +103,11 @@ AMBIGUOUS_HINT = (
     "the fixture cannot be reconciled automatically; reset it "
     "(CONFIRM_RESET=1 make reset) and replay")
 
+# The append reconcilers list a bug's comments or attachments, so no API code means the
+# entry is absent: an unreadable bug must raise, not answer "empty". This is the same
+# distinction ReplayContext.read_bug draws by keeping 102 out of BUG_ABSENT_CODES.
+_NO_ABSENT_CODES: frozenset[int] = frozenset()
+
 
 def _bzr(operation: str, args, positionals=()) -> Invocation:
     args, positionals = tuple(args), tuple(str(p) for p in positionals)
@@ -145,9 +150,12 @@ def _attachment_object(payload: JsonValue) -> dict | None:
     return None
 
 
-def _marker_count(entries, field: str, marker: str) -> tuple[int, int | None]:
+def _marker_count(entries, field: str, marker: str) -> tuple[int | None, int | None]:
+    """Entries carrying the marker. A None count means the reply did not answer."""
+    if entries is None:
+        return None, None
     token = f"[{marker}]"
-    hits = [entry for entry in entries or []
+    hits = [entry for entry in entries
             if isinstance(entry, dict) and token in (entry.get(field) or "")]
     if len(hits) != 1:
         return len(hits), None
@@ -163,7 +171,17 @@ def _append_result(event: PlannedEvent, count: int, entry_id, output: JsonValue,
     for a matched entry carrying no `id` and an unchecked None reaches
     `CompletedRecord.resolved_ids`, which refuses it -- turning a malformed boundary
     reply into a halt that blames the journal, after the in-flight record has landed.
+
+    A None count is the reply that did not answer. It stops rather than retrying: an
+    append that cannot be observed is not an append that did not happen, and this is
+    the one recovery class whose contract is that it is never blindly repeated.
     """
+    if count is None:
+        return Reconciliation(
+            "stop", output, {},
+            f"event {event.name!r}: the boundary did not answer the query for marker "
+            f"{event.reconciliation_marker!r}, so neither a commit nor its absence is "
+            f"proven; {AMBIGUOUS_HINT}")
     if count == 1:
         if id_key is None:
             return Reconciliation("advance", output, {}, "")
@@ -183,13 +201,15 @@ def _append_result(event: PlannedEvent, count: int, entry_id, output: JsonValue,
         f"{event.reconciliation_marker!r}; {AMBIGUOUS_HINT}")
 
 
-def _entries(payload: JsonValue) -> list:
-    """The list `comment list` / `attachment list` returns, or an empty one.
+def _entries(payload: JsonValue) -> list | None:
+    """The list `comment list` / `attachment list` returns, or None for no answer.
 
     One shape, for the same reason as `_bug_object`: a wrapper branch here would be
     dead code that silently absorbs a reply-shape change instead of surfacing it.
+    A non-list reply is not an empty bug -- `BzrClient.read` answers None on exit 2 --
+    so it must not collapse into the empty list that drives the append retry.
     """
-    return payload if isinstance(payload, list) else []
+    return payload if isinstance(payload, list) else None
 
 
 def _unsupported(event: PlannedEvent, field: str, limitation: str) -> ReplayError:
@@ -400,7 +420,8 @@ class BugCommentHandler(ActionHandler):
     def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation:
         bug_id = context.resolve(event.expected_postcondition["target"])
         payload = context.client(event.actor).read(
-            ["comment", "list"], positionals=[str(bug_id)])
+            ["comment", "list"], positionals=[str(bug_id)],
+            absent_codes=_NO_ABSENT_CODES)
         count, entry_id = _marker_count(_entries(payload), "text", event.reconciliation_marker)
         return _append_result(event, count, entry_id, payload)
 
@@ -443,7 +464,8 @@ class BugAttachHandler(ActionHandler):
         values = event.expected_postcondition["values"]
         bug_id = context.resolve(values["bug"])
         payload = context.client(event.actor).read(
-            ["attachment", "list"], positionals=[str(bug_id)])
+            ["attachment", "list"], positionals=[str(bug_id)],
+            absent_codes=_NO_ABSENT_CODES)
         count, entry_id = _marker_count(
             _entries(payload), "summary", event.reconciliation_marker)
         return _append_result(
@@ -468,7 +490,8 @@ class BugWorktimeHandler(ActionHandler):
         values = event.expected_postcondition["values"]
         bug_id = context.resolve(values["bug"])
         payload = context.client(event.actor).read(
-            ["comment", "list"], positionals=[str(bug_id)])
+            ["comment", "list"], positionals=[str(bug_id)],
+            absent_codes=_NO_ABSENT_CODES)
         count, entry_id = _marker_count(_entries(payload), "text", event.reconciliation_marker)
         return _append_result(event, count, entry_id, payload)
 
