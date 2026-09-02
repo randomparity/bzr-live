@@ -6,8 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from bzr_live.scenario import load_scenario
-from bzr_live.verify.checks import check_fields
-from bzr_live.verify.expected import ExpectedFlag, fold
+from bzr_live.verify.checks import chain_order, check_fields, check_history
+from bzr_live.verify.expected import ExpectedChange, ExpectedFlag, fold
 
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / "scenarios" / "smoke"
@@ -221,6 +221,254 @@ class FieldCheckTest(unittest.TestCase):
         for finding in findings:
             residue = UNNAMED.sub("", finding.detail)
             self.assertIsNone(re.search(r"\d", residue), finding.detail)
+
+
+DEVELOPER = "developer@example.test"
+TRIAGER = "triager@example.test"
+RELEASER = "releaser@example.test"
+ADMIN_OPS = "admin-ops@example.test"
+
+
+def _record(when: str, who: str, field: str, old: str, new: str,
+            comment: int | None = None) -> dict:
+    """One flattened `bug history` record, in the shape bzr's `--json` data list holds.
+
+    `comment_id` is carried for fidelity with the live reply; no check reads it.
+    """
+    return {"when": when, "who": f"{who}@example.test", "field": field,
+            "old_value": old, "new_value": new, "comment_id": comment}
+
+
+# `/Users/dave/src/bzr/target/release/bzr --json --server-url http://127.0.0.1:8080/
+# bug history 9` for `pay-decline-copy` on a replayed scenarios/smoke/, read live at
+# implementation time rather than copied from the plan: how many records share a
+# `bug_when` is a property of how fast the replay ran. The reply puts the triager's
+# reopen ahead of the developer's resolve -- the order they did not happen in -- because
+# Bugzilla's ORDER BY bug_when leaves same-second ties unordered.
+HISTORY_9 = [
+    _record("2026-09-02T14:19:46Z", "triager", "assigned_to", DEVELOPER, RELEASER),
+    _record("2026-09-02T14:19:48Z", "triager", "status", "RESOLVED", "CONFIRMED"),
+    _record("2026-09-02T14:19:48Z", "developer", "resolution", "", "FIXED"),
+    _record("2026-09-02T14:19:48Z", "developer", "status", "CONFIRMED", "RESOLVED"),
+    _record("2026-09-02T14:19:48Z", "triager", "resolution", "FIXED", ""),
+    _record("2026-09-02T14:19:49Z", "developer", "status", "CONFIRMED", "RESOLVED"),
+    _record("2026-09-02T14:19:49Z", "developer", "resolution", "", "FIXED"),
+    _record("2026-09-02T14:20:02Z", "releaser", "flagtypes.name", "", "signoff+"),
+]
+# `bzr bug view 9 --fields ...` for the same bug: the chain's tail anchor.
+VIEW_9 = {
+    "summary": "Decline message tells the customer to contact the wrong party",
+    "status": "RESOLVED",
+    "resolution": "FIXED",
+    "assigned_to": RELEASER,
+    "target_milestone": "---",
+}
+STATUS_9 = [record for record in HISTORY_9 if record["field"] == "status"]
+# The same three records collapsed into one `when` bucket -- the shape the reply takes
+# when the replay runs faster. Both shapes must recover the same order, which is what
+# proves the two value-identical developer records are deduplicated rather than counted
+# as two answers.
+ONE_BUCKET_9 = [dict(record, when="2026-09-02T14:19:48Z") for record in STATUS_9]
+# The chain with the triager's reopen dropped: neither ordering of what is left links.
+UNLINKED_STATUS = [record for record in STATUS_9 if record["who"] == DEVELOPER]
+# The one-bucket chain with the trailing record's `who` changed. The dedup cannot
+# collapse it any more, and RESOLVED is reachable with either developer at the tail, so
+# two genuinely different orderings link.
+AMBIGUOUS_STATUS = [*ONE_BUCKET_9[:2], dict(ONE_BUCKET_9[2], who=RELEASER)]
+# Eight records in one bucket -- one above _MAX_BUCKET, rejected before any search.
+OVERSIZED_BUCKET = [
+    _record("2026-09-02T14:19:48Z", "developer", "summary", f"s{i}", f"s{i + 1}")
+    for i in range(8)]
+# Two buckets of seven chained records. The identity permutation of each links and ends
+# at s14, so the search records a solution on the first branch it walks and then runs out
+# of budget with orderings still unenumerated: 2 x 5,040 permutations against 10,000.
+BUDGET_BOUND = [
+    _record("2026-09-02T14:19:48Z", "developer", "summary", f"s{i}", f"s{i + 1}")
+    for i in range(7)
+] + [
+    _record("2026-09-02T14:19:49Z", "developer", "summary", f"s{i}", f"s{i + 1}")
+    for i in range(7, 14)
+]
+# The chain with a status record the scenario never declared spliced into it, as a
+# duplicate marking splices one. The declared actors must still read as a subsequence.
+INJECTED_STATUS = [
+    *STATUS_9[:2],
+    _record("2026-09-02T14:19:49Z", "triager", "status", "RESOLVED", "CONFIRMED"),
+    _record("2026-09-02T14:19:50Z", "developer", "status", "CONFIRMED", "RESOLVED"),
+]
+
+# `bug history 8` for `pay-retry-loop`: four records, of which the scenario declares one.
+# The other three are the server's -- two materialised inverse edges and the CC entry
+# Bugzilla writes beside a flag requestee.
+HISTORY_8 = [
+    _record("2026-09-02T14:19:39Z", "admin-ops", "depends_on", "", "7"),
+    _record("2026-09-02T14:19:40Z", "developer", "blocks", "", "18"),
+    _record("2026-09-02T14:20:01Z", "developer", "cc", "", RELEASER),
+    _record("2026-09-02T14:20:01Z", "developer", "flagtypes.name", "",
+            f"review?({RELEASER})"),
+]
+# `bug history 5` for `cart-dupe-report`: the status and resolution the duplicate marking
+# drove, and no `dupe_of` row at all.
+HISTORY_5 = [
+    _record("2026-09-02T14:19:41Z", "triager", "resolution", "", "DUPLICATE", 21),
+    _record("2026-09-02T14:19:41Z", "triager", "status", "CONFIRMED", "RESOLVED", 21),
+]
+# `bug history 18` for `dun-wrong-locale`: one record for the two members
+# `link-diamond-sink` declares, with the generated ids comma-joined.
+HISTORY_18 = [
+    _record("2026-09-02T14:19:40Z", "developer", "depends_on", "", "8, 14"),
+]
+# `bug history 2` for `cart-empty-crash`, whose summary was seeded at create and never
+# changed: Bugzilla writes no bugs_activity row for a creation.
+HISTORY_2: list[dict] = []
+
+
+class ChainOrderTest(unittest.TestCase):
+    """chain_order over the transcribed bug 9 payloads and its three non-answers."""
+
+    def test_the_two_bucket_reply_recovers_an_order_it_did_not_return(self) -> None:
+        self.assertEqual([record["who"] for record in STATUS_9],
+                         [TRIAGER, DEVELOPER, DEVELOPER])
+        ordered, reason = chain_order(STATUS_9, "RESOLVED")
+        self.assertIsNone(reason)
+        self.assertEqual([record["who"] for record in ordered],
+                         [DEVELOPER, TRIAGER, DEVELOPER])
+
+    def test_the_one_bucket_variant_recovers_the_same_order(self) -> None:
+        ordered, reason = chain_order(ONE_BUCKET_9, "RESOLVED")
+        self.assertIsNone(reason)
+        self.assertEqual([record["who"] for record in ordered],
+                         [DEVELOPER, TRIAGER, DEVELOPER])
+
+    def test_no_records_is_not_a_broken_chain(self) -> None:
+        self.assertEqual(chain_order([], "CONFIRMED"), ([], None))
+
+    def test_a_chain_missing_a_record_is_unlinked(self) -> None:
+        self.assertEqual(chain_order(UNLINKED_STATUS, "RESOLVED"), (None, "unlinked"))
+
+    def test_two_genuinely_different_orderings_are_ambiguous(self) -> None:
+        self.assertEqual(chain_order(AMBIGUOUS_STATUS, "RESOLVED"), (None, "ambiguous"))
+
+    def test_a_bucket_above_the_cap_is_rejected_before_the_search(self) -> None:
+        self.assertEqual(chain_order(OVERSIZED_BUCKET, "s8"), (None, "oversized"))
+
+    def test_an_exhausted_budget_answers_oversized_not_the_first_solution(self) -> None:
+        # The premise: the first branch the search walks does link and does end at s14.
+        first_bucket, reason = chain_order(BUDGET_BOUND[:7], "s7")
+        self.assertIsNone(reason)
+        self.assertEqual(len(first_bucket), 7)
+        # So a search that checked its solution count before its budget would hand that
+        # ordering back as unique. It is not: 10,000 permutations do not cover 5,040 x
+        # 5,040, and the orderings never reached could hold a second answer.
+        self.assertEqual(chain_order(BUDGET_BOUND, "s14"), (None, "oversized"))
+
+
+class HistoryCheckTest(unittest.TestCase):
+    """check_history against the transcribed replies for bugs 2, 5, 8, 9 and 18."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        expected = fold(load_scenario(str(SMOKE)))
+        cls.bugs = expected.bugs
+        cls.emails = expected.actor_emails
+
+    def _history(self, bug, records, observed=None):
+        return check_history(bug, records, observed or {}, self.emails)
+
+    def _only(self, bug, records, observed=None):
+        findings = self._history(bug, records, observed)
+        self.assertEqual(len(findings), 1, findings)
+        return findings[0]
+
+    def _declaring(self, alias, *changes):
+        return replace(self.bugs[alias], history=changes)
+
+    def test_every_declared_change_present_yields_no_finding(self) -> None:
+        self.assertEqual(
+            self._history(self.bugs["pay-decline-copy"], HISTORY_9, VIEW_9), [])
+
+    def test_an_absent_declared_change_names_the_actor_and_the_field(self) -> None:
+        records = [record for record in HISTORY_9
+                   if record["field"] != "flagtypes.name"]
+        finding = self._only(self.bugs["pay-decline-copy"], records, VIEW_9)
+        self.assertEqual(finding.kind, "divergence")
+        self.assertEqual(finding.check, "flagtypes.name")
+        self.assertIn(RELEASER, finding.detail)
+        self.assertIn("flagtypes.name", finding.detail)
+
+    def test_records_the_scenario_never_declared_are_tolerated(self) -> None:
+        # The CC entry beside a flag requestee and the two materialised inverse edges on
+        # bug 8; the status and resolution a duplicate marking drove on bug 5.
+        self.assertEqual(self._history(self.bugs["pay-retry-loop"], HISTORY_8), [])
+        self.assertEqual(self._history(self.bugs["cart-dupe-report"], HISTORY_5), [])
+
+    def test_a_change_declared_twice_needs_two_records(self) -> None:
+        bug = self._declaring(
+            "cart-dupe-report",
+            ExpectedChange("admin-ops", "cf_tracker", "OPS-1042", False),
+            ExpectedChange("admin-ops", "cf_tracker", "OPS-1042", False))
+        record = _record("2026-09-02T14:20:03Z", "admin-ops", "cf_tracker", "",
+                         "OPS-1042")
+        self.assertEqual(self._history(bug, [record, dict(record)]), [])
+        finding = self._only(bug, [record])
+        self.assertEqual(finding.kind, "divergence")
+        self.assertEqual(finding.check, "cf_tracker")
+        self.assertIn(ADMIN_OPS, finding.detail)
+
+    def test_a_chain_that_links_no_ordering_diverges(self) -> None:
+        bug = self._declaring(
+            "pay-decline-copy",
+            ExpectedChange("developer", "status", "RESOLVED", True))
+        finding = self._only(bug, UNLINKED_STATUS, {"status": "RESOLVED"})
+        self.assertEqual(finding.kind, "divergence")
+        self.assertEqual(finding.check, "status")
+        self.assertIn("unlinked", finding.detail)
+
+    def test_an_ambiguous_chain_is_unverifiable_rather_than_guessed(self) -> None:
+        bug = self._declaring(
+            "pay-decline-copy",
+            ExpectedChange("developer", "status", "RESOLVED", True))
+        finding = self._only(bug, AMBIGUOUS_STATUS, {"status": "RESOLVED"})
+        self.assertEqual(finding.kind, "unverifiable")
+        self.assertEqual(finding.check, "status")
+        self.assertIn("ambiguous", finding.detail)
+
+    def test_an_oversized_chain_is_unverifiable_rather_than_guessed(self) -> None:
+        bug = self._declaring(
+            "cart-double-charge",
+            ExpectedChange("developer", "summary", "s14", True))
+        finding = self._only(bug, BUDGET_BOUND, {"summary": "s14"})
+        self.assertEqual(finding.kind, "unverifiable")
+        self.assertEqual(finding.check, "summary")
+        self.assertIn("oversized", finding.detail)
+
+    def test_an_injected_status_change_still_orders(self) -> None:
+        declared = self.bugs["pay-decline-copy"].history
+        bug = self._declaring(
+            "pay-decline-copy",
+            *(change for change in declared if change.field == "status"))
+        self.assertEqual(self._history(bug, INJECTED_STATUS, VIEW_9), [])
+
+    def test_a_bug_whose_summary_was_only_seeded_yields_no_finding(self) -> None:
+        self.assertEqual(
+            self._history(self.bugs["cart-empty-crash"], HISTORY_2,
+                          {"summary": "Empty cart page returns a server error"}), [])
+
+    def test_a_folded_duplicate_expects_no_dupe_of_record(self) -> None:
+        self.assertEqual(self.bugs["cart-dupe-report"].history, ())
+        self.assertEqual(self._history(self.bugs["cart-dupe-report"], HISTORY_5), [])
+
+    def test_a_two_member_edge_addition_expects_one_record(self) -> None:
+        self.assertEqual(self._history(self.bugs["dun-wrong-locale"], HISTORY_18), [])
+
+    def test_a_two_member_cc_addition_compares_as_a_set(self) -> None:
+        bug = self._declaring(
+            "cart-dupe-report",
+            ExpectedChange("developer", "cc",
+                           frozenset({"a@example.test", "b@example.test"}), False))
+        record = _record("2026-09-02T14:20:04Z", "developer", "cc", "",
+                         "b@example.test, a@example.test")
+        self.assertEqual(self._history(bug, [record]), [])
 
 
 if __name__ == "__main__":
