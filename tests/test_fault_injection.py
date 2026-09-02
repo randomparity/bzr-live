@@ -440,5 +440,182 @@ class ReplayThroughTheDoubleTest(_Fixture):
         self.assertIn("reset-assigned-to", str(caught.exception))
 
 
+class ResponseLossTest(_Fixture):
+    """ADR 0006's guarantee: a response lost after the mutation committed resumes to
+    exactly one semantic result, or refuses with a reset/replay instruction.
+
+    Each test kills the runner after the fixture applied the mutation, then runs a second,
+    independent `resume` over the same journal directory -- the operator's own recovery
+    path, not a test-only one.
+    """
+
+    def _lose_response(self, scenario, operation: str) -> FakeBugzilla:
+        """Replay until the named mutation commits, then destroy the runner."""
+        server = FakeBugzilla()
+        loss = _ResponseLoss(server, operation)
+        with self.assertRaises(_RunnerKilled):
+            self._process(scenario, loss, "replay")
+        self.assertTrue(loss.fired, f"no {operation!r} was ever sent")
+        return server
+
+    def _readable_update(self):
+        """The fixture with update-triage replaced by an update that reads back whole.
+
+        update-triage declares `remaining_hours`, which `bzr bug view` never serializes
+        (finding D3), so it can only ever reconcile as `retry`. The `advance` resolution
+        needs an update whose every declared field reads back, and the fixture has none --
+        the same reason tests/test_replay.py:484-505 hand-builds one.
+        """
+        marker = "bzr-live:replay-demo:update-status"
+        update = PlannedEvent(
+            name="update-status",
+            actor=Reference("actor", "triager"),
+            action="bug.update",
+            action_class="idempotent-set",
+            payload={},
+            dependencies=(),
+            reconciliation_marker=marker,
+            expected_postcondition=freeze_planned({
+                "action": "bug.update",
+                "target": Reference("bug", "checkout-race"),
+                "values": {
+                    "status": "CONFIRMED",
+                    "milestone": Reference("milestone", "m1"),
+                },
+                "marker": marker,
+            }),
+            creates=None,
+        )
+        create = self._event(self.scenario, "create-checkout-race")
+        return dataclasses.replace(self.scenario, events=(create, update))
+
+    # --- unique-create -----------------------------------------------------
+
+    def test_bug_create_resumes_to_exactly_one_bug(self) -> None:
+        scenario = self._trimmed("create-checkout-race")
+        server = self._lose_response(scenario, "bug create")
+        self.assertEqual(
+            self._process(scenario, server, "resume"),
+            [("resumed", "create-checkout-race")])
+        # The create was adopted from the alias, never repeated.
+        self.assertEqual(server.sent("bug create"), 1)
+        self.assertEqual(len(server.bugs), 1)
+        record = self._record("create-checkout-race")
+        self.assertIsInstance(record, CompletedRecord)
+        self.assertEqual(record.next_safe_action, "advance")
+        # exit_status -1 means the invocation's own status was never observed.
+        self.assertEqual(record.exit_status, -1)
+        self.assertEqual(record.resolved_ids, {"bug:checkout-race": 1})
+        self.assertIsNone(self._record("create-checkout-race", 2))
+
+    # --- idempotent-set ----------------------------------------------------
+
+    def test_bug_update_resumes_without_re_sending_a_readable_set(self) -> None:
+        scenario = self._readable_update()
+        server = self._lose_response(scenario, "bug update")
+        self.assertEqual(server.sent("bug update"), 1)
+        self.assertEqual(
+            self._process(scenario, server, "resume"),
+            [("skipped", "create-checkout-race"), ("resumed", "update-status")])
+        # The declared set reads back, so reconciliation adopts it and sends nothing.
+        self.assertEqual(server.sent("bug update"), 1)
+        self.assertEqual(server.bugs[1]["status"], "CONFIRMED")
+        self.assertEqual(server.bugs[1]["target_milestone"], "m1")
+        record = self._record("update-status")
+        self.assertEqual(record.next_safe_action, "advance")
+        self.assertEqual(record.exit_status, -1)
+
+    def test_bug_update_re_applies_a_set_the_boundary_cannot_read_back(self) -> None:
+        """ADR 0006's "one extra idempotent invocation, never a duplicate".
+
+        update-triage declares `remaining_hours`, which never reads back, so
+        reconciliation cannot confirm the commit and records `retry`; the operator's
+        resume owns attempt 2. Two invocations, one semantic result.
+        """
+        scenario = self._trimmed("create-checkout-race", "update-triage")
+        server = self._lose_response(scenario, "bug update")
+        self.assertEqual(
+            self._process(scenario, server, "resume"),
+            [("skipped", "create-checkout-race"), ("executed", "update-triage")])
+        self.assertEqual(server.sent("bug update"), 2)
+        self.assertEqual(self._record("update-triage", 1).next_safe_action, "retry")
+        second = self._record("update-triage", 2)
+        self.assertEqual(second.next_safe_action, "advance")
+        self.assertEqual(second.exit_status, 0)
+        self.assertEqual(server.bugs[1]["status"], "CONFIRMED")
+        self.assertEqual(server.bugs[1]["target_milestone"], "m1")
+        # Re-applying a set is not an append: the create's description is still the only
+        # comment on the bug, and no attachment appeared behind it.
+        self.assertEqual(len(server.comments[1]), 1)
+        self.assertEqual(server.attachments[1], [])
+
+    # --- append ------------------------------------------------------------
+
+    def test_bug_comment_is_never_appended_twice(self) -> None:
+        scenario = self._trimmed("create-checkout-race", "comment-triage")
+        marker = self._event(scenario, "comment-triage").reconciliation_marker
+        server = self._lose_response(scenario, "comment add")
+        self.assertEqual(server.marked_comments(marker), 1)
+        self.assertEqual(
+            self._process(scenario, server, "resume"),
+            [("skipped", "create-checkout-race"), ("resumed", "comment-triage")])
+        self.assertEqual(server.marked_comments(marker), 1)
+        self.assertEqual(server.sent("comment add"), 1)
+        record = self._record("comment-triage")
+        self.assertEqual(record.next_safe_action, "advance")
+        self.assertEqual(record.exit_status, -1)
+
+    def test_bug_attach_is_never_uploaded_twice(self) -> None:
+        scenario = self._trimmed("create-checkout-race", "attach-notes")
+        marker = self._event(scenario, "attach-notes").reconciliation_marker
+        server = self._lose_response(scenario, "attachment upload")
+        self.assertEqual(server.marked_attachments(marker), 1)
+        self.assertEqual(
+            self._process(scenario, server, "resume"),
+            [("skipped", "create-checkout-race"), ("resumed", "attach-notes")])
+        self.assertEqual(server.marked_attachments(marker), 1)
+        self.assertEqual(server.sent("attachment upload"), 1)
+        record = self._record("attach-notes")
+        self.assertEqual(record.next_safe_action, "advance")
+        # The attachment already on the bug is adopted, not re-created.
+        self.assertEqual(record.resolved_ids, {"attachment:triage-notes": 1})
+
+    def test_bug_worktime_is_never_appended_twice(self) -> None:
+        scenario = self._trimmed("create-checkout-race", "worktime-triage")
+        marker = self._event(scenario, "worktime-triage").reconciliation_marker
+        # A worktime is a `bug update` carrying --work-time and a marked comment, so the
+        # faulted operation is the same one bug.update uses -- and this scenario contains
+        # no other update for the injector to fire on.
+        server = self._lose_response(scenario, "bug update")
+        self.assertEqual(server.marked_comments(marker), 1)
+        self.assertEqual(
+            self._process(scenario, server, "resume"),
+            [("skipped", "create-checkout-race"), ("resumed", "worktime-triage")])
+        self.assertEqual(server.marked_comments(marker), 1)
+        self.assertEqual(server.sent("bug update"), 1)
+        self.assertEqual(self._record("worktime-triage").next_safe_action, "advance")
+
+    # --- the refusal arm ---------------------------------------------------
+
+    def test_an_unanswerable_reconciliation_refuses_instead_of_re_sending(self) -> None:
+        """The other half of the guarantee: refuse with a reset/replay instruction.
+
+        An append whose commit can be neither proved nor disproved must not be retried.
+        """
+        scenario = self._trimmed("create-checkout-race", "comment-triage")
+        marker = self._event(scenario, "comment-triage").reconciliation_marker
+        server = self._lose_response(scenario, "comment add")
+        with self.assertRaises(ReplayError) as caught:
+            self._process(scenario, _Unanswerable(server, "comment list"), "resume")
+        message = str(caught.exception)
+        self.assertIn("comment-triage", message)
+        self.assertIn("did not answer", message)
+        self.assertIn(marker, message)
+        self.assertIn("CONFIRM_RESET=1 make reset", message)
+        self.assertEqual(server.marked_comments(marker), 1)
+        self.assertEqual(server.sent("comment add"), 1)
+        self.assertEqual(self._record("comment-triage").next_safe_action, "stop")
+
+
 if __name__ == "__main__":
     unittest.main()
