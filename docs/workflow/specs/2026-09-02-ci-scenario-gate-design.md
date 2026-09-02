@@ -213,7 +213,8 @@ no secrets — and nowhere else. There is no remote attacker against the fixture
 - *Fork pull request → runner.* GitHub's own control, named above. This change adds no
   secret, no write permission and no `pull_request_target` trigger, so it does not widen it.
 - *Fixture credentials.* Actor API keys are minted into the mktemp'd state root, which is
-  mode 0700 and removed by the script's EXIT trap; the mutation stage passes its key through
+  mode 0700 and removed by the script at the end of its success path -- a failed run leaves
+  it, which is the trade *Exit-status hygiene* records; the mutation stage passes its key through
   `BZR_LIVE_API_KEY` and `--server-api-key-env`, never argv, matching
   `tests/replay_smoke.sh:82-86`. No stage echoes a key.
 - *Runner disk.* `CONFIRM_CLEAN=1 make clean` runs `if: always()` and removes the volumes,

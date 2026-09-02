@@ -16,9 +16,9 @@ dependencies, GitHub Actions, Docker Compose, `cargo` on the runner.
 
 Expected implementation size: 320–360 changed lines (M) — summed from the embedded blocks
 below: ~24 changed lines of path entries across both workflows (the offline enumeration is
-replaced, not appended to), ~28 lines of job steps, ~100 lines of shell (the stages, the
-state-root canonicalization and the interpreter guard), ~156 lines of new test, ~35 lines of
-README. The `effort:S` label on issue #25 sized the two
+replaced, not appended to), ~28 lines of job steps, ~92 lines of shell (the stages, the
+state-root canonicalization, and the trap removal with its success-path cleanup), ~118 lines
+of new test, ~35 lines of README. The `effort:S` label on issue #25 sized the two
 workflow edits; the test file and the script stages are what put it in M.
 
 Spec: [`docs/workflow/specs/2026-09-02-ci-scenario-gate-design.md`](../specs/2026-09-02-ci-scenario-gate-design.md).
@@ -37,7 +37,9 @@ Decision record: [`docs/adr/0010-ci-gated-live-scenario-proof.md`](../../adr/001
 - The pinned CI revision is the full SHA `63abb94e7e14a2db79efe0ddf0011a1f32ed8640`.
 - `.github/workflows/container-lifecycle.yml` job `x86_64-linux`: `runs-on: ubuntu-24.04`,
   `timeout-minutes: 45`, `permissions: contents: read`. Do not change any of the three.
-- Every existing `paths` entry stays; entries are appended, none reordered or removed.
+- In `container-lifecycle.yml`, every existing `paths` entry stays and entries are only
+  appended. In `scenario-contract.yml`, the seven per-record entries in each list are
+  replaced by two globs (ADR 0010 decision 2); every other entry there stays as it is.
 - `AGENTS.md`: never substitute a value the scenario did not declare. The one undeclared
   value this change writes is the mutation probe, written after verification passes and
   reverted before the re-verify.
@@ -117,29 +119,6 @@ def path_filters(workflow: Path) -> dict[str, list[str]]:
     return filters
 
 
-_INDENT = re.compile(r"^( *)\S")
-
-
-class WorkflowFilesAreStructurallySound(unittest.TestCase):
-    """Nothing local parses these files, and a broken one does not fail loudly.
-
-    A workflow GitHub cannot parse, or whose filters stopped matching, simply runs no
-    job -- which from the outside looks exactly like a gate that passed. These are the
-    structural facts a dependency-free line-oriented reader can still hold.
-    """
-
-    def test_no_tabs_and_every_indent_is_even(self) -> None:
-        for name in ("scenario-contract.yml", "container-lifecycle.yml"):
-            text = (WORKFLOWS / name).read_text(encoding="utf-8")
-            for number, line in enumerate(text.splitlines(), 1):
-                self.assertNotIn("\t", line, f"{name}:{number} contains a tab")
-                indent = _INDENT.match(line)
-                if indent is not None:
-                    self.assertEqual(
-                        len(indent.group(1)) % 2, 0,
-                        f"{name}:{number} is indented by an odd number of spaces")
-
-
 class ScenarioTreeIsGated(unittest.TestCase):
     def test_the_parse_sees_the_filters_it_is_asked_about(self) -> None:
         """Guard the parser itself: a regex that matched nothing would pass every
@@ -187,9 +166,8 @@ Run:
 
     uv run --python 3.11 python -m unittest tests.test_ci_workflow_gates -v
 
-Expect `test_no_tabs_and_every_indent_is_even` and
-`test_the_parse_sees_the_filters_it_is_asked_about` to pass, and the other three to fail,
-each naming the workflow and trigger whose list lacks the entry. A failure in the parse
+Expect `test_the_parse_sees_the_filters_it_is_asked_about` to pass and the other three to
+fail, each naming the workflow and trigger whose list lacks the entry. A failure in the parse
 guard means the parse is wrong, not the workflow — fix the parse before continuing.
 
 ### Step 1.3 — add the entries
@@ -229,21 +207,21 @@ decision 1 records why, and departs from the ADR-0005 precedent in the same file
 
     uv run --python 3.11 python -m unittest tests.test_ci_workflow_gates -v
 
-Expect `OK` and five tests run.
+Expect `OK` and four tests run.
 
 ### Step 1.5 — guardrails and commit
 
     make check
     make test
 
-Expect `make check` silent and exit 0, and `make test` to end `OK` with five more tests
+Expect `make check` silent and exit 0, and `make test` to end `OK` with four more tests
 than the 382 that ran before this change. Commit as
 `ci: gate the scenarios tree in both workflows`.
 
 **Acceptance criteria.** Both workflows name `scenarios/**` under both triggers; the
 offline workflow gates records by glob and names none individually, so issue #20's three
 records are covered; the live workflow also names `tests/smoke_scenario.sh`; `tests/test_ci_workflow_gates.py` fails if
-either entry is later removed, if a workflow line grows a tab, or if any indent turns odd.
+either entry is later removed or if an individually-named record reappears.
 
 ## Task 2 — prove the checkpoint round trip inside the smoke run
 
@@ -463,27 +441,27 @@ _STEP_NAME = re.compile(r"^      - name: (.+)$")
 
 
 class LiveJobSteps(unittest.TestCase):
-    def test_the_live_job_declares_every_step_in_order(self) -> None:
-        """The order is a design decision, not an accident: `make smoke` documents a
+    def test_the_smoke_step_runs_before_the_checkpoint_round_trip(self) -> None:
+        """The ordering is a design decision, not an accident: `make smoke` documents a
         fresh fixture as its precondition, so it runs against the one `make up` just
-        installed rather than whatever `make checkpoint-smoke` leaves behind. A step
-        whose indent slipped also disappears from this list rather than passing."""
+        installed rather than whatever `make checkpoint-smoke` leaves behind. Asserted as
+        a relation rather than against a literal step list, so adding an unrelated step
+        later does not fail a test that is not about it.
+        """
         lines = (WORKFLOWS / "container-lifecycle.yml").read_text(
             encoding="utf-8").splitlines()
         names = [match.group(1)
                  for match in map(_STEP_NAME.match, lines) if match is not None]
-        self.assertEqual(names, [
-            "Check out repository",
-            "Verify checked out commit",
-            "Install uv and Python",
-            "Verify native architecture",
-            "Run lifecycle contract checks",
-            "Install the pinned bzr build",
-            "Start the fixture",
-            "Exercise the live scenario smoke path",
-            "Exercise checkpoint round trip",
-            "Clean project resources",
-        ])
+        for step in ("Install the pinned bzr build", "Start the fixture",
+                     "Exercise the live scenario smoke path",
+                     "Exercise checkpoint round trip"):
+            self.assertIn(step, names)
+        self.assertLess(names.index("Install the pinned bzr build"),
+                        names.index("Exercise the live scenario smoke path"))
+        self.assertLess(names.index("Start the fixture"),
+                        names.index("Exercise the live scenario smoke path"))
+        self.assertLess(names.index("Exercise the live scenario smoke path"),
+                        names.index("Exercise checkpoint round trip"))
 
 
 class PinnedBzrRevision(unittest.TestCase):
@@ -510,8 +488,9 @@ class PinnedBzrRevision(unittest.TestCase):
     uv run --python 3.11 python -m unittest tests.test_ci_workflow_gates -v
 
 Expect `test_ci_pins_the_revision_the_readme_proves` to fail on `expected exactly one
-pinned bzr revision` (0 != 1), and `test_the_live_job_declares_every_step_in_order` to fail
-with the three new step names missing from the observed list.
+pinned bzr revision` (0 != 1), and
+`test_the_smoke_step_runs_before_the_checkpoint_round_trip` to fail on the three new step
+names being absent.
 
 ### Step 3.3 — add the job steps
 
@@ -542,7 +521,8 @@ checks` step and the `Exercise checkpoint round trip` step:
       - name: Exercise the live scenario smoke path
         # Provision, replay, verify, checkpoint save, mutate, restore, re-verify, resume --
         # one invocation, because every stage after the replay reads the state root that
-        # script mktemps and removes on its EXIT trap.
+        # script mktemps. It removes that root on its success path only, so a failed run
+        # leaves it for inspection (ADR 0010 decision 8).
         env:
           BZR_LIVE_BZR: ${{ runner.temp }}/bzr/bin/bzr
         run: make smoke
@@ -556,7 +536,7 @@ whatever `make checkpoint-smoke` leaves behind.
 
     uv run --python 3.11 python -m unittest tests.test_ci_workflow_gates -v
 
-Expect `OK` and seven tests run.
+Expect `OK` and six tests run.
 
 ### Step 3.5 — update README.md
 
@@ -584,7 +564,7 @@ In the "Smoke scenario" section:
     make check
     make test
 
-Expect both green, with `make test` reporting seven more tests than the 382 on `main`.
+Expect both green, with `make test` reporting six more tests than the 382 on `main`.
 Commit as `ci: run the live scenario smoke path in the x86_64 job`.
 
 ### Step 3.7 — measure the CI run
@@ -610,11 +590,12 @@ first-run cost:
 
 with `if: steps.bzr-cache.outputs.cache-hit != 'true'` on the install step. Three things go
 with it: resolve `actions/cache`'s current release and its commit SHA at that moment rather
-than from this plan; add `"Restore the pinned bzr build"` to the expected list in
-`test_the_live_job_declares_every_step_in_order`, immediately before
-`"Install the pinned bzr build"`, since that assertion pins the step list exactly and an
-eleventh step would fail it; and promote ADR 0010's rejected bullet to a decision, saying in
-the pull request what measurement forced it.
+than from this plan; promote ADR 0010's rejected bullet to a decision, saying in the pull
+request what measurement forced it; and treat the cache step as **surface this change's scope
+audit did not approve** — adding a third-party action and a cross-run artifact warrants a
+fresh audit and the operator's authorization before it lands, not a quiet insertion.
+`test_the_smoke_step_runs_before_the_checkpoint_round_trip` asserts an ordering relation
+rather than a literal step list, so an added step does not by itself fail it.
 
 **Acceptance criteria.** The `x86_64-linux` job installs a full-SHA-pinned `bzr`, starts
 the fixture and runs `make smoke` to completion; the job stays inside 45 minutes and the

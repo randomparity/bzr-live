@@ -21,10 +21,10 @@ save, mutate, restore, re-verify and resume inside the existing `x86_64-linux` j
 and that a restored checkpoint is the state the scenario declares — has no evidence in this
 repository beyond one operator's arm64 macOS run.
 
-Three facts shape the answer. `tests/smoke_scenario.sh:20-21` mktemps its state root and
-removes it on an EXIT trap, and `verify` reads the journal and actor keys that root holds,
-so every stage that must see the replayed state has to run inside one invocation of that
-script. No published `bzr` release reaches the revision floor `README.md:193-208` states —
+Three facts shape the answer. `tests/smoke_scenario.sh:20` mktemps its state root, and
+`verify` reads the journal and actor keys that root holds, so every stage that must see the
+replayed state has to run inside one invocation of that script. (At the time of writing the
+script also removed that root on an `EXIT` trap; decision 8 below changes how.) No published `bzr` release reaches the revision floor `README.md:193-208` states —
 the newest is `v0.8.2`, which carries the D6 defect — so CI cannot install a release.
 `libdbus-1-dev` is not preinstalled on GitHub's Ubuntu images: `bzr`'s own CI installs it
 in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,55-56`).
@@ -137,6 +137,13 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
 - The scenario is mutated in place during a run that has already verified it. The mutation
   is a probe, not a substitution: it is applied after the scenario's own proof has passed,
   it is reverted by the restore, and the re-verify would fail if it were not.
+- **`make checkpoint-smoke` now runs against a populated fixture.** Placing the smoke step
+  first means ADR 0005's checkpoint gate saves, restores twice and corruption-checks a
+  fixture holding the replayed scenario rather than an empty one — a gate this change does
+  not own, changed as a side effect. It still passes: its markers are independent of scenario
+  data, and 20 bugs are small against a Bugzilla install's volumes. Resetting between the two
+  steps was rejected as the remedy — it would pay a full reinstall inside the 45-minute budget
+  to restore a property nothing depends on.
 - `resume` over the restored journal is a cheap final assertion — every event reads back as
   already complete — so it costs one pass over the journal and no server mutation.
 - **`Scenario contract` now runs on every edit under `docs/adr/` or `docs/workflow/`**,
