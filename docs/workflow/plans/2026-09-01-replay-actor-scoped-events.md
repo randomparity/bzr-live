@@ -298,7 +298,9 @@ class ContextTest(unittest.TestCase):
     def test_asset_checksum_mismatch_refuses(self) -> None:
         context = self._context()
         with self.assertRaises(ReplayError) as caught:
-            context.asset_file("notes.txt", "0" * 64)
+            # Asset *names* are loader slugs (loader.py:25, applied at :390), so the
+            # key is "notes"; the declared path is assets/notes.txt.
+            context.asset_file("notes", "0" * 64)
         self.assertIn("notes.txt", str(caught.exception))
         self.assertIn("hashes to", str(caught.exception))
 ```
