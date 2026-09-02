@@ -80,7 +80,7 @@ read:
 |---|---|---|
 | `bug create --from-json=<path>` | reads the document, assigns the next bug id, stores the alias, stores the description as the bug's first comment | the stored bug dict |
 | `bug view -- <alias-or-id>` | none | the stored bug dict; exit 4 + `api_code` 100 (alias) or 101 (id) when absent |
-| `bug update <flags> -- <id>` | applies `--summary`, `--status`, `--resolution`, `--assignee`, `--target-milestone`, `--dupe-of`, the `--*-add`/`--*-remove` list deltas, `--work-time`, `--comment-file` | the updated bug dict |
+| `bug update <flags> -- <id>` | applies `--status` and `--target-milestone`; appends the text of `--comment-file`; accepts and discards `--work-time`, `--estimated-time`, `--remaining-time` | the updated bug dict |
 | `comment add --body-file=<path> [--private] -- <id>` | appends a comment carrying the file's text | `{"id": <comment id>}` |
 | `comment list -- <id>` | none | `[{"id": …, "text": …}, …]` |
 | `attachment upload --summary=… --content-type=… [--private] -- <id> <path>` | appends an attachment carrying the summary | `{"id": <attachment id>}` |
@@ -105,10 +105,13 @@ twice.
 
 ### What it deliberately does not model
 
-`bug.flag`, `attachment.update`, `attachment view`, the REST custom-field boundary, and
-the silent `TINYTEXT` truncation of `attachments.description`. An unmodelled command
-raises `AssertionError` naming the operation, so a future test that reaches one fails
-loudly instead of passing on a default reply.
+`bug.flag`, `attachment.update`, `attachment view`, the REST custom-field boundary, the
+silent `TINYTEXT` truncation of `attachments.description`, and every `bug update` flag the
+scoped events do not send (`--summary`, `--resolution`, `--assignee`, `--dupe-of`, and the
+`--*-add`/`--*-remove` list deltas). An unmodelled command *or flag* raises
+`AssertionError` naming it, so a future test that reaches one fails loudly instead of
+passing on a default reply. Branches no test exercises are where a wrong model hides
+longest, so the double stays at exactly what the seven cases reach.
 
 The double proves engine recovery. It proves nothing about `bzr` or Bugzilla; that
 remains `tests/replay_smoke.sh`'s job.

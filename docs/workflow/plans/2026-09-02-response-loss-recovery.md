@@ -19,8 +19,10 @@ Spec: `docs/workflow/specs/2026-09-02-response-loss-recovery-design.md`.
 Decision record: `docs/adr/0009-response-loss-fault-injection.md`.
 Prior decision this proves: `docs/adr/0006-actor-scoped-event-replay.md`.
 
-Expected implementation size: 290–380 changed lines (M) — one new test module holding a
-~160-line double, ~35 lines of fault wrappers, a shared fixture base, and ten tests.
+Expected implementation size: 560–620 changed lines (M) — counted from this plan's own
+transcribed module: imports and the shared fixture base (~150), the parser and fault
+wrappers (~100), the double (~175), and the ten tests (~185). An earlier draft of this
+line guessed 290–380 before the code was transcribed; the file map is what settles it.
 
 ## Global Constraints
 
@@ -250,6 +252,13 @@ class ReplayThroughTheDoubleTest(_Fixture):
         # comment, which is why it is in the corpus the append reconcilers search.
         self.assertEqual(len(server.comments[bug_id]), 2)
         self.assertEqual(len(server.attachments[bug_id]), 1)
+        # The create's declared fields landed, so `bug view` reads back what was sent.
+        bug = server.bugs[bug_id]
+        self.assertEqual(bug["status"], "UNCONFIRMED")
+        self.assertEqual(bug["target_milestone"], "m1")
+        self.assertEqual(bug["assigned_to"], "triager@example.test")
+        self.assertEqual(bug["cc"], ["reporter@example.test"])
+        self.assertEqual(bug["keywords"], ["regression"])
         self.assertEqual(
             server.marked_comments(
                 self._event(scenario, "comment-triage").reconciliation_marker), 1)
@@ -420,18 +429,13 @@ class FakeBugzilla:
     # three (finding D3, ADR 0006). Keeping them off the bug this double returns is what
     # makes the fixture's update-triage reconcile as `retry` rather than `advance`.
     _UNREADABLE = frozenset({"estimated-time", "remaining-time", "work-time"})
+    # Only the two `bug update` flags the scoped events actually send. Modelling
+    # --summary, --resolution, --assignee, --dupe-of or the list deltas would add
+    # branches no test exercises, which is where a wrong model hides longest (ADR 0009);
+    # _require_known refuses them loudly instead.
     _SCALAR_FLAGS = {
-        "summary": "summary",
         "status": "status",
-        "resolution": "resolution",
-        "assignee": "assigned_to",
         "target-milestone": "target_milestone",
-    }
-    _LIST_FIELDS = {
-        "cc": "cc",
-        "keywords": "keywords",
-        "depends-on": "depends_on",
-        "blocks": "blocks",
     }
 
     def __init__(self) -> None:
@@ -527,8 +531,6 @@ class FakeBugzilla:
             "assigned_to": document.get("assignee"),
             "cc": list(document.get("cc") or []),
             "keywords": list(document.get("keywords") or []),
-            "depends_on": list(document.get("depends_on") or []),
-            "blocks": list(document.get("blocks") or []),
         }
         self.comments[bug_id] = []
         self.attachments[bug_id] = []
@@ -543,26 +545,13 @@ class FakeBugzilla:
         return dict(self._bug(command.positionals[0]))
 
     def _bug_update(self, command: _Command) -> dict:
-        known = set(self._SCALAR_FLAGS) | set(self._UNREADABLE)
-        known |= {"dupe-of", "comment-file"}
-        for field in self._LIST_FIELDS:
-            known |= {f"{field}-add", f"{field}-remove"}
-        self._require_known(command, known)
+        self._require_known(
+            command,
+            set(self._SCALAR_FLAGS) | set(self._UNREADABLE) | {"comment-file"})
         bug = self._bug(command.positionals[0])
         for flag, key in self._SCALAR_FLAGS.items():
             if flag in command.flags:
                 bug[key] = command.one(flag)
-        if "dupe-of" in command.flags:
-            bug["dupe_of"] = int(command.one("dupe-of"))
-        for field, key in self._LIST_FIELDS.items():
-            values = list(bug.get(key) or [])
-            for item in command.flags.get(f"{field}-add", ()):
-                if item not in values:
-                    values.append(item)
-            for item in command.flags.get(f"{field}-remove", ()):
-                if item in values:
-                    values.remove(item)
-            bug[key] = values
         if "comment-file" in command.flags:
             self._append_comment(
                 bug["id"],
