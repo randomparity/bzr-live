@@ -90,7 +90,8 @@ view=$(BZR_LIVE_API_KEY=$TRIAGER_KEY "$BZR" --json \
 VIEWED_ID=$(printf '%s\n' "$view" | uv run --python 3.11 python -c \
   "import json, sys; d = json.load(sys.stdin); print(d.get('data', d)['id'])")
 if [[ "$VIEWED_ID" != "$CREATE_BUG_ID" ]]; then
-  echo "smoke failed: alias $ALIAS resolved to bug $VIEWED_ID, not the created bug $CREATE_BUG_ID" >&2
+  echo "smoke failed: alias $ALIAS resolved to bug $VIEWED_ID," \
+    "not the created bug $CREATE_BUG_ID" >&2
   echo "$view" >&2
   exit 1
 fi
