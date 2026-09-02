@@ -1,5 +1,5 @@
-.PHONY: init up down doctor reset clean checkpoint-test checkpoint-smoke replay-smoke test check \
-	build-multiarch
+.PHONY: init up down doctor reset clean checkpoint-test checkpoint-smoke replay-smoke smoke \
+	test check build-multiarch
 
 init:
 	@./scripts/lifecycle init
@@ -28,6 +28,9 @@ checkpoint-smoke:
 replay-smoke:
 	@bash tests/replay_smoke.sh
 
+smoke:
+	@bash tests/smoke_scenario.sh
+
 test:
 	@bash tests/lifecycle_test.sh
 	@uv run --python 3.11 python -m unittest discover -s tests -v
@@ -39,14 +42,16 @@ check:
 		tests/lifecycle_test.sh \
 		tests/checkpoint_smoke.sh \
 		tests/provision_smoke.sh \
-		tests/replay_smoke.sh
+		tests/replay_smoke.sh \
+		tests/smoke_scenario.sh
 	@shellcheck \
 		scripts/lifecycle \
 		containers/bugzilla/entrypoint.sh \
 		tests/lifecycle_test.sh \
 		tests/checkpoint_smoke.sh \
 		tests/provision_smoke.sh \
-		tests/replay_smoke.sh
+		tests/replay_smoke.sh \
+		tests/smoke_scenario.sh
 	@uv run --python 3.11 python -m compileall -q src tests
 	@BZ_ADMIN_PASSWORD=check BZ_DB_PASSWORD=check MARIADB_ROOT_PASSWORD=check \
 		docker compose --file compose.yaml config --quiet

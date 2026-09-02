@@ -131,3 +131,47 @@ engine's own "restore the pristine baseline" instruction has nothing to restore.
 
 `tests/replay_smoke.sh` runs the live proof against a fresh fixture
 (`BZR_LIVE_BZR=<bzr binary> bash tests/replay_smoke.sh`).
+
+Smoke scenario
+--------------
+
+`scenarios/smoke/` is the committed 20-bug scenario. It spans two products and four
+components with five actors, and its 48 events exercise every supported action: a
+cross-product dependency chain three deep, a diamond spanning both products, a duplicate
+pair, a reopening cycle, public and private comments, attachments with an obsolescence,
+flags with and without a requestee, work time, keywords, milestones, and text,
+single-select and multi-select custom fields.
+
+Two tiers prove it. The offline tier needs no server and runs with the rest of the suite:
+
+    uv run --python 3.11 python -m unittest tests.test_smoke_scenario
+
+Eleven assertions cover the topology and coverage invariants. Three are guards against
+Bugzilla behaviour that is silent server-side — the insider group behind private comments,
+the 255-byte attachment summary ceiling Bugzilla truncates rather than refuses, and the rule
+that any create declaring an assignee or a dependency edge must be filed by an actor holding
+`editbugs`, because Bugzilla otherwise substitutes or discards it without an error.
+
+The live tier provisions and replays the scenario against the running fixture:
+
+    CONFIRM_RESET=1 make reset && make up
+    BZR_LIVE_BZR=/path/to/bzr make smoke
+
+Start from a fresh fixture: Bugzilla reads `containers/bugzilla/checksetup_answers.txt` only
+at install, and an existing fixture may already hold conflicting definitions of the products
+and components the scenario declares.
+
+**`make smoke` needs a `bzr` at `5fb99362` or later.** Earlier revisions report a component's
+`default_assignee` as null even when Bugzilla has stored one, so provisioning cannot confirm
+what it wrote and refuses. That is finding [D6](docs/bzr-findings.md); the scenario keeps
+declaring the field rather than dropping it. The script prints the `bzr` revision as its first
+line for this reason — the same scenario passes or fails on that revision alone.
+
+Observed: **48 events replayed in 74.05s**, replay only, excluding provisioning and
+`make up`. Measured on Apple M5 Max, macOS (Darwin 25.6.0, arm64), Docker 29.7.2, with
+`bzr 0.8.3-dev (63abb94e)`. Provisioning the 28 resources and `make up` are each separate
+intervals and are not included.
+
+The live tier proves the parts compose; it asserts no semantic invariants about the
+replayed state. That verifier is issue #20, and fault injection plus x86_64 CI wiring is
+issue #21, so `make smoke` is operator-run rather than a merge gate today.
