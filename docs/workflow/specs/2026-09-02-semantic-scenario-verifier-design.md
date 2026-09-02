@@ -88,6 +88,11 @@ Two roles, both chosen from the scenario's own declared actors:
   returns less than the insider would see. The premise is recorded here rather than assumed,
   so a scenario that does restrict a bug fails against a stated boundary instead of a
   silent one.
+
+  The boundary is REST-only. `comment list` — the one check that actually depends on being
+  answered as the insider — goes over XML-RPC, which does authenticate: with `XMLRPC::Lite`
+  present, `bzr comment list 7` returns the declared private comment as `is_private=true`,
+  which an unauthenticated caller does not get.
 - **outsider** — the first declared actor whose `groups` do not include it. Used only for
   the private-comment invisibility check.
 
@@ -310,6 +315,21 @@ comments the scenario did not declare: `bug 1` carries
 re-read `comment list` as the outsider and assert that private comment's marker is absent
 while every public marker on that bug is present. An unauthenticated read of bug 7 already
 shows the private comment withheld; the check proves it for a named non-insider actor.
+
+**This check needs XML-RPC in the fixture image.** `bzr` reads a comment thread through
+XML-RPC `Bug.comments` first and falls back to REST only on a transport error, because
+`src/client/resources/comment.rs:51-56` documents XML-RPC as the only path returning the
+full thread — a REST read of bug 7 returns the public comment alone, so the insider check
+above cannot see the declared private comment at all. The fixture answered `xmlrpc.cgi`
+with "The XML-RPC Interface feature is not available in this Bugzilla" because
+`containers/bugzilla/Dockerfile` installed `libsoap-lite-perl` and no `XMLRPC::Lite`;
+Bugzilla's `Bugzilla/Install/Requirements.pm:303-310` requires the two separately ("Since
+SOAP::Lite 1.0, XMLRPC::Lite is no longer included and so it must be checked separately").
+Adding `libxmlrpc-lite-perl` to that apt list is the fix, and it is a fixture fix rather
+than a client-side substitution, which is what `AGENTS.md` requires. Verified live: with
+the package present, `bzr comment list 7` returns `count=1 is_private=true`. The image
+rebuild `make up` performs is enough — `mariadb-data` and `bugzilla-data` are top-level
+volumes, so no reset and no data loss.
 
 ### 5. Attachments — `attachment list`
 

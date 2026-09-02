@@ -44,6 +44,9 @@ and `AGENTS.md`.
 - **Disposable fixture.** Owner-only file modes and keeping secrets out of output is the
   whole security bar. No encryption, rotation, or crash-consistency work.
 - **Insider group is `admin`**, from `containers/bugzilla/checksetup_answers.txt:31`.
+- **The live tier needs an image built with `libxmlrpc-lite-perl`** (Task 0). Without it
+  `bzr` cannot read a full comment thread and the visibility check fails against a fixture
+  gap rather than a real divergence.
 - **`LINKS_MAX_NODES` is 1000**, from `bzr` `src/types/bug/links.rs:13`.
 - **Guardrails:** `make check` (bash -n, shellcheck, compileall, compose config) and
   `make test` (lifecycle shell tests plus
@@ -55,7 +58,9 @@ and `AGENTS.md`.
 
 ### Existing names this plan borrows
 
-Each confirmed in the target repository at `555b7de`:
+Each confirmed in the target repository at `fe06a2c`, the branch's base. Issue #24 landed
+between the first drafting of this plan and that base and added `tests/test_fault_injection.py`
+only, changing nothing under `src/`, so every name below is unchanged:
 
 - `bzr_live.scenario.load_scenario(path) -> ValidatedScenario`
   (`src/bzr_live/scenario/loader.py`)
@@ -99,7 +104,14 @@ Each confirmed in the target repository at `555b7de`:
 | `tests/test_verify_checks.py` (new) | every check against recorded payloads |
 | `tests/test_verify_journal.py` (new) | preconditions and the report |
 | `tests/smoke_scenario.sh` | run `verify` after the replay, in the same state root |
+| `containers/bugzilla/Dockerfile` | add `libxmlrpc-lite-perl`, so `bzr` can read a full comment thread |
 | `README.md` | re-measure the published smoke duration with the verify stage in place |
+
+`containers/bugzilla/Dockerfile` is in the charter's surface by the operator's explicit
+authorization of 2026-09-02, scoped to that one package and the `make up` rebuild it
+needs. The wider audit of the apt list against `Bugzilla/Install/Requirements.pm` for
+other silently-missing optional features was explicitly **not** authorized and is not
+performed here.
 
 `README.md` is outside the charter's listed surface and is included deliberately: it
 publishes `47 events replayed in 78.14s` as a maintained measurement (the commit before
@@ -107,6 +119,33 @@ this branch is `docs: re-measure the smoke duration after the fixture changed`),
 change adds a stage that measurement does not cover. Leaving a figure this change
 falsifies would be a doc that fails when followed. The edit is one measured number, adds no contract and no
 behaviour, and is reported as a surface note rather than treated as a silent expansion.
+
+## Task 0 — enable XML-RPC in the fixture image
+
+Edits `containers/bugzilla/Dockerfile`.
+
+Add `libxmlrpc-lite-perl` to the apt list, in its alphabetical place after
+`libxml-twig-perl`. One package, no other edit to the image, the entrypoint, or
+`checksetup_answers.txt`.
+
+Why it comes first: Task 6's visibility check and Task 7's live tier cannot pass without
+it. `bzr` reads a comment thread through XML-RPC `Bug.comments` and falls back to REST
+only on a transport error; a REST read of bug 7 returns the public comment alone, so the
+declared private comment is invisible to the insider read. The image answered
+`xmlrpc.cgi` with "The XML-RPC Interface feature is not available in this Bugzilla"
+because it installed `libsoap-lite-perl` and no `XMLRPC::Lite`, which Bugzilla's
+`Bugzilla/Install/Requirements.pm:303-310` requires separately since SOAP::Lite 1.0.
+
+Proof is live, not unit: `make up` (rebuilds the image and recreates the container; the
+`mariadb-data` and `bugzilla-data` volumes survive, so no reset and no data loss), then
+`bzr comment list 7` returns two comments, the second `count=1 is_private=true`. Before
+the change the same command returns one.
+
+Run `make check`; expect green. `make check` validates `compose config` and does not build
+the image, so it neither proves nor is affected by this change — Task 7's live tier is
+where it is proven.
+
+Commit: `fix(containers): install XMLRPC::Lite so bzr can read comment threads`.
 
 ## Task 1 — the expected-state fold
 
@@ -1459,9 +1498,10 @@ fails if a bug's summary is edited in the fixture database before the verify sta
 
 Commit: `feat(verify): add the verify command and its live smoke stage`.
 
-## Task 8 — record the `comment_id` finding
+## Task 8 — record the two `bzr` findings
 
-Edits `docs/bzr-findings.md`.
+Edits `docs/bzr-findings.md`. Adds two entries; neither is filed upstream, because the
+operator declined that on 2026-09-02 for D7 and authorized recording only for both.
 
 Add entry **D7** and its index row, in the shape of the existing entries: `bug history`'s
 `comment_id` correlation attributes a comment to a change that did not carry one.
@@ -1478,9 +1518,26 @@ operator` — `AGENTS.md` requires the operator's word before filing on
 Note in the entry that the verifier never asserts `comment_id`, which is why this is a
 recorded finding rather than a blocker.
 
+Add entry **D8** and its index row: `bzr`'s auth probe concludes header auth works when it
+does not. `bzr` logs "header auth works on API endpoints despite valid_login rejecting it;
+preferring header" and prefers `X-BUGZILLA-API-KEY`, but this Bugzilla rejects that header
+for REST — `rest/valid_login` returns `{"result":false}` with the header and
+`{"result":true}` with `Bugzilla_api_key` as a query parameter. The probe cannot tell,
+because the 200 it reads from `rest/bug` is also what an anonymous caller gets. Observed
+consequence: `bzr`'s REST reads on this fixture run effectively unauthenticated; writes are
+unaffected, because the 401 they draw triggers `bzr`'s alternate-auth retry, which is why
+the replay works at all. Class: **defect** — the probe's success signal does not
+discriminate. Upstream column: `hold: ask operator`.
+
+Note in the entry what it costs the verifier: it refutes the premise that every positive
+read observes the state the issuing actor would see, so the spec states that boundary
+rather than assuming it. Nothing in `scenarios/smoke/` is group-restricted, and the one
+check that does depend on insider identity — `comment list` — travels over XML-RPC, which
+does authenticate, so no check today reads less than it should.
+
 Run `make check`; expect green.
 
-Commit: `docs: record the comment_id mis-correlation bug history reports`.
+Commit: `docs: record the comment_id mis-correlation and the auth-probe defect`.
 
 ## Deferrals carried into implementation
 

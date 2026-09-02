@@ -61,6 +61,17 @@ key and a search bound only.
 and the finding citation — and does not fail the run.** The report counts divergences and
 unverifiable claims separately; the exit status follows divergences alone.
 
+**Where the fixture cannot answer a `bzr` read, the fixture is fixed — not the
+assertion.** The comment-visibility criterion was unsatisfiable because `bzr` reads a
+thread through XML-RPC `Bug.comments` first (`src/client/resources/comment.rs:51-56`
+documents it as the only path returning the full thread) and this image answered
+`xmlrpc.cgi` with "The XML-RPC Interface feature is not available in this Bugzilla".
+`containers/bugzilla/Dockerfile` installed `libsoap-lite-perl` but not `XMLRPC::Lite`,
+which Bugzilla's `Bugzilla/Install/Requirements.pm:303-310` requires separately since
+SOAP::Lite 1.0. The decision is to add `libxmlrpc-lite-perl` to that apt list. Reporting
+the criterion `unverifiable` instead was rejected: `bzr` is behaving correctly here, so
+that would have recorded a `bzr` gap that does not exist and dropped a chartered check.
+
 ## Consequences
 
 The fold is unit-testable with no fixture running, which is where most of the verifier's
@@ -78,6 +89,12 @@ asserted.
 Containment assertions cannot catch a spurious extra history record or an extra comment.
 That is the price of not modelling Bugzilla's own writes, and the field-value checks —
 which are equality — still catch the state such a record would have produced.
+
+The verifier now depends on the fixture image carrying XML-RPC. `make up` rebuilds the
+image and recreates the container, and `mariadb-data` and `bugzilla-data` are top-level
+volumes, so taking the change costs a rebuild and no fixture data. An operator running
+against an image built before this change sees the private-comment check fail rather than
+silently pass, because the insider read returns a thread missing the declared comment.
 
 The two modelled behaviours are premises. If a future Bugzilla or `bzr` stops adding the
 flag requestee to CC, or stops materialising the `blocks` inverse, `verify` fails loudly
