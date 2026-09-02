@@ -18,6 +18,8 @@ on:
       - tests/lifecycle_test.sh
       - tests/checkpoint_smoke.sh
       - tests/test_checkpoint.py
+      - scenarios/**
+      - tests/smoke_scenario.sh
   push:
     branches: [main]
     paths:
@@ -36,6 +38,8 @@ on:
       - tests/lifecycle_test.sh
       - tests/checkpoint_smoke.sh
       - tests/test_checkpoint.py
+      - scenarios/**
+      - tests/smoke_scenario.sh
 
 permissions:
   contents: read
