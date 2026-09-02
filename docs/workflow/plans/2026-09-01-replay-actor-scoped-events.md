@@ -1050,8 +1050,11 @@ class BuildTest(unittest.TestCase):
         self.assertIn("--cc-remove=drop@x", invocation.args)
 
     def test_flag_renders_bugzilla_syntax(self) -> None:
+        # The fixture's flag-review event is actor triager requesting review of
+        # reporter, so this asserts the suffix comes from `requestee` and not from
+        # `event.actor` -- a discrimination the assertion loses if the two coincide.
         invocation = HANDLERS["bug.flag"].build(self.context, self._event("flag-review"))
-        self.assertIn("--flag=review?(triager@example.test)", invocation.args)
+        self.assertIn("--flag=review?(reporter@example.test)", invocation.args)
 
     def test_create_resolves_the_new_bug_id(self) -> None:
         ids = HANDLERS["bug.create"].resolved_ids(
