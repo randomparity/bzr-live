@@ -11,7 +11,7 @@ readback was measured".
 precondition, citing finding **D3** — `bzr bug view` serialising no `groups` entry, so no
 delta can be computed and no result confirmed. D3 is fixed upstream: `a7f6ab70` (`bzr`
 PR #646, closing [bzr#641](https://github.com/randomparity/bzr/issues/641)) adds `Groups`
-to the `Bug` serialiser, and it is an ancestor of `63abb94e`, the revision `README.md:180`
+to the `Bug` serialiser, and it is an ancestor of `63abb94e`, the revision `README.md:206`
 names as this repository's floor.
 
 So the refusal now declines work `bzr` can do, on a premise that stopped being true. That
@@ -51,8 +51,8 @@ The fixture was restored to its prior state afterwards: no probe group, no
 | `GET /rest/bug/<id>?include_fields=id,groups`, no credential | error 102, not authorised |
 
 The third row is not a contradiction of the fourth, and the mechanism matters enough to
-state. `bzr` serialises `groups` unconditionally (`src/types/bug.rs:243` at `63abb94e`,
-`Vec<String>` with `#[serde(default)]` on the wire), and Bugzilla's `bug_to_hash` returns
+state. `bzr` serialises `groups` unconditionally (`src/types/bug.rs:242` at `63abb94e`;
+the wire field is `Vec<String>` with `#[serde(default)]` at `:124`), and `bug_to_hash` returns
 it with no permission gate (`Bugzilla/WebService/Bug.pm:1279-1281`, read from this
 fixture's image). Finding **D8** still holds — `bzr`'s header auth is not real auth — but
 for a group-restricted bug the server answers the header read with **HTTP 401**, and
@@ -79,12 +79,19 @@ and, for a caller that does not clear it, omits them from an otherwise-**success
 There is no error status, so nothing triggers `bzr`'s alternate-auth retry and the field
 stays unread.
 
-**That contrast is the rule this design takes.** Under D8 a field is confirmable on the
-default transport when its failure is *loud* — an error status `bzr`'s retry recovers —
-and unconfirmable when its failure is *silent* — a 200 with the field quietly omitted.
-`groups` is the first kind; `estimated_hours` is the second. The two fields never shared a
-ground, and the single shared rationale over `_UPDATE_ALWAYS_RETRY` is what let D3's
-staleness cover both.
+**That contrast is the rule this design takes**, and it is a property of the *request*
+rather than of the field. Under D8 a read is confirmable when Bugzilla either does not gate
+the field against an anonymous caller — `groups` on an unrestricted bug — or refuses the
+whole read with an error status that fires `bzr`'s alternate-auth retry, whose query-
+parameter credential this fixture does parse as real auth. It is unconfirmable when
+Bugzilla answers **200** and silently omits the field, which is what it does to the
+time-tracking fields for a caller that has not cleared `timetrackinggroup`.
+
+The loudness in the `groups` case therefore comes from the bug's *visibility*, not from
+anything about the field: `bug_access_denied` maps to `STATUS_NOT_AUTHORIZED`
+(`Bugzilla/WebService/Constants.pm:270`), and it is that 401 which fires the retry. The two
+time fields never shared a ground with `groups` or with each other, and the single shared
+rationale over `_UPDATE_ALWAYS_RETRY` is what let D3's staleness cover both.
 
 ### `remaining_hours` was never `bzr`'s to answer for
 
@@ -113,6 +120,16 @@ Per `actions.py:18-22` its rationale names Bugzilla and cites no findings entry.
    `keywords`. The issue says "an `_UPDATE_COMPARE` projection"; the set table is the one
    that matches the field's shape, and putting it in the scalar table would compare a
    `tuple` of references against a JSON list and never match.
+
+   It compares by **equality**, like `keywords`, not by containment like `cc` — and that
+   choice has a stated ground, because Bugzilla can widen the set behind the caller's back.
+   `Bugzilla/Bug.pm:1883` unions a product's mandatory groups into the set on every create
+   and update, and `:1860-1864` adds every `is_default` group when the caller names none,
+   either of which would make the observed set a strict superset of the declared one.
+   Equality is taken because this fixture has no mandatory or default bug group — its
+   `group_control_map` is empty — so the widening cannot occur. A product that gains one
+   must move `groups` to containment beside `cc`, for exactly the reason `checks.py:80-83`
+   already records there.
 
 4. **Give each `_UPDATE_ALWAYS_RETRY` field its own rationale.** The tuple stays a tuple —
    the file's own convention (lines 15-17) keeps grounds in comments rather than in
@@ -172,28 +189,26 @@ Per `actions.py:18-22` its rationale names Bugzilla and cites no findings entry.
 
 ## Trust boundary
 
-The change builds `bug update` arguments from a scenario-declared value, which is the
-`$detect-evil` trigger for command construction from a non-literal. It adds no boundary and
-widens none:
-
-- **What crosses.** A `group` reference name, from a versioned scenario file the operator
-  authored. The loader constrains every resource slug to `[a-z][a-z0-9-]{0,62}`
-  (`src/bzr_live/scenario/loader.py`), and the reference must resolve to a declared `group`
-  resource or validation refuses the scenario before replay.
-- **Actor model.** `AGENTS.md` is explicit: the fixture binds to 127.0.0.1, there is no
-  remote attacker and no hostile local user, and every datum in it is fabricated. The
-  scenario author is the operator.
-- **Control.** `_bzr()` builds an argv list and `BzrClient._invoke` runs it with
-  `shell=False`, so no shell parses the value. This is the same path `cc`, `keywords`,
-  `depends_on` and `blocks` already take with the same class of value; the new arm reuses
-  it rather than adding one.
-- **Out of scope.** Group *semantics* — whether restricting a bug to a group hides it
-  correctly — is Bugzilla's, not this fixture's, and nothing here asserts it.
+The new argument is an operator-authored slug constrained to `[a-z][a-z0-9-]{0,62}`
+(`loader.py:25`) that must resolve to a declared `group` resource, and it reaches `bzr`
+through the same `shell=False` argv path `cc` and `keywords` already take — no boundary is
+added and none widened. Group *semantics* are Bugzilla's, and nothing here asserts them.
 
 ## Testing
 
-Unit only. No scenario declares a bug `groups` value, so the live tier does not exercise
-this path and `make smoke` is unchanged by it.
+Unit only. No scenario under `scenarios/` declares a bug `groups` value, so the live tier
+does not exercise this path and `make smoke` is unchanged by it.
+
+Two existing tests assert the behaviour being removed and must be corrected in the same
+commits, not left to fail: `tests/test_replay.py:193-198`
+(`test_update_rejects_groups`, which asserts both `"groups"` and `"finding D3"` in the
+refusal message) is replaced by its acceptance counterpart, and the stale D3 comments at
+`tests/test_replay.py:640-642` and `tests/test_verify_expected.py:172-174` become false the
+moment the refusal goes. The fold test needs a fixture, because
+`tests/test_verify_expected.py` folds only from fixture directories: a new
+`tests/fixtures/verify-groups-update/` rather than an edit to `verify-cc-order`, whose
+`test_created_groups_are_folded_as_an_asserted_field` asserts a create-only groups set that
+a groups update in the same fixture would destroy.
 
 | Test | Proves |
 |---|---|

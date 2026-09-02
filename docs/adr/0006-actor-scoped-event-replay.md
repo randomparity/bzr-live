@@ -164,22 +164,39 @@ member list for a bug restricted to a group, on the default transport.
 That second reading survives finding **D8** for a reason worth stating, because it is what
 separates `groups` from the two time fields this amendment leaves alone. `bzr`'s header
 auth is still not real auth, so the first read of a group-restricted bug draws an **HTTP
-401** — and `bzr`'s transport retries with its alternate auth method and gets a 200
-carrying the value. Bugzilla instead omits `estimated_time` and `remaining_time` from an
-otherwise-successful **200** for a caller who does not clear `timetrackinggroup`, so no
-error status ever fires that retry. **Under D8 a field is confirmable on the default
-transport when its failure is loud and unconfirmable when its failure is silent.** The two
-grounds were never the same, and the single shared rationale over the always-retry set is
-what let D3's staleness cover both fields at once; each now names its own.
+401** — Bugzilla maps `bug_access_denied` to `STATUS_NOT_AUTHORIZED`
+(`Bugzilla/WebService/Constants.pm:270`) — and `bzr`'s transport retries with its alternate
+auth method, whose query-parameter credential this fixture does parse as real auth, and
+gets a 200 carrying the value. Bugzilla instead omits `estimated_time` and `remaining_time`
+from an otherwise-successful **200** for a caller who has not cleared `timetrackinggroup`,
+so no error status ever fires that retry. **Under D8 a read is confirmable when Bugzilla
+either does not gate the field against an anonymous caller or refuses the whole read with
+an error status that fires the retry; it is unconfirmable when Bugzilla answers 200 and
+silently omits the field.** That is a property of the request rather than of the field: the
+loudness in the `groups` case comes from the bug's visibility, not from `groups` itself.
+The grounds were never the same, and the single shared rationale over the always-retry set
+is what let D3's staleness cover both time fields at once; each now names its own.
 
-Two residuals this amendment does not close. No bug group is settable on any product in
+Three residuals this amendment does not close. No bug group is settable on any product in
 this fixture — `group_control_map` is empty and every `checksetup` group has
 `isbuggroup = 0`, so an authenticated `groups.add` returns Bugzilla error 120 — which is a
 fixture-configuration gap for `containers/`, reported rather than taken, and unexercised
-because no scenario declares a bug `groups` value. And `bzr` masks that error: on the
-alternate-auth retry, a fallback response also carrying HTTP 401 makes it report the first
-attempt's error instead of the fallback's, so error 120 surfaces as 410 "You must log in".
-That is finding D10.
+because no scenario under `scenarios/` declares a bug `groups` value. `bzr` masks that
+error: on the alternate-auth retry, a fallback response also carrying HTTP 401 makes it
+report the first attempt's error instead of the fallback's, so error 120 surfaces as 410
+"You must log in". That is finding D10. And `_check_groups` (`Bugzilla/Bug.pm:1851-1887`)
+requires only that the product make a group settable, never that the caller belong to it,
+so an actor can restrict a bug out of its own visibility; the post-mutation read then
+answers `api_code` 102, which `read_bug` raises on by the "inaccessibility is not absence"
+rule above — aborting the run rather than reaching a disposition. Unexercised for the same
+reason as the first, and recorded here so whoever provisions a settable group meets it.
+
+One more consequence rides on that same gap. `groups` compares by **equality**, like
+`keywords`: `Bugzilla/Bug.pm:1883` unions a product's mandatory groups into the set and
+`:1860-1864` adds its default groups when the caller names none, either of which would make
+the observed set a strict superset of the declared one. Equality is sound only while this
+fixture has neither, and a product that gains one moves `groups` to containment beside
+`cc` — the exception `cc` already carries for the same class of reason.
 
 **Four of those grounds are Bugzilla's, not bzr's, and saying so matters as much as naming
 the ones that are.** Charging bzr for a constraint it did not impose corrupts the register
@@ -360,7 +377,7 @@ defaults to reset *to*, and `resolution` and `dupe_of` are cleared by a status t
   serializes no `groups` entry (`src/types/bug.rs:200-238` at bzr `b80303b7`), so no delta can
   be computed and no read-back can confirm the declared set; converging on a superset would
   silently diverge. **Withdrawn by the amendment above (issue #27):** `bzr` serializes
-  `groups` from `a7f6ab70` on (`src/types/bug.rs:243` at `63abb94e`), so the delta is
+  `groups` from `a7f6ab70` on (`src/types/bug.rs:242` at `63abb94e`), so the delta is
   computable and the set is confirmable, and the declared set is now applied in full.
 - **A separate reconciliation index beside the journal.** judgment: a second source of truth
   for what the journal records already answer, and one more file to keep consistent with it.

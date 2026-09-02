@@ -19,13 +19,13 @@ Spec: [`../specs/2026-09-02-confirm-groups-updates-design.md`](../specs/2026-09-
 Decision record: the "Amended after the `groups` readback was measured" paragraph in
 [ADR 0006](../../adr/0006-actor-scoped-event-replay.md).
 
-Expected implementation size: 180–260 changed lines (S) — from the file map below: ~15
-lines in `actions.py`, ~18 in `expected.py`, ~135 of tests across two files, ~50 of
-findings-register prose.
+Expected implementation size: 230–290 changed lines (S) — from the file map below: ~15
+lines in `actions.py`, ~18 in `expected.py`, ~135 of tests across two files, ~35 for the
+new scenario fixture's three files, ~50 of findings-register prose, summing to 253.
 
 ## Global Constraints
 
-- **`bzr` floor.** `README.md:180` — "Use `b80303b7` or later, and treat anything below
+- **`bzr` floor.** `README.md:206` — "Use `b80303b7` or later, and treat anything below
   `63abb94e` as untested." Every behaviour this change relies on was measured at
   `bzr 0.8.3-dev (63abb94e)`. Do not cite `b80303b7` for a behaviour that only exists from
   `a7f6ab70` on.
@@ -47,8 +47,9 @@ findings-register prose.
 |---|---|
 | `src/bzr_live/replay/actions.py` | modify — refusal table, `build` delta loop, set-comparison table, always-retry comment |
 | `src/bzr_live/verify/expected.py` | modify — `_NAME_SETS`, `_create` loop, `_update_other` docstring, `UNVERIFIABLE_FIELDS` note |
-| `tests/test_replay.py` | modify — `groups` refusal, build-delta, and reconcile tests |
-| `tests/test_verify_expected.py` | modify — the fold regression test |
+| `tests/test_replay.py` | modify — **replace** `test_update_rejects_groups` with its acceptance counterpart, add build-delta and reconcile tests, correct the stale D3 comment at `:640-642` |
+| `tests/test_verify_expected.py` | modify — the fold regression test; correct the stale D3 comment at `:172-174` |
+| `tests/fixtures/verify-groups-update/{scenario.json,resources.json,events.jsonl}` | create — the scenario the fold regression test folds |
 | `docs/bzr-findings.md` | modify — D3 status, new D10 entry, register table row |
 | `docs/adr/0006-actor-scoped-event-replay.md` | modified in the design phase — amendment paragraph |
 | `docs/workflow/specs/2026-09-02-confirm-groups-updates-design.md` | created in the design phase |
@@ -77,8 +78,13 @@ Task 2 relies on nothing from this task; the two are independent.
 
 ### Steps
 
-1. **Write four failing tests** in `tests/test_replay.py`, beside the existing `bug.update`
-   cases and in their fixture style:
+1. **Replace `test_update_rejects_groups` and write four failing tests** in
+   `tests/test_replay.py`, beside the existing `bug.update` cases and in their fixture
+   style. The replacement is not optional and not additive: `tests/test_replay.py:193-198`
+   asserts `assertRaises(ReplayError)` on a `bug.update` declaring `groups` and then
+   asserts both `"groups"` and `"finding D3"` are in the message. It is one of the 382
+   tests at `HEAD`, and step 3 below makes it fail. Delete it; the first test in this list
+   is what takes its place.
 
    - a `bug.update` declaring `groups` passes `check_supported` without raising;
    - a `bug.update` declaring `version` still raises `ReplayError`;
@@ -119,7 +125,9 @@ Task 2 relies on nothing from this task; the two are independent.
 
    The set table, not `_UPDATE_COMPARE`: `groups` is a Bugzilla list field, and the scalar
    table compares a declared value against `bug.get(key)` by equality, which a tuple of
-   references can never satisfy against a JSON list.
+   references can never satisfy against a JSON list. Equality rather than `cc`'s
+   containment, on the ground the spec records — this fixture has no mandatory or default
+   bug group for Bugzilla to add behind the caller.
 
 6. **Replace the `_UPDATE_ALWAYS_RETRY` comment** so each field names its own ground. The
    tuple is unchanged — both fields stay. The replacement states: `estimated_hours` —
@@ -135,7 +143,14 @@ Task 2 relies on nothing from this task; the two are independent.
    What must leave: the old comment's "bzr bug view never serializes either" is D3's claim
    and is now false for both fields — `bzr` serializes them; Bugzilla withholds them.
 
-7. **Run the tests and confirm they pass.**
+7. **Correct the same stale claim where a test repeats it.**
+   `tests/test_replay.py:640-642` explains `test_set_retries_when_a_declared_field_is_
+   unreadable` with "it declares `remaining_hours`, which bzr bug view never serializes".
+   That is D3's claim and is now false. Replace it with the field's real ground: Bugzilla
+   decrements `remaining_time` by logged work, so the declared value is not the fixture's
+   final state and the field never confirms. The test's behaviour is unchanged.
+
+8. **Run the tests and confirm they pass.**
 
    ```
    uv run --python 3.11 python -m unittest tests.test_replay -v
@@ -143,15 +158,15 @@ Task 2 relies on nothing from this task; the two are independent.
 
    Expect `OK`, no failures, no errors.
 
-8. **Run the guardrails, bare, and commit.**
+9. **Run the guardrails, bare, and commit.**
 
    ```
    make check
    make test
    ```
 
-   Expect both to exit 0; `make test` reports at least 382 tests — the count after #20
-   landed — plus the four added here.
+   Expect both to exit 0. The count moves from 382 to **385**: the four tests added here
+   less the one replaced.
 
 ### Acceptance criteria
 
@@ -160,6 +175,8 @@ Task 2 relies on nothing from this task; the two are independent.
   observed set, and carries neither when declared and observed agree.
 - Reconciliation advances on a matching `groups` set and retries on a differing one.
 - Both time fields remain in `_UPDATE_ALWAYS_RETRY`, and nothing in the file cites D3.
+- `test_update_rejects_groups` is gone rather than failing, and no comment in
+  `tests/test_replay.py` still claims `bug view` does not serialize the time fields.
 
 ## Task 2 — the expected-state fold carries `groups`
 
@@ -186,41 +203,68 @@ The history field name is right without translation: Bugzilla's `Bug.history` ma
 
 ### Steps
 
-1. **Write the failing regression test** in `tests/test_verify_expected.py`. Fold a
-   scenario whose `bug.create` declares groups `{a}` and whose later `bug.update` declares
-   groups `{a, b}`, then assert both halves:
+1. **Create the fixture the test folds.** `tests/test_verify_expected.py` builds no
+   scenario in memory — every fold site calls `fold(load_scenario(<fixture directory>))` —
+   so the test needs a directory. Create `tests/fixtures/verify-groups-update/` with the
+   three files the loader requires, copying the shape of `tests/fixtures/verify-cc-order/`:
 
-   - `fold(scenario).bugs[<alias>].names["groups"] == frozenset({"a", "b"})`;
-   - `ExpectedChange(<actor alias>, "groups", frozenset({"b"}), False)` is in that bug's
-     `history`.
+   - `resources.json` — two `group` resources (`restricted`, `escalated`), one `actor`,
+     one `product`, one `component`, one `version`;
+   - `events.jsonl` — a `bug.create` for alias `guarded` declaring
+     `"groups":[{"ref":"group:restricted"}]`, then a `bug.update` on it declaring
+     `"groups":[{"ref":"group:restricted"},{"ref":"group:escalated"}]`;
+   - `scenario.json` — matching the sibling fixture's field set, described as a groups
+     update folded onto a created groups set.
+
+   Do **not** put the update in `verify-cc-order`: its
+   `test_created_groups_are_folded_as_an_asserted_field` (`:171-177`) asserts
+   `bug.names["groups"] == frozenset({"restricted"})` for a create-only groups set, and a
+   groups update in that fixture would destroy exactly the case that test exists to cover.
+
+2. **Write the failing regression test** in `tests/test_verify_expected.py`, folding the
+   new fixture, and assert both halves:
+
+   - `bugs["guarded"].names["groups"] == frozenset({"restricted", "escalated"})`;
+   - `ExpectedChange("<actor alias>", "groups", frozenset({"escalated"}), False)` is in
+     that bug's `history`.
 
    Assert the *value*, not the key's presence: a fold that dropped the update would leave
-   `names["groups"]` holding the created set `{a}`, and a test asserting only that the key
-   exists would pass against exactly the defect this test is for.
+   `names["groups"]` holding the created set `{restricted}`, and a test asserting only that
+   the key exists would pass against exactly the defect this test is for.
 
-2. **Run it and confirm it fails.**
+3. **Run it and confirm it fails.**
 
    ```
    uv run --python 3.11 python -m unittest tests.test_verify_expected -v
    ```
 
-   Expect one failure: `names["groups"]` is `frozenset({'a'})` where `frozenset({'a',
-   'b'})` was expected, because `_update_other` ignores the key.
+   Expect one failure: `names["groups"]` is `frozenset({'restricted'})` where
+   `frozenset({'restricted', 'escalated'})` was expected, because `_update_other` ignores
+   the key.
 
-3. **Add `groups` to `_NAME_SETS`**, making it `("cc", "keywords", "groups")`.
+4. **Add `groups` to `_NAME_SETS`**, making it `("cc", "keywords", "groups")`.
 
-4. **Collapse `_create`'s loop** from `for key in (*_NAME_SETS, "groups")` to
+5. **Collapse `_create`'s loop** from `for key in (*_NAME_SETS, "groups")` to
    `for key in _NAME_SETS`; it listed `groups` separately only because it was not in the
    tuple.
 
-5. **Rewrite `_update_other`'s docstring.** It currently names `groups` among the keys the
+6. **Correct the stale comment on the neighbouring test.**
+   `tests/test_verify_expected.py:172-174` explains
+   `test_created_groups_are_folded_as_an_asserted_field` with "bug.update can never supply
+   this case: actions._UPDATE_UNSUPPORTED refuses a groups update, so bug.create is the
+   only path groups can arrive by". Both clauses stop being true here. Replace them with
+   what the test still covers — that a groups set declared at create and never updated is
+   folded as asserted rather than waived — and point at the new fixture for the update
+   path. The assertions are unchanged.
+
+7. **Rewrite `_update_other`'s docstring.** It currently names `groups` among the keys the
    refusal table holds back and forward-references issue #27 as pending. The replacement
    says: ignoring anything else is safe only because `_UPDATE_UNSUPPORTED` refuses
    `version` before any mutation; `groups` was in that set until issue #27 and is now
    folded through `_update_names`; any key a future change releases from the refusal table
    needs an arm here, or the verifier will quietly stop asserting it.
 
-6. **Correct the `UNVERIFIABLE_FIELDS` header note.** It currently infers the `groups`
+8. **Correct the `UNVERIFIABLE_FIELDS` header note.** It currently infers the `groups`
    readback from the upstream commit. Replace the inference with the measurement: at
    `63abb94e` against the running fixture, a default-transport `bug view` returns `[]` for
    an unrestricted bug and the real member list for a bug restricted to a group — finding
@@ -229,7 +273,7 @@ The history field name is right without translation: Bugzilla's `Bug.history` ma
    sentence: no `scenarios/smoke` bug declares one, so the assertion has unit coverage only
    and the live tier has never exercised it.
 
-7. **Run the test and confirm it passes.**
+9. **Run the test and confirm it passes.**
 
    ```
    uv run --python 3.11 python -m unittest tests.test_verify_expected -v
@@ -237,17 +281,18 @@ The history field name is right without translation: Bugzilla's `Bug.history` ma
 
    Expect `OK`.
 
-8. **Prove the test bites.** Temporarily make `_update` route `groups` to `_update_other`
-   again, re-run the command in step 7, observe the failure from step 2, then revert.
+10. **Prove the test bites.** Temporarily drop `"groups"` back out of `_NAME_SETS`, so
+    `_update` routes it to `_update_other` again; re-run the command in step 9, observe the
+    failure from step 3, then revert.
 
-9. **Run the guardrails, bare, and commit.**
+11. **Run the guardrails, bare, and commit.**
 
-   ```
-   make check
-   make test
-   ```
+    ```
+    make check
+    make test
+    ```
 
-   Expect both to exit 0.
+    Expect both to exit 0.
 
 ### Acceptance criteria
 
@@ -256,6 +301,7 @@ The history field name is right without translation: Bugzilla's `Bug.history` ma
 - The regression test has been observed red against a fold that drops the update.
 - `_update_other` no longer forward-references issue #27, and names only the key the
   refusal table still holds.
+- No comment in `tests/test_verify_expected.py` still claims a `groups` update is refused.
 
 ## Task 3 — the findings register records what was measured
 
@@ -323,5 +369,14 @@ and every group `checksetup` creates has `isbuggroup = 0`, so an authenticated `
 returns Bugzilla error 120 for any group name, and nothing in `containers/`, `bridge.pl`,
 or the provisioning boundary table writes that mapping. Per `AGENTS.md` the gap belongs in
 `containers/`, not in a client-side refusal; it is outside this issue's narrowed scope and
-unexercised, since no scenario declares a bug `groups` value. Report it to the campaign
-rather than taking it here.
+unexercised, since no scenario under `scenarios/` declares a bug `groups` value. Report it
+to the campaign rather than taking it here.
+
+Three consequences wait on that gap, all recorded in the ADR 0006 amendment so whoever
+closes it meets them rather than discovering them: Bugzilla adds a product's mandatory and
+default bug groups behind the caller (`Bugzilla/Bug.pm:1883` and `:1860-1864`), which would
+break the set-equality comparison this change takes and require moving `groups` to
+containment beside `cc`; `_check_groups` requires only product settability, never
+membership, so an actor can restrict a bug out of its own visibility and the post-mutation
+read then raises on `api_code` 102 rather than reaching a disposition; and finding D10
+masks the 120 as a 410, so the first symptom of the gap points at authentication.
