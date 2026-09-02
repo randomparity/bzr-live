@@ -17,7 +17,9 @@ trigger.
 
 R2. The `x86_64-linux` job runs, in this order and all inside its existing 45-minute
 budget: provision, replay, verify, checkpoint save, mutate, restore, re-verify, resume.
-Every stage fails the job when it fails.
+Every stage fails the job when it fails. The script adds two reads around the mutation — one
+to resolve the target's numeric id, one to confirm the mutation landed — so it runs ten
+commands against the fixture, not eight.
 
 R3. The job obtains a `bzr` binary at the revision `README.md` states the scenario is proven
 at, and the run prints the revision it used.
@@ -41,12 +43,10 @@ verification has passed, and is reverted before the re-verify.
 
     - scenarios/**
     - tests/smoke_scenario.sh
-    - docs/adr/0010-ci-gated-live-scenario-proof.md
-    - docs/workflow/specs/2026-09-02-ci-scenario-gate-design.md
-    - docs/workflow/plans/2026-09-02-ci-scenario-gate.md
 
-Those last four are this change's own inputs, listed the way that workflow already lists
-ADR 0005 and its spec. `src/**` is deliberately not added; ADR 0010 records the residual.
+Those two are what change what the live job proves. Neither `src/**` nor this change's own
+ADR, spec and plan is added; ADR 0010 decision 1 records why, and its consequences record
+both residuals.
 
 `make check` reads no YAML — it runs `bash -n`, shellcheck, `compileall` and `docker
 compose config` (`Makefile:38-57`) — so a dropped entry or a mis-indented step in either
@@ -80,7 +80,8 @@ states. `CONFIRM_CLEAN=1 make clean` already runs `if: always()` and removes the
 
 ### Script stages (R2, R5, R6)
 
-`tests/smoke_scenario.sh` gains five stages after the existing verify stage. They run in the
+`tests/smoke_scenario.sh` gains six stages after the existing verify stage — R2's five,
+plus the `bug view` that resolves the mutation target's numeric id. They run in the
 same invocation because the state root the earlier stages wrote dies with the script's EXIT
 trap.
 
@@ -90,12 +91,14 @@ trap.
   its own `resolve()` (`:155-167`), which the script's `mktemp` root does not on macOS
   because `TMPDIR` sits under the `/var` → `/private/var` symlink. The script therefore
   canonicalizes `$STATE` at its `mktemp`, as `tests/checkpoint_smoke.sh:5-6` does.
-- **mutate** — read the first `bug.create` event's declared alias and actor out of the
-  loaded scenario, and its actor email out of the scenario's resources, then send
-  `bug update --summary=<probe text>` as that actor with `--server-api-key-env`. ADR 0010
-  decision 5 records why the summary is the field chosen.
-- **read back** — `bug view` the same alias and require the observed summary to equal the
-  probe text, so a restore that reverts nothing cannot be mistaken for one that did.
+- **resolve** — read the first `bug.create` event's declared alias and actor out of the
+  loaded scenario, and its actor email out of the scenario's resources, then `bug view` that
+  alias and take the numeric `id` from the reply. `bug update` accepts `Vec<u64>` only
+  (finding G10), so the alias cannot address the mutation even though it addresses this read.
+- **mutate** — send `bug update --summary=<probe text> -- <id>` as that actor with
+  `--server-api-key-env`. ADR 0010 decision 5 records why the summary is the field chosen.
+- **read back** — `bug view` the same alias again and require the observed summary to equal
+  the probe text, so a restore that reverts nothing cannot be mistaken for one that did.
 - **restore** — `scripts/checkpoint restore smoke` with the same store and runner state.
 - **re-verify and resume** — `verify` again against the same state root, then `resume`.
   `verify` exits non-zero on any divergence, so an unreverted mutation fails here. `resume`
@@ -124,7 +127,11 @@ rewritten to state what actually holds after this change.
 | Provision, replay or verify diverges on x86_64 | The script exits non-zero with the stage's own message. That is issue #7's evidence, whichever way it lands. |
 | Checkpoint save or restore fails | `scripts/checkpoint` exits non-zero; the job fails and `make clean` removes the volumes. |
 | Restore silently reverts nothing | The re-verify reports a `summary` divergence and exits 1. |
-| The job exceeds 45 minutes | GitHub cancels it, and `scenarios/**` becomes a red gate rather than a passing one. The budget is not asserted here: the job measures 3.5–5.8 minutes today across its last eight runs, leaving ~39 minutes; the addition is one uncached release build of 293 packages plus provisioning, one replay (72.63s on an M5 Max), two verify passes (56.91s each there), two stack stop/start cycles and a journal-only resume. That is plausibly inside the budget and plausibly not, and the first CI run is what settles it. If it overruns, the remedy is to cache the built prefix on the pinned SHA — the ADR's rejected bullet holds it ready — not to raise `timeout-minutes`, which is issue #25's stated constraint. |
+| The job exceeds 45 minutes | GitHub cancels it, and `scenarios/**` becomes a red gate rather than a passing one. The budget is not asserted here: the job measures 3.5–5.8 minutes today across its last eight runs, leaving ~39 minutes; the addition is one uncached release build of 293 packages plus provisioning, one replay (72.63s on an M5 Max), two verify passes (56.91s each there), two stack stop/start cycles and a journal-only resume — plus the cost `make checkpoint-smoke`
+inherits from now running second, since its one save and two restores archive a fixture
+holding the replayed scenario rather than an empty one. The M5 Max figures are an
+arm64-native lower bound, not a transferable estimate for a hosted runner. That is plausibly
+inside the budget and plausibly not, and the first CI run is what settles it. If it overruns, the remedy is to cache the built prefix on the pinned SHA — the ADR's rejected bullet holds it ready — not to raise `timeout-minutes`, which is issue #25's stated constraint. |
 
 ## Threat model
 

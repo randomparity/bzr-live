@@ -31,10 +31,11 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
 
 ## Decision
 
-1. **Add `scenarios/**` to both workflows on both triggers**, and add this change's own
-   inputs — `tests/smoke_scenario.sh`, ADR 0010, its spec and its plan — to
-   `container-lifecycle.yml`, matching how that workflow already names ADR 0005 and its
-   spec. Do not add `src/**` to the live workflow.
+1. **Add `scenarios/**` to both workflows on both triggers**, and add
+   `tests/smoke_scenario.sh` to `container-lifecycle.yml`. Add nothing else: not `src/**`,
+   and not this change's own ADR, spec or plan. That workflow does name ADR 0005 and its
+   spec, but a prose edit to a record cannot change what the live job proves, and charging
+   it a full live run is the same cost this decision declines to pay for `src/**`.
 
 2. **Extend the existing `x86_64-linux` job.** Three new steps: install `libdbus-1-dev` and
    compile `bzr` at a pinned revision, `make up`, and `BZR_LIVE_BZR=… make smoke`. The
@@ -58,10 +59,13 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
    the `/var` → `/private/var` symlink — `tests/checkpoint_smoke.sh:5-6` already does this.
 
 5. **Mutate by rewriting one bug's `summary`** — the first `bug.create` the scenario
-   declares, addressed by its declared alias and filed as its own actor. Every declared
-   summary is in `bug.scalars`, which `src/bzr_live/verify/checks.py:70-73` compares
-   against `bug view`, so a restore that silently did nothing leaves a divergence the
-   re-verify must report.
+   declares, filed as its own actor. Every declared summary is in `bug.scalars`, which
+   `src/bzr_live/verify/checks.py:70-73` compares against `bug view`, so a restore that
+   silently did nothing leaves a divergence the re-verify must report. The bug is
+   **addressed by the numeric id a `bug view` on its declared alias returns**, not by the
+   alias: `bug update` declares `pub ids: Vec<u64>` (`src/cli/bug/update.rs:79` at the
+   pinned revision) where `bug view` declares `Vec<String>` and documents aliases
+   (`view.rs:60-62`). That asymmetry is recorded as finding G10.
 
 6. **Name GitHub-hosted macOS runners as unavailable** for the arm64 live proof, and keep
    that proof operator-run and recorded in `README.md`.
@@ -82,9 +86,11 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
 - Two pins now need raising by hand together when `README.md`'s proven revision moves: the
   `--rev` SHA and, if the new tree's `rust-toolchain.toml` moves, the `1.89.0` toolchain.
 - **A change under `src/bzr_live/replay/` or `src/bzr_live/verify/` still does not run the
-  live job.** Adding `src/**` to `container-lifecycle.yml` would put a ~20-minute live job
-  on nearly every pull request, which issue #25 does not ask for. The residual is real and
-  left to the operator.
+  live job**, and neither does an edit to this record, its spec or its plan. Adding `src/**`
+  would put a ~20-minute live job on nearly every pull request, which issue #25 does not ask
+  for; adding the design documents would charge the same run to a wording fix. Both
+  residuals are real and left to the operator. This departs from the ADR-0005 precedent in
+  the same file deliberately.
 - `make smoke` now stops and restarts the Compose stack twice, because a cold checkpoint
   does. Operators pay that on every local run, and a failed restore leaves the fixture in
   whatever state the restore reached — recoverable by `CONFIRM_RESET=1 make reset`, which

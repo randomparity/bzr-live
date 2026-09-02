@@ -33,6 +33,7 @@ already-filed one (D5).
 | [G5](#g5) | design choice | `--dupe-of` conflicts with `--status` and `--resolution` | — |
 | [G6](#g6) | gap | `--permissive` is rejected for a single bug ID | — |
 | [G9](#g9) | design choice | `bug create --from-json` silently defaults an omitted `version` to `unspecified` | — |
+| [G10](#g10) | gap | `bug update` addresses bugs by numeric id only, where `bug view` accepts aliases too | — |
 | [D6](#d6) | defect (fixed upstream) | `component view` reports `default_assignee: null` for a component Bugzilla says has one | fixed by `5fb99362` |
 | [D7](#d7) | defect | `bug history` attributes a `comment_id` to a change that carried no comment | hold: recording only, filing declined |
 | [D8](#d8) | defect | The auth probe concludes header auth works when it does not, so REST reads run effectively unauthenticated | hold: recording only |
@@ -280,6 +281,29 @@ accept a bug whose version no scenario ever stated.
 **What the fixture does.** Refuses a declared null `version` on `bug.create` as a
 precondition, naming this entry. An omitted `version` is a scenario-contract question rather
 than a bzr one and is settled by the loader.
+
+## G10
+
+**`bug update` addresses bugs by numeric id only, where `bug view` accepts aliases too.**
+*Read from source, at `63abb94e`.*
+
+`UpdateArgs` declares `pub ids: Vec<u64>` (`src/cli/bug/update.rs:79`), so an alias fails
+clap's own parse before any request is built. `ViewArgs` declares `pub ids: Vec<String>` with
+the doc comment "Bug ID(s) or alias(es). Aliases and numeric IDs may be mixed."
+(`src/cli/bug/view.rs:60-62`). Bugzilla's `Bug.update` itself accepts either form in `ids`,
+so the narrowing is `bzr`'s.
+
+It is a **gap** rather than a defect: `bug update --help` documents the argument as
+`[IDS]... Bug ID(s)`, so the CLI does not claim alias support and then drop it — the way
+[D4](#d4) does. Nothing is silently substituted; the command refuses. It is recorded because
+the asymmetry is invisible from either command's help alone: a caller who learns from
+`bug view` that aliases work has no reason to expect `bug update` to differ.
+
+**What the fixture does.** The replay engine never met this, because
+`BugUpdateHandler.build` (`src/bzr_live/replay/actions.py:368-370`) already resolves the
+target to a numeric id from the journal. `tests/smoke_scenario.sh`'s checkpoint probe reads
+the id back from a `bug view` addressed by the declared alias and then mutates by that id,
+rather than addressing `bug update` by alias.
 
 ## D6
 

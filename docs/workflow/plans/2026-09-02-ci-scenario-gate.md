@@ -14,8 +14,8 @@ the pinned revision, because `make check` reads no YAML.
 **Tech stack.** Bash (`set -euo pipefail`), Python 3.11 under `uv` with no runtime
 dependencies, GitHub Actions, Docker Compose, `cargo` on the runner.
 
-Expected implementation size: 250–310 changed lines (M) — summed from the embedded blocks
-below: 12 lines of path entries, ~27 lines of job steps, ~86 lines of shell stages, ~139
+Expected implementation size: 290–330 changed lines (M) — summed from the embedded blocks
+below: 6 lines of path entries, ~28 lines of job steps, ~90 lines of shell stages, ~145
 lines of new test, ~35 lines of README. The `effort:S` label on issue #25 sized the two
 workflow edits; the test file and the script stages are what put it in M.
 
@@ -154,18 +154,11 @@ class ScenarioTreeIsGated(unittest.TestCase):
             for trigger, entries in path_filters(WORKFLOWS / name).items():
                 self.assertIn("scenarios/**", entries, f"{name}:{trigger}")
 
-    def test_the_live_workflow_gates_its_own_smoke_inputs(self) -> None:
-        expected = (
-            "tests/smoke_scenario.sh",
-            "docs/adr/0010-ci-gated-live-scenario-proof.md",
-            "docs/workflow/specs/2026-09-02-ci-scenario-gate-design.md",
-            "docs/workflow/plans/2026-09-02-ci-scenario-gate.md",
-        )
+    def test_the_live_workflow_gates_the_script_it_now_runs(self) -> None:
         filters = path_filters(WORKFLOWS / "container-lifecycle.yml")
         for trigger, entries in filters.items():
-            for path in expected:
-                self.assertIn(path, entries, f"{trigger}: {path}")
-                self.assertTrue((ROOT / path).is_file(), path)
+            self.assertIn("tests/smoke_scenario.sh", entries, trigger)
+        self.assertTrue((ROOT / "tests/smoke_scenario.sh").is_file())
 
 
 if __name__ == "__main__":
@@ -189,18 +182,18 @@ In `.github/workflows/scenario-contract.yml`, append `      - scenarios/**` to t
 `pull_request` `paths:` list (after the last `docs/workflow/plans/…` entry, currently
 line 18) and to the `push` `paths:` list (after the last entry, currently line 34).
 
-In `.github/workflows/container-lifecycle.yml`, append these five lines to the
+In `.github/workflows/container-lifecycle.yml`, append these two lines to the
 `pull_request` `paths:` list (after `tests/test_checkpoint.py`, currently line 20) and the
-identical five to the `push` `paths:` list (after `tests/test_checkpoint.py`, currently
+identical two to the `push` `paths:` list (after `tests/test_checkpoint.py`, currently
 line 38):
 
 ```yaml
       - scenarios/**
       - tests/smoke_scenario.sh
-      - docs/adr/0010-ci-gated-live-scenario-proof.md
-      - docs/workflow/specs/2026-09-02-ci-scenario-gate-design.md
-      - docs/workflow/plans/2026-09-02-ci-scenario-gate.md
 ```
+
+Add nothing else — in particular not this change's own ADR, spec or plan. ADR 0010
+decision 1 records why, and departs from the ADR-0005 precedent in the same file to do it.
 
 ### Step 1.4 — confirm it passes
 
@@ -218,8 +211,8 @@ than the 382 that ran before this change. Commit as
 `ci: gate the scenarios tree in both workflows`.
 
 **Acceptance criteria.** Both workflows name `scenarios/**` under both triggers; the live
-workflow also names `tests/smoke_scenario.sh` and this change's three design documents;
-`tests/test_ci_workflow_gates.py` fails if any entry is later removed.
+workflow also names `tests/smoke_scenario.sh`; `tests/test_ci_workflow_gates.py` fails if
+either entry is later removed, if a workflow line grows a tab, or if any indent turns odd.
 
 ## Task 2 — prove the checkpoint round trip inside the smoke run
 
@@ -280,30 +273,42 @@ print(create.expected_postcondition["values"]["server_alias"], create.actor.name
 read -r PROBE_ALIAS PROBE_ACTOR PROBE_EMAIL <<<"$PROBE"
 PROBE_KEY=$(cat "$STATE/state/actor-keys/$PROBE_ACTOR.key")
 
+# `bug view` reads the alias but `bug update` cannot: at the pinned revision UpdateArgs
+# declares `pub ids: Vec<u64>` (src/cli/bug/update.rs:79) where ViewArgs declares
+# `Vec<String>` and documents "Bug ID(s) or alias(es)" (view.rs:60-62). That asymmetry is
+# finding G10 in docs/bzr-findings.md; the id is resolved here rather than worked around.
+# `bzr --json` wraps its result in a schema envelope; unwrap "data" exactly as
+# BzrClient._payload does (src/bzr_live/provision/adapters.py:76-77), including its
+# tolerance of a reply that carries no envelope.
+probe_view() {
+  BZR_LIVE_API_KEY=$PROBE_KEY "$BZR" --json \
+    --server-url "$BASE_URL" \
+    --server-api-key-env BZR_LIVE_API_KEY \
+    --server-email "$PROBE_EMAIL" \
+    bug view -- "$PROBE_ALIAS"
+}
+probe_field() {
+  uv run --python 3.11 python -c \
+    "import json, sys; d = json.load(sys.stdin); print(d.get('data', d)[sys.argv[1]])" "$1"
+}
+PROBE_ID=$(probe_view | probe_field id)
+
 # A summary the scenario does not declare, written only after the scenario's own
 # verification has passed and reverted by the restore below. `summary` is the field because
 # every declared summary is one of the scalars compared against `bug view`
 # (src/bzr_live/verify/checks.py:70-73); ADR 0010 decision 5 records why, and which
 # alternatives verify would not have caught.
 PROBE_SUMMARY="checkpoint probe: not the summary $PROBE_ALIAS declares"
-echo "smoke scenario: mutating $PROBE_ALIAS's summary as $PROBE_ACTOR"
+echo "smoke scenario: mutating $PROBE_ALIAS (bug $PROBE_ID) as $PROBE_ACTOR"
 BZR_LIVE_API_KEY=$PROBE_KEY "$BZR" --json \
   --server-url "$BASE_URL" \
   --server-api-key-env BZR_LIVE_API_KEY \
   --server-email "$PROBE_EMAIL" \
-  bug update "--summary=$PROBE_SUMMARY" -- "$PROBE_ALIAS"
+  bug update "--summary=$PROBE_SUMMARY" -- "$PROBE_ID"
 
 # Read it back before restoring. Without this, a mutation that never reached the server and
-# a restore that reverted it are the same observation. `bzr --json` wraps its result in a
-# schema envelope; unwrap "data" exactly as BzrClient._payload does
-# (src/bzr_live/provision/adapters.py:76-77), including its tolerance of a bare reply.
-PROBE_VIEW=$(BZR_LIVE_API_KEY=$PROBE_KEY "$BZR" --json \
-  --server-url "$BASE_URL" \
-  --server-api-key-env BZR_LIVE_API_KEY \
-  --server-email "$PROBE_EMAIL" \
-  bug view -- "$PROBE_ALIAS")
-OBSERVED_SUMMARY=$(printf '%s\n' "$PROBE_VIEW" | uv run --python 3.11 python -c \
-  "import json, sys; d = json.load(sys.stdin); print(d.get('data', d)['summary'])")
+# a restore that reverted it are the same observation.
+OBSERVED_SUMMARY=$(probe_view | probe_field summary)
 if [[ "$OBSERVED_SUMMARY" != "$PROBE_SUMMARY" ]]; then
   echo "smoke scenario: the mutation did not reach $PROBE_ALIAS; observed" \
     "'$OBSERVED_SUMMARY'" >&2
@@ -357,7 +362,8 @@ runner tree's modes. Record either in the pull request.
 
 Commit as `test(smoke): prove the checkpoint round trip against the verified fixture`.
 
-**Acceptance criteria.** `make smoke` runs all eight stages in one invocation and exits 0;
+**Acceptance criteria.** `make smoke` runs R2's eight stages plus the two reads around the
+mutation in one invocation and exits 0;
 each stage is bare, so any failure fails the script; the mutation is reverted before the
 run ends; `make check` is green.
 
@@ -477,8 +483,10 @@ Expect `OK` and six tests run.
 
 In the "Smoke scenario" section:
 
-- In the live-tier paragraph, list all eight stages and note that `make smoke` now stops and
-  restarts the Compose stack twice, because a cold checkpoint does.
+- In the live-tier paragraph, list R2's eight stages and the two reads that bracket the
+  mutation — resolving the target's numeric id, and confirming the mutation landed — and
+  note that `make smoke` now stops and restarts the Compose stack twice, because a cold
+  checkpoint does.
 - Keep the sentence "**`make smoke` has been proven at `bzr` `63abb94e` and nowhere else.**"
   verbatim — Step 3.1's test reads the revision out of it.
 - Replace the observed-measurement paragraph's figures with the ones Step 2.3 recorded,
