@@ -127,10 +127,11 @@ reverts nothing leaves a fixture that still looks replayed.
 
 ### Script stages (R2, R5, R9)
 
-`tests/smoke_scenario.sh` gains six stages after the existing verify stage — R2's five,
-plus the `bug view` that resolves the mutation target's numeric id. They run in the
-same invocation because the state root the earlier stages wrote dies with the script's EXIT
-trap.
+`tests/smoke_scenario.sh` gains seven executable stages after the existing verify stage —
+R2's five, plus the `bug view` that resolves the mutation target's numeric id and the one
+that reads the mutation back — bringing the script to ten stages in all. They run in one
+invocation because the state root is `mktemp`'d and `verify` and `resume` read the journal
+and the actor keys inside it, so a second invocation could not see the replay.
 
 - **save** — `scripts/checkpoint save smoke --store "$STATE/store" --runner-state
   "$STATE/state"`. Two constraints bind those arguments, both in `checkpoint.py`: store and
@@ -212,11 +213,13 @@ no secrets — and nowhere else. There is no remote attacker against the fixture
   false` on the checkout, and the `Verify checked out commit` step.
 - *Fork pull request → runner.* GitHub's own control, named above. This change adds no
   secret, no write permission and no `pull_request_target` trigger, so it does not widen it.
-- *Fixture credentials.* Actor API keys are minted into the mktemp'd state root, which is
-  mode 0700 and removed by the script at the end of its success path -- a failed run leaves
-  it, which is the trade *Exit-status hygiene* records; the mutation stage passes its key through
-  `BZR_LIVE_API_KEY` and `--server-api-key-env`, never argv, matching
-  `tests/replay_smoke.sh:82-86`. No stage echoes a key.
+- *Fixture credentials.* Actor API keys are minted into the mktemp'd state root, and the
+  checkpoint store beside it holds an archive of the fixture database including its api-key
+  rows. Both are mode 0700 under a 0700 parent, and the script removes the whole tree at the
+  end of its success path -- a failed run leaves it, which is the trade *Exit-status hygiene*
+  records. The mutation stage passes its key through `BZR_LIVE_API_KEY` and
+  `--server-api-key-env`, never argv, matching `tests/replay_smoke.sh:82-86`. No stage echoes
+  a key.
 - *Runner disk.* `CONFIRM_CLEAN=1 make clean` runs `if: always()` and removes the volumes,
   the local images and `.env`.
 

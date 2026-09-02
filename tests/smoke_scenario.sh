@@ -129,7 +129,11 @@ echo "smoke scenario: verified in ${VERIFY_ELAPSED}s"
 # scripts/checkpoint refuses a store containing the runner state or the reverse
 # (src/bzr_live/checkpoint.py:334-335).
 STORE="$STATE/store"
-mkdir "$STORE"
+# 0700 explicitly rather than at the umask: the store holds a checkpoint archive of
+# the replayed fixture, api-key rows included, and scripts/checkpoint only requires
+# owner rwx (checkpoint.py:331) so it would accept 0755. The 0700 parent already
+# blocks traversal; this keeps the mode from depending on the invoking shell.
+mkdir -m 700 "$STORE"
 echo "smoke scenario: saving checkpoint 'smoke' over the verified fixture"
 scripts/checkpoint save smoke --store "$STORE" --runner-state "$STATE/state"
 
