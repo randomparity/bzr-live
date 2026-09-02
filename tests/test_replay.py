@@ -252,6 +252,45 @@ class SupportedPayloadTest(unittest.TestCase):
             HANDLERS["bug.attach"].check_supported(event)
         self.assertIn("bytes", str(caught.exception))
 
+    def test_attachment_update_refuses_an_over_long_description(self) -> None:
+        # The same TINYTEXT column, reached by the second writer. Bugzilla applies no
+        # length validator here (Bugzilla/Attachment.pm:578-584) and disables strict
+        # sql_mode (Bugzilla/DB/MariaDB.pm:87-100), so an unchecked write is truncated
+        # by MariaDB and reported as success -- the shape AGENTS.md forbids.
+        event = self._event(
+            "attachment.update", obsolete=True, description="x" * 256)
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["attachment.update"].check_supported(event)
+        self.assertIn("255", str(caught.exception))
+        self.assertIn("Bugzilla", str(caught.exception))
+        self.assertNotIn("(finding ", str(caught.exception))
+
+    def test_attachment_update_without_a_description_is_supported(self) -> None:
+        event = self._event("attachment.update", obsolete=True)
+        self.assertIsNone(HANDLERS["attachment.update"].check_supported(event))
+
+    def test_append_text_carrying_a_marker_token_is_refused(self) -> None:
+        # Reconciliation matches an append by looking for its bracketed marker in
+        # server-visible text, so a declared body carrying one could satisfy another
+        # event's reconciliation -- advance for a mutation that never happened.
+        event = self._event(
+            "bug.comment", body="see [bzr-live:demo:other] above", private=False)
+        with self.assertRaises(ReplayError) as caught:
+            HANDLERS["bug.comment"].check_supported(event)
+        self.assertIn("[bzr-live:", str(caught.exception))
+
+    def test_every_append_action_refuses_an_embedded_marker(self) -> None:
+        embedded = "text with [bzr-live:demo:other] in it"
+        for action, values in (
+            ("bug.comment", {"body": embedded, "private": False}),
+            ("bug.worktime", {"comment": embedded, "hours": "1.0"}),
+            ("bug.attach", {"description": embedded, "asset_sha256": "a" * 64}),
+            ("attachment.update", {"obsolete": True, "description": embedded}),
+        ):
+            with self.subTest(action=action):
+                with self.assertRaises(ReplayError):
+                    HANDLERS[action].check_supported(self._event(action, **values))
+
     def test_every_action_has_a_handler(self) -> None:
         self.assertEqual(set(HANDLERS), {
             "bug.create", "bug.update", "bug.comment", "bug.attach", "bug.worktime",
@@ -376,6 +415,19 @@ class BuildTest(unittest.TestCase):
         ids = HANDLERS["bug.create"].resolved_ids(
             self._event("create-checkout-race"), {"id": 41})
         self.assertEqual(ids, {"bug:checkout-race": 41})
+
+    def test_an_unusable_id_is_refused_by_the_handler_not_the_journal(self) -> None:
+        # Both handlers guard the same way, and `isinstance(True, int)` holds -- so a
+        # bool would pass an isinstance check here and be refused later by
+        # CompletedRecord, blaming the record for a boundary reply after the in-flight
+        # record has landed and the mutation may already have committed.
+        create, attach = self._event("create-checkout-race"), self._event("attach-notes")
+        for output in ({"id": 0}, {"id": -1}, {"id": True}, {"id": "41"}):
+            with self.subTest(output=output):
+                with self.assertRaises(ReplayError):
+                    HANDLERS["bug.create"].resolved_ids(create, output)
+                with self.assertRaises(ReplayError):
+                    HANDLERS["bug.attach"].resolved_ids(attach, output)
 
     # Any test that builds a bug.update must queue a bug-view reply first: build reads
     # the bug through _bug_object, and _FakeRun's empty-queue default of (0, {}, None)

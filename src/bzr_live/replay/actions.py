@@ -150,6 +150,34 @@ def _attachment_object(payload: JsonValue) -> dict | None:
     return None
 
 
+def _usable_id(value) -> bool:
+    """A server id the journal will accept. `True` is not one.
+
+    `isinstance(True, int)` holds in Python, but `CompletedRecord.__post_init__` tests
+    `type(value) is int` -- so a bool passes every isinstance guard here and is then
+    refused by the journal, blaming the record for a boundary reply after the in-flight
+    record has landed and the mutation may already have committed.
+    """
+    return type(value) is int and value > 0
+
+
+# Reconciliation finds an append by looking for its bracketed marker in server-visible
+# text. Declared text that already carries one would let event A's body satisfy event B's
+# reconciliation -- `advance` for a mutation B never made, and for bug.attach the id of
+# the colliding entry adopted into the resolution table. Refused as a precondition, where
+# every other payload this boundary cannot express faithfully is refused.
+_MARKER_SENTINEL = "[bzr-live:"
+
+
+def _reject_embedded_marker(event: PlannedEvent, field: str, text: str) -> None:
+    if _MARKER_SENTINEL in text:
+        raise _unsupported(
+            event, field,
+            f"it contains {_MARKER_SENTINEL!r}, the token this engine appends to mark "
+            "its own writes, so reconciliation could not tell the declared text from a "
+            "marker it wrote; remove the bracketed token")
+
+
 def _marker_count(entries, field: str, marker: str) -> tuple[int | None, int | None]:
     """Entries carrying the marker. A None count means the reply did not answer."""
     if entries is None:
@@ -185,7 +213,7 @@ def _append_result(event: PlannedEvent, count: int, entry_id, output: JsonValue,
     if count == 1:
         if id_key is None:
             return Reconciliation("advance", output, {}, "")
-        if not isinstance(entry_id, int) or entry_id <= 0:
+        if not _usable_id(entry_id):
             return Reconciliation(
                 "stop", output, {},
                 f"event {event.name!r}: the entry matching marker "
@@ -288,7 +316,7 @@ class BugCreateHandler(ActionHandler):
 
     def resolved_ids(self, event: PlannedEvent, output: JsonValue) -> dict[str, int]:
         bug = _bug_object(output)
-        if bug is None or not isinstance(bug.get("id"), int) or bug["id"] <= 0:
+        if bug is None or not _usable_id(bug.get("id")):
             raise ReplayError(
                 f"event {event.name!r}: bzr bug create returned no bug id")
         return {f"bug:{event.creates.name}": bug["id"]}
@@ -406,6 +434,11 @@ class BugUpdateHandler(ActionHandler):
 class BugCommentHandler(ActionHandler):
     action = "bug.comment"
 
+    @staticmethod
+    def check_supported(event: PlannedEvent) -> None:
+        _reject_embedded_marker(
+            event, "body", event.expected_postcondition["values"]["body"])
+
     def build(self, context: ReplayContext, event: PlannedEvent) -> Invocation:
         values = event.expected_postcondition["values"]
         bug_id = context.resolve(event.expected_postcondition["target"])
@@ -432,6 +465,7 @@ class BugAttachHandler(ActionHandler):
     @staticmethod
     def check_supported(event: PlannedEvent) -> None:
         values = event.expected_postcondition["values"]
+        _reject_embedded_marker(event, "description", values["description"])
         rendered = render_attachment_summary(
             values["description"], event.reconciliation_marker, values["asset_sha256"])
         size = len(rendered.encode("utf-8"))
@@ -455,9 +489,10 @@ class BugAttachHandler(ActionHandler):
         return _bzr("attachment upload", args, [bug_id, path])
 
     def resolved_ids(self, event: PlannedEvent, output: JsonValue) -> dict[str, int]:
-        if not isinstance(output, dict) or not isinstance(output.get("id"), int):
+        if not isinstance(output, dict) or not _usable_id(output.get("id")):
             raise ReplayError(
-                f"event {event.name!r}: bzr attachment upload returned no attachment id")
+                f"event {event.name!r}: bzr attachment upload returned no usable "
+                "attachment id")
         return {f"attachment:{event.creates.name}": output["id"]}
 
     def reconcile(self, context: ReplayContext, event: PlannedEvent) -> Reconciliation:
@@ -475,6 +510,11 @@ class BugAttachHandler(ActionHandler):
 
 class BugWorktimeHandler(ActionHandler):
     action = "bug.worktime"
+
+    @staticmethod
+    def check_supported(event: PlannedEvent) -> None:
+        _reject_embedded_marker(
+            event, "comment", event.expected_postcondition["values"]["comment"])
 
     def build(self, context: ReplayContext, event: PlannedEvent) -> Invocation:
         values = event.expected_postcondition["values"]
@@ -590,6 +630,27 @@ class BugFlagHandler(ActionHandler):
 
 class AttachmentUpdateHandler(ActionHandler):
     action = "attachment.update"
+
+    @staticmethod
+    def check_supported(event: PlannedEvent) -> None:
+        # The same TINYTEXT column bug.attach guards, reached by a second writer. The
+        # ceiling belongs to the column, not to the event that first wrote it: nothing
+        # between the scenario and the row enforces it, because Bugzilla applies no
+        # length validator to attachments.description (Bugzilla/Attachment.pm:578-584,
+        # unlike bugs.short_desc at Bugzilla/Bug.pm:2046-2049) and removes
+        # STRICT_TRANS_TABLES from the session sql_mode (Bugzilla/DB/MariaDB.pm:87-100),
+        # so MariaDB truncates instead of refusing and bzr reports success.
+        values = event.expected_postcondition["values"]
+        if "description" not in values:
+            return
+        _reject_embedded_marker(event, "description", values["description"])
+        size = len(values["description"].encode("utf-8"))
+        if size > ATTACHMENT_SUMMARY_BYTE_LIMIT:
+            raise _unsupported(
+                event, "description",
+                f"the declared attachment description is {size} bytes and Bugzilla's "
+                f"attachments.description holds {ATTACHMENT_SUMMARY_BYTE_LIMIT}; "
+                "shorten the description")
 
     def build(self, context: ReplayContext, event: PlannedEvent) -> Invocation:
         values = event.expected_postcondition["values"]
