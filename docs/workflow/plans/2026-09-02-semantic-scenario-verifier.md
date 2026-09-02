@@ -255,8 +255,11 @@ class FoldSmokeScenarioTest(unittest.TestCase):
 
     def test_keyword_delta_reaches_history_not_the_whole_set(self) -> None:
         bug = self.expected.bugs["cart-double-charge"]
+        # keywords is a _NAME_SETS field, so the change carries the added members as a
+        # frozenset even when only one was added -- check_history splits the observed
+        # value on ", " and compares sets, so the single-addition case is not special.
         added = [c.value for c in bug.history if c.field == "keywords"]
-        self.assertEqual(added, ["perf"])
+        self.assertEqual(added, [frozenset({"perf"})])
 
     def test_create_contributes_no_history(self) -> None:
         bug = self.expected.bugs["cart-empty-crash"]
@@ -370,11 +373,13 @@ class CcOrderingTest(unittest.TestCase):
                  and len(c.value) == 2]
         self.assertEqual(len(multi), 1)
 
-    def test_created_groups_are_classified_unverifiable(self) -> None:
+    def test_created_groups_are_folded_as_an_asserted_field(self) -> None:
         # bug.update can never supply this case: actions._UPDATE_UNSUPPORTED refuses a
-        # groups update, so bug.create is the only path the rule can fire on.
+        # groups update, so bug.create is the only path groups can arrive by. It is
+        # asserted rather than waived -- bzr a7f6ab70 exposes it in bug view.
         bug = self.expected.bugs["ordered"]
-        self.assertIn("groups", {name for name, _ in bug.unverifiable})
+        self.assertEqual(bug.names["groups"], frozenset({"restricted"}))
+        self.assertNotIn("groups", {name for name, _ in bug.unverifiable})
 
 
 class TopologyTest(unittest.TestCase):
@@ -450,9 +455,14 @@ one update adds two members at once, and assert the fold emits a **single**
 or two keywords in one update, so this is the only place the `_NAME_SETS` half of the
 one-record-per-event rule is exercised at all.
 
-Verify the fixture loads before writing the fold:
+Three events are the floor, not the count: the third adds only `releaser` on top of the
+running set, so a two-member addition needs the extra events this step authorises. Five is
+what that works out to — narrow to `[developer]`, then widen to `[triager, releaser]` —
+and the earlier assertions are unchanged by them. Verify the fixture loads before writing
+the fold:
 `uv run --python 3.11 python -c "from bzr_live.scenario import load_scenario;
-print(len(load_scenario('tests/fixtures/verify-cc-order').events))"` — expect `3`.
+print(len(load_scenario('tests/fixtures/verify-cc-order').events))"` — expect the number of
+events you wrote.
 
 ### Step 1.2 — the package root
 
