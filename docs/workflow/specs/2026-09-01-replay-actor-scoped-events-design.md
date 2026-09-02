@@ -25,7 +25,7 @@ different scenario replayed under the same fixture is the operator's to clear wi
 `scripts/checkpoint restore pristine`, which is what they are told to run.
 
 Out of scope, with owners: restoring the pristine checkpoint (operator, via
-`scripts/checkpoint restore pristine`); `replay --through EVENT` (deferred, epic #1);
+`scripts/checkpoint restore pristine`); `replay --through EVENT` (deferred, issue #17);
 `load` and `verify` subcommands (epic #1); checkpoint internals (issue #5); scenario
 validation, digest computation and journal record validation (issue #3); resource
 provisioning (issue #4, reused unchanged).
