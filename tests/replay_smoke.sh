@@ -38,17 +38,17 @@ echo "op_sys/rep_platform declared, proving Task 0's checksetup defaults)"
 uv run --python 3.11 python -m bzr_live.replay replay "$SCENARIO" \
   --state-root "$STATE/state" --bzr "$BZR" --base-url "$BASE_URL"
 
-# Read the expected server_alias and scenario name out of the loaded scenario rather
-# than recomputing the digest or pasting a literal -- the fixture's digest has
-# changed during this build and could again.
-read -r ALIAS SCENARIO_NAME <<<"$(uv run --python 3.11 python -c "
+# Read the expected server_alias, scenario name and create event name out of the
+# loaded scenario rather than recomputing the digest or pasting a literal -- the
+# fixture's digest has changed during this build and could again.
+read -r ALIAS SCENARIO_NAME CREATE_EVENT <<<"$(uv run --python 3.11 python -c "
 from bzr_live.scenario import load_scenario
 s = load_scenario('$SCENARIO')
 create = next(e for e in s.events if e.action == 'bug.create')
-print(create.expected_postcondition['values']['server_alias'], s.name)
+print(create.expected_postcondition['values']['server_alias'], s.name, create.name)
 ")"
 
-JOURNAL_RECORD="$STATE/state/journal/$SCENARIO_NAME/create-checkout-race.000001.json"
+JOURNAL_RECORD="$STATE/state/journal/$SCENARIO_NAME/$CREATE_EVENT.000001.json"
 CREATE_BUG_ID=$(uv run --python 3.11 python -c "
 import json
 with open('$JOURNAL_RECORD') as f:
