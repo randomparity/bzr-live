@@ -116,8 +116,10 @@ Two roles, both chosen from the scenario's own declared actors:
 
   The boundary is REST-only. `comment list` — the one check that actually depends on being
   answered as the insider — goes over XML-RPC, which does authenticate: with `XMLRPC::Lite`
-  present, `bzr comment list 7` returns the declared private comment as `is_private=true`,
-  which an unauthenticated caller does not get.
+  present, a thread read as the insider returns the declared private comment as
+  `is_private=true`, which an unauthenticated caller does not get. The live tier is what
+  proves that end to end; what is established here is that `xmlrpc.cgi` answers at all
+  once the package is installed.
 - **outsider** — the first declared actor whose `groups` do not include it. Used only for
   the private-comment invisibility check.
 
@@ -404,8 +406,12 @@ with "The XML-RPC Interface feature is not available in this Bugzilla" because
 Bugzilla's `Bugzilla/Install/Requirements.pm:303-310` requires the two separately ("Since
 SOAP::Lite 1.0, XMLRPC::Lite is no longer included and so it must be checked separately").
 Adding `libxmlrpc-lite-perl` to that apt list is the fix, and it is a fixture fix rather
-than a client-side substitution, which is what `AGENTS.md` requires. Verified live: with
-the package present, `bzr comment list 7` returns `count=1 is_private=true`. The image
+than a client-side substitution, which is what `AGENTS.md` requires. Verified live on
+2026-09-02, after the rebuild: `perl -MXMLRPC::Lite` loads inside the container, and
+`xmlrpc.cgi` answers a `Bugzilla.version` call with `5.2+` where it previously returned the
+"feature is not available" HTML error. That the full thread then reads back as
+`is_private=true` for a named insider is proven by the live tier, not asserted here. The
+image
 rebuild `make up` performs is enough — `mariadb-data` and `bugzilla-data` are top-level
 volumes, so no reset and no data loss.
 

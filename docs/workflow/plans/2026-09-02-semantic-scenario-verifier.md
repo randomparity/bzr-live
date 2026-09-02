@@ -155,10 +155,24 @@ declared private comment is invisible to the insider read. The image answered
 because it installed `libsoap-lite-perl` and no `XMLRPC::Lite`, which Bugzilla's
 `Bugzilla/Install/Requirements.pm:303-310` requires separately since SOAP::Lite 1.0.
 
-Proof is live, not unit: `make up` (rebuilds the image and recreates the container; the
-`mariadb-data` and `bugzilla-data` volumes survive, so no reset and no data loss), then
-`bzr comment list 7` returns two comments, the second `count=1 is_private=true`. Before
-the change the same command returns one.
+Proof is live, not unit: `make up` rebuilds the image and recreates the container, and the
+`mariadb-data` and `bugzilla-data` volumes survive, so no reset and no data loss.
+**Performed 2026-09-02** — the `bugzilla` container was recreated while the `db` container
+and both volumes were left in place. Two checks, in order of what they establish:
+
+1. `docker exec <bugzilla> perl -MXMLRPC::Lite -e 1` succeeds. Before the rebuild it
+   failed with `Can't locate XMLRPC/Lite.pm in @INC`.
+2. `xmlrpc.cgi` answers a `Bugzilla.version` call with `5.2+`. Before the rebuild the same
+   endpoint returned the "The XML-RPC Interface feature is not available in this Bugzilla"
+   HTML error page with a 200 status — which is why `bzr`'s probe could not tell.
+
+That a full thread then reads back `is_private=true` for a named insider is Task 7.4's to
+prove, and is not claimed here. **The first rebuild attempt failed** after 33 minutes on
+`curl: (18) Transferred a partial file` fetching `Template-Toolkit-3.106.tar.gz` from
+`cpan.metacpan.org` — a transient network failure in a pre-existing layer, downstream of
+`Setting up libxmlrpc-lite-perl (0.717-5)`, which had already succeeded. Retrying was
+enough. Run `make up` **bare**: piping it through `tail` hides the build's exit status,
+and on zsh `${PIPESTATUS[0]}` is empty because the array is `pipestatus`.
 
 Run `make check`; expect green. `make check` validates `compose config` and does not build
 the image, so it neither proves nor is affected by this change — Task 7's live tier is
