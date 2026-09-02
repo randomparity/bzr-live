@@ -1,0 +1,13 @@
+{
+  "format_version": 1,
+  "resources": [
+    {"kind": "group", "name": "restricted", "description": "Restricted visibility"},
+    {"kind": "actor", "name": "developer", "email": "developer@example.test", "display_name": "Devi Developer"},
+    {"kind": "actor", "name": "triager", "email": "triager@example.test", "display_name": "Tessa Triager"},
+    {"kind": "actor", "name": "releaser", "email": "releaser@example.test", "display_name": "Rex Releaser"},
+    {"kind": "product", "name": "ordering", "description": "Order capture"},
+    {"kind": "component", "name": "queue", "product": {"ref": "product:ordering"}, "description": "Order queue"},
+    {"kind": "version", "name": "ordering-v1", "product": {"ref": "product:ordering"}},
+    {"kind": "flag-type", "name": "review", "description": "Review request", "target": "bug"}
+  ]
+}

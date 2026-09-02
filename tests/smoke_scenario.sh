@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Operator-run live proof for issue #19: provisions and replays scenarios/smoke/ --
-# 20 bugs, 47 events, two products -- against the running fixture using the selected
-# bzr binary, and reports the observed replay duration. It proves that provisioning,
-# actor switching, symbolic references and every supported action compose on a real
-# Bugzilla; it asserts nothing about semantic invariants, which is issue #20's job.
+# Operator-run live proof for issues #19 and #20: provisions and replays scenarios/smoke/
+# -- 20 bugs, 47 events, two products -- against the running fixture using the selected
+# bzr binary, then verifies the replayed state against the scenario, reporting both
+# durations. It proves that provisioning, actor switching, symbolic references and every
+# supported action compose on a real Bugzilla, and that the state they leave behind is the
+# one the scenario declares.
 #
 # Requires: a healthy `make up` (start from CONFIRM_RESET=1 make reset for a fresh
 # fixture -- Bugzilla reads containers/bugzilla/checksetup_answers.txt only at install,
@@ -70,25 +71,40 @@ uv run --python 3.11 python -m bzr_live.provision "$SCENARIO" \
   --state-root "$STATE/state" --bzr "$BZR" --project-root "$ROOT" \
   --base-url "$BASE_URL"
 
-# Time the replay alone. bash's SECONDS counts from shell start and has one-second
-# granularity, so it would fold provisioning into a figure labelled "replayed" and can
-# report 0s as though that were a measurement. `date +%s%N` is available on both targets
-# (BSD date on Darwin, GNU date on the CI runner) but is not a documented prerequisite,
-# so fall back to whole seconds when it does not yield digits.
+# Wall time since a `date +%s%N` mark. bash's SECONDS counts from shell start and has
+# one-second granularity, so it would fold provisioning into a figure labelled "replayed"
+# and can report 0s as though that were a measurement. `date +%s%N` is available on both
+# targets (BSD date on Darwin, GNU date on the CI runner) but is not a documented
+# prerequisite, so fall back to whole seconds when it does not yield digits.
+elapsed_since() {
+  local start=$1 end ns
+  end=$(date +%s%N)
+  if [[ $start =~ ^[0-9]+$ && $end =~ ^[0-9]+$ ]]; then
+    ns=$((end - start))
+    printf '%d.%02d' $((ns / 1000000000)) $((ns % 1000000000 / 10000000))
+  else
+    printf '%d (whole seconds; date lacks %%N)' \
+      "$(($(date +%s) - ${start%%[!0-9]*}))"
+  fi
+}
+
 REPLAY_START=$(date +%s%N)
 echo "smoke scenario: replaying $EVENT_COUNT events as $ACTOR_COUNT actors"
 uv run --python 3.11 python -m bzr_live.replay replay "$SCENARIO" \
   --state-root "$STATE/state" --bzr "$BZR" --base-url "$BASE_URL"
-REPLAY_END=$(date +%s%N)
-
-if [[ $REPLAY_START =~ ^[0-9]+$ && $REPLAY_END =~ ^[0-9]+$ ]]; then
-  ELAPSED_NS=$((REPLAY_END - REPLAY_START))
-  ELAPSED=$(printf '%d.%02d' \
-    $((ELAPSED_NS / 1000000000)) $((ELAPSED_NS % 1000000000 / 10000000)))
-else
-  ELAPSED="$(($(date +%s) - ${REPLAY_START%%[!0-9]*})) (whole seconds; date lacks %N)"
-fi
+ELAPSED=$(elapsed_since "$REPLAY_START")
 echo "smoke scenario: replayed $EVENT_COUNT events in ${ELAPSED}s (replay only,"
 echo "  excluding provisioning and make up)"
+
+# The verifier runs in the same state root as the replay: it reads the journal that run
+# wrote for every server identity, and the actor API keys provisioning minted. No pipe and
+# no `|| true` -- a divergence must fail the script under `set -e`, which is the point of
+# the stage.
+VERIFY_START=$(date +%s%N)
+echo "smoke scenario: verifying the replayed scenario"
+uv run --python 3.11 python -m bzr_live.replay verify "$SCENARIO" \
+  --state-root "$STATE/state" --bzr "$BZR" --base-url "$BASE_URL"
+VERIFY_ELAPSED=$(elapsed_since "$VERIFY_START")
+echo "smoke scenario: verified in ${VERIFY_ELAPSED}s"
 
 echo "smoke scenario: OK"

@@ -108,8 +108,9 @@ collision on any alias the scenario declares — a per-scenario proxy for the pr
 baseline rather than a check of it, since nothing here can ask whether the database
 is at that baseline (ADR 0006) — and the scenario's actors already provisioned with
 API keys under the same state root; `resume` continues a run from its journal after an
-interruption. Both exit 1 with a `replay failed: ...` message on stderr naming the
-precondition or `bzr` limitation that stopped them.
+interruption. Each exits 1 with a `<command> failed: ...` message on stderr — `replay
+failed:`, `resume failed:`, `verify failed:` — naming the precondition or `bzr` limitation
+that stopped it.
 
 `resume` refuses on three things: a scenario whose digest no longer matches the journal, a
 journal record for an event the scenario no longer names, and a create whose alias already
@@ -131,6 +132,31 @@ engine's own "restore the pristine baseline" instruction has nothing to restore.
 
 `tests/replay_smoke.sh` runs the live proof against a fresh fixture
 (`BZR_LIVE_BZR=<bzr binary> bash tests/replay_smoke.sh`).
+
+Scenario verification
+---------------------
+
+`verify` reads the replayed state back off the server and checks it against the scenario:
+
+    uv run python -m bzr_live.replay verify scenarios/smoke \
+      --state-root ./state --bzr /path/to/bzr
+
+It runs **in the same state root as the replay** — it takes every server id from that
+run's journal and reads as the actors provisioned there, so a fresh state root cannot
+verify an earlier replay. It refuses before any read if the journal is incomplete, was
+written for a different scenario digest, or records an event that did not complete.
+
+Six check families cover each bug: declared fields and custom fields and flags, history
+attribution and ordering, relationship topology, the comment thread, private-comment
+visibility from an actor outside the insider group, and attachment metadata and content
+checksums. Four of the six are skipped on a bug that declares nothing for them — the
+summary's check count is the number that actually ran, so a run that skipped a bug cannot
+report the same number as one that did not. It prints one line per finding, then a summary
+line, and exits 1 if any finding is a **divergence** — the fixture disagreeing with the
+scenario. A finding may instead be
+**unverifiable**, meaning `bzr` or Bugzilla cannot read the declared value back on this
+path; those are counted, printed with their reason, and do not fail the run. Each one is
+recorded in [docs/bzr-findings.md](docs/bzr-findings.md) or against a tracking issue.
 
 Smoke scenario
 --------------
@@ -181,11 +207,17 @@ So `5fb99362` is where the D6 defect stops, not a floor this repository has evid
 `bzr` revision as its first line for this reason — the same scenario passes or fails on that
 revision alone.
 
-Observed: **47 events replayed in 78.14s**, replay only, excluding provisioning and
-`make up`. Measured on Apple M5 Max, macOS (Darwin 25.6.0, arm64), Docker 29.7.2, with
-`bzr 0.8.3-dev (63abb94e)`, against a fixture reset immediately beforehand. Provisioning the
-28 resources and `make up` are each separate intervals and are not included.
+Observed: **47 events replayed in 72.63s**, then **69 checks verified in 56.91s**
+reporting 0 divergences and 4 unverifiable claims. Each figure covers its own stage alone,
+excluding provisioning and `make up`. Measured on Apple M5 Max, macOS (Darwin 25.6.0,
+arm64), Docker 29.7.2, with `bzr 0.8.3-dev (63abb94e)`, against a fixture reset immediately
+beforehand. Provisioning the 28 resources and `make up` are each separate intervals and are
+not included.
 
-The live tier proves the parts compose; it asserts no semantic invariants about the
-replayed state. That verifier is issue #20, and fault injection plus x86_64 CI wiring is
-issue #21, so `make smoke` is operator-run rather than a merge gate today.
+The four unverifiable claims are `cart-double-charge`'s `estimated_hours` (finding D8) and
+`remaining_hours` (PR #23), and the work-time hours on the two bugs that log any
+(issue #22). Every other declared value on all 20 bugs is asserted.
+
+The live tier proves both that the parts compose and that the state they leave behind is
+the one the scenario declares. Fault injection and x86_64 CI wiring are tracked separately,
+so `make smoke` is operator-run rather than a merge gate today.

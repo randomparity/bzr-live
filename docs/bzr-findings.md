@@ -23,7 +23,7 @@ already-filed one (D5).
 |---|---|---|---|
 | [D1](#d1) | defect | A flag type name containing `-` is unparseable by `--flag` | [bzr#640](https://github.com/randomparity/bzr/issues/640) |
 | [G7](#g7) | design choice | An absent bug exits 4 with an API code, not 2 — `bzr` ADR 0015 forbids masking a server error | n/a |
-| [D3](#d3) | defect | `bug view` omits `groups`, `estimated_time` and `remaining_time` that Bugzilla returns | [bzr#641](https://github.com/randomparity/bzr/issues/641) |
+| [D3](#d3) | defect, **fixed** | `bug view` omits `groups`, `estimated_time` and `remaining_time` that Bugzilla returns | [bzr#641](https://github.com/randomparity/bzr/issues/641), closed by `a7f6ab70` |
 | [D4](#d4) | defect (unverified) | `bug create --from-json` `alias` silently no-ops where aliases are disabled | hold: unverified |
 | [D5](#d5) | defect | `rep_platform` is the wrong wire name; the field is `platform` | [bzr#621](https://github.com/randomparity/bzr/issues/621) |
 | [G1](#g1) | gap | `bug create --from-json` has no `estimated_time` / `remaining_time` | — |
@@ -34,6 +34,9 @@ already-filed one (D5).
 | [G6](#g6) | gap | `--permissive` is rejected for a single bug ID | — |
 | [G9](#g9) | design choice | `bug create --from-json` silently defaults an omitted `version` to `unspecified` | — |
 | [D6](#d6) | defect (fixed upstream) | `component view` reports `default_assignee: null` for a component Bugzilla says has one | fixed by `5fb99362` |
+| [D7](#d7) | defect | `bug history` attributes a `comment_id` to a change that carried no comment | hold: recording only, filing declined |
+| [D8](#d8) | defect | The auth probe concludes header auth works when it does not, so REST reads run effectively unauthenticated | hold: recording only |
+| [D9](#d9) | defect | On Bugzilla >= 5.1 the auto-detected `rest` mode never takes the XML-RPC path `bzr` documents as the only one returning a full comment thread or attachment `data` | not filed |
 
 ---
 
@@ -103,8 +106,9 @@ rejected this" share an exit code, separable only by reading `api_code` off stde
 
 ## D3
 
-**`bug view` does not serialize `groups`, `estimated_time` or `remaining_time`.**
-*Read from source.*
+**`bug view` did not serialize `groups`, `estimated_time` or `remaining_time`.**
+*Read from source. Fixed upstream in `a7f6ab70`; the description below is of the defect as
+found, on `0.8.2`.*
 
 The `Bug` serializer (`src/types/bug.rs`) emits `id`, `summary`, `status`, `resolution`,
 `dupe_of`, `deadline`, `product`, `component`, `version`, `assigned_to`, `priority`,
@@ -118,8 +122,21 @@ the two time fields via `--estimated-time`/`--remaining-time` — so each is a *
 field: no caller can read back what it wrote, and no caller can compute an add/remove delta
 for `groups` from server state.
 
-**Upstream.** [bzr#641](https://github.com/randomparity/bzr/issues/641), filed as part of
-the conformance epic [bzr#616].
+**Upstream. Fixed.** [bzr#641](https://github.com/randomparity/bzr/issues/641), filed as
+part of the conformance epic [bzr#616], is closed by `a7f6ab70`
+(*fix(bug): expose group and time fields in bug views*, PR #646, branch
+`feat/bug-view-read-fields-641`). It adds `Groups`, `EstimatedTime` and `RemainingTime` to
+`BugField` (`src/types/bug/fields.rs`) and to the `Bug` serializer, so all three are
+readable through `bug view --fields` from that commit on. `a7f6ab70` is an ancestor of
+`63abb94e`, the revision `README.md` proves `make smoke` at, so the defect does not
+reproduce at any revision this repository supports. It still reproduces on the `0.8.2`
+release, which is what the homebrew binary is.
+
+**What still depends on the defect.** `src/bzr_live/verify/` asserts `groups` and
+`estimated_time` rather than waiving them, because it runs at the supported revision.
+`src/bzr_live/replay/actions.py` has **not** been revisited: it still refuses a declared
+`groups` set on `bug.update` and still treats the two time fields as never-confirming, per
+ADR 0006. Narrowing that is follow-up work, not part of issue #20.
 
 Related but distinct from that epic's own entries: entry 10 (bzr#623) covers
 `groups: []` being unexpressible on *create*, and [bzr#621](https://github.com/randomparity/bzr/issues/621)
@@ -299,3 +316,208 @@ declares `2.0.0`. `README.md` states the distinction. This entry is why
 `tests/smoke_scenario.sh` prints
 the `bzr` revision as its first line: the same scenario passes or fails on that revision
 alone, and an entry recorded against the wrong one would be a false report.
+
+## D9
+
+**On Bugzilla 5.1 and above, `bzr`'s auto-detected `rest` mode never takes the XML-RPC path
+its own source documents as the only one that returns a full comment thread or an
+attachment body.**
+*Read from source and confirmed live at `bzr 0.8.3-dev (63abb94e)` against this fixture
+(Bugzilla `5.2+`), 2026-09-02.*
+
+`get_comments_since` (`src/client/resources/comment.rs:62`) and `get_attachments`
+(`attachment.rs:151`) both call `dispatch_xmlrpc_first`, and both carry a doc comment saying
+XML-RPC is preferred because "Bugzilla 5.0.x REST silently filters private comments under
+API-key auth (issue #125), and the truncation is not reliably detectable from the REST
+response — XML-RPC is the only path that returns the full thread", with the same wording for
+attachments and issue #133.
+
+But `dispatch_xmlrpc_first` (`src/client/mod.rs:262-280`) does not consult `xmlrpc.cgi` at
+all. It branches on the detected `api_mode`:
+
+```rust
+match self.api_mode {
+    ApiMode::Rest => rest().await,
+    ApiMode::XmlRpc => xmlrpc().await,
+    ApiMode::Hybrid => match xmlrpc().await { /* fall back to REST on transport failure */ },
+}
+```
+
+and `version_to_api_mode` (`src/client/version.rs:119-140`) maps `< 5.0` to `xmlrpc`,
+`>= 5.0 < 5.1` to `hybrid`, and **`>= 5.1` to `rest`**. This fixture answers `5.2+`, so the
+mode is `rest` and the XML-RPC arm is unreachable — the preference those doc comments
+describe is disabled on exactly the versions where the REST reply is still lossy.
+
+**Observed.** `bzr --json attachment list 1` returns an entry whose keys are `id`, `bug_id`,
+`file_name`, `summary`, `content_type`, `creator`, `creation_time`, `last_change_time`,
+`size`, `is_obsolete`, `is_private`, `is_patch`, `flags` — and **no `data`**, because the
+REST arm requests `exclude_fields=data` (`attachment.rs:163`). The same command with
+`--api hybrid` returns the identical key set **plus `data`**, whose base64 body decodes to
+622 bytes matching the attachment's reported `size` and hashing to the declared
+`asset_sha256`.
+
+`bug view`, `bug history` and `bug links` are byte-identical across the two modes on this
+fixture. `comment list` is byte-identical **only on a thread carrying no private comment**
+— bug 1's five-entry thread is, byte for byte. On a thread that does carry one the two
+modes differ, and that is [D8](#d8) compounding this entry rather than a second observation
+of it: reading bug 7 as the insider `admin-ops@example.test` with that actor's own valid
+key, the default `rest` mode omits the declared private comment, while `--api hybrid`
+returns it with `is_private: true`. So the divergence is not confined to `attachment list`;
+it is confined to the two reads whose doc comments name XML-RPC as their only correct path,
+which is exactly the pair this entry is about.
+
+**Defect, not design choice.** The version mapping is deliberate and reasonable on its own;
+what makes this a defect is that the two call sites document XML-RPC as the *only* correct
+path for their data and then dispatch through a gate that silently excludes it. A caller
+gets a reply that is well-formed, successful, and quietly missing the field it asked about.
+`bzr`'s own `ATTACHMENT_FIELDS` doc comment states the consequence independently: "`data` is
+only populated by `attachment download`; selecting it on `attachment list` yields empty
+objects."
+
+**What the fixture does.** The verifier passes `--api hybrid` on its `comment list` and
+`attachment list` reads and on no others (`src/bzr_live/verify/observed.py`), under an
+operator decision taken on 2026-09-02. This is not a workaround and not a substitution:
+`--api hybrid` is `bzr`'s own documented setting for this case. Its `--api` help text says
+that under `hybrid` "comments and attachments use XML-RPC first to preserve private-data
+behavior", and that the auto-detected default is "`hybrid` for 5.0.x, `rest` for >= 5.1".
+The flag configures the client for the data being read; it injects no value the scenario
+did not declare and swaps no command for another. Without it the chartered
+comment-visibility and attachment-checksum criteria are both unreachable and would have to
+be reported `unverifiable` against this entry.
+
+The three reads that keep the default do so because they are byte-identical across the two
+modes, as measured above — the records should not be read as saying every read changed.
+
+**The package and the flag are both necessary and neither is sufficient.**
+`containers/bugzilla/Dockerfile` installs `libxmlrpc-lite-perl` for this same pair of
+reads: `--api hybrid` makes `bzr` *attempt* XML-RPC, and the package makes the fixture
+*answer* it. With the flag and no package, `dispatch_xmlrpc_first`'s hybrid arm falls back
+to REST on the transport failure and the data is lost again — which is what
+`check_comment_transport` (`src/bzr_live/verify/runner.py`) refuses on, naming the package.
+
+Filing upstream on `randomparity/bzr` is not authorized; this entry is the record.
+
+## D7
+
+**`bug history` attributes a `comment_id` to a change that carried no comment.**
+*Observed against the running fixture, 2026-09-02, with `bzr 0.8.3-dev (63abb94e)` — the
+revision `README.md` proves `make smoke` at. Originally observed at `0.8.2 (ae39fbd8)`,
+which is below that floor, and re-verified here because a citation taken at an untested
+revision does not support the claim.*
+
+`flatten_history` (`src/commands/bug/history.rs:68-71`) documents that its comment
+correlation "can miss (→ null) but never produces a wrong id", correlating on exact `who`
+plus a canonical timestamp key. It does produce a wrong id.
+
+Observed on `scenarios/smoke/` bug 12 (`inv-tax-mismatch`), `bzr --json bug history 12`:
+
+```
+2026-09-02T14:20:03Z | triager@example.test | cf_subsystem | '' -> 'invoicing'   | comment_id: 31
+2026-09-02T14:20:03Z | triager@example.test | cf_risk      | '---' -> 'medium'   | comment_id: 31
+```
+
+Comment 31 is the `worktime-inv-tax` comment, posted by the same actor in the same second
+through a different call — confirmed by `bzr --json comment list 12`, where id 31 at
+`2026-09-02T14:20:03Z` by `triager@example.test` carries the
+`[bzr-live:smoke:worktime-inv-tax]` marker. The custom-field write is a stock-REST `PUT`
+that posts no comment at all, so the correct `comment_id` for both rows is null. The three
+earlier records on the same bug correlate correctly to null.
+
+The correlation key is `who` plus a second-resolution timestamp, which is not unique: any
+two changes by one actor in the same second collide, and how often that happens is a
+property of how fast the replay ran rather than of the data.
+
+**Class: defect.** The doc comment states a guarantee the implementation does not provide.
+
+**Upstream.** Not filed. The operator declined filing this on `randomparity/bzr` on
+2026-09-02 and authorized recording only.
+
+**What the fixture does.** Nothing: the verifier never asserts `comment_id`, which is why
+this is a recorded finding rather than a blocker.
+
+## D8
+
+**`bzr`'s auth probe concludes header auth works when it does not, so its REST reads run
+effectively unauthenticated.**
+*Observed against the running fixture, 2026-09-02, with `bzr 0.8.3-dev (63abb94e)`.
+Originally observed at `0.8.2 (ae39fbd8)`, below `README.md`'s floor, and re-verified here.*
+
+`bzr` probes authentication, finds `rest/whoami` unavailable, falls back to
+`rest/valid_login`, is rejected, then probes `rest/bug` and concludes the rejection was
+wrong. Verbatim from `RUST_LOG=debug` at `63abb94e`:
+
+```
+DEBUG bzr::client::auth::whoami: rest/whoami not available on this server
+ INFO bzr::client::auth: falling back to rest/valid_login for older Bugzilla
+DEBUG bzr::client::auth::valid_login: valid_login returned false method=header
+DEBUG bzr::client::auth::valid_login: header auth probe on rest/bug succeeded
+ INFO bzr::client::auth: header auth works on API endpoints despite valid_login rejecting
+      it; preferring header
+ INFO bzr::client::auth: detected server settings method=header api_mode=rest version="5.2+"
+DEBUG bzr::client: created Bugzilla client auth_method=Some(Header) api_mode=rest
+```
+
+`valid_login` was right and the probe was wrong. Against this fixture, with a valid API key
+for `admin-ops@example.test`:
+
+- `GET /rest/valid_login?login=...` with an `X-BUGZILLA-API-KEY` header returns
+  `{"result":false}`;
+- the same call with `Bugzilla_api_key` as a **query parameter** returns `{"result":true}`.
+
+The probe cannot tell, because the 200 it reads from `rest/bug` is exactly what an anonymous
+caller gets — an unauthenticated read of a public bug succeeds. The success signal does not
+discriminate between "authenticated" and "readable anyway".
+
+**Observed consequence, demonstrated rather than inferred.** Reading bug 7's thread as the
+insider `admin-ops@example.test`, with that actor's own valid key:
+
+| Path | Declared private comment |
+|---|---|
+| `bzr comment list 7` (default: header auth, REST) | **absent** |
+| `GET /rest/bug/7/comment?Bugzilla_api_key=...` | present, `is_private: true` |
+| `bzr --api hybrid comment list 7` (XML-RPC) | present, `is_private: true` |
+
+So the comment is on the server and visible to a properly authenticated insider, and `bzr`'s
+preferred transport is the one that does not see it. Writes are unaffected: they draw a 401,
+which triggers `bzr`'s alternate-auth retry, which is why the replay works at all.
+
+**Second observed consequence: `bug view` withholds the time-tracking fields.** Found by the
+first live run of the verify stage (`make smoke`, 2026-09-02, `bzr 0.8.3-dev (63abb94e)`),
+which reported `cart-double-charge: estimated_time: declared 8, observed (absent)`. Bugzilla
+gates `estimated_time` and `remaining_time` on the `timetrackinggroup` parameter, which this
+image sets to `editbugs` (read back from the container). `admin-ops` holds `editbugs`, but
+the read is anonymous, so the fields are withheld. With that actor's own valid key:
+
+| Path | `estimated_time` |
+|---|---|
+| `bzr bug view 1 --fields=id,estimated_time` (default) | **absent** |
+| `bzr --api hybrid bug view 1 --fields=id,estimated_time` | **absent** |
+| `bzr --api xmlrpc bug view 1 --fields=id,estimated_time` | `8.0` |
+| `GET /rest/bug/1?Bugzilla_api_key=...&include_fields=estimated_time` | `8` |
+
+`--api hybrid` does not help here and is not expected to: `bzr --help` says that under
+`hybrid` "bug search/view is generally REST-first with targeted XML-RPC fallback", so
+`bug view` stays on REST. This is why the verifier waives `estimated_hours` — see
+`UNVERIFIABLE_FIELDS` in `src/bzr_live/verify/expected.py` — rather than reporting a
+divergence against a server that holds the declared value. Moving `bug view` to
+`--api xmlrpc` would read it; that is a transport change the operator has not authorized
+and one that would invalidate the REST reply shapes ADR 0008 verified, so it is reported
+here and not taken.
+
+**Class: defect** — the probe's success signal does not discriminate, and it overrides a
+server response that was correct.
+
+**Upstream.** Not filed; recording only is what the operator authorized.
+
+**What the fixture does.** It refutes the premise that a positive read observes the state the
+issuing actor would see, so the design states that boundary rather than assuming it. Note
+that an earlier draft of this entry claimed the one identity-dependent check — `comment
+list` — "travels over XML-RPC, which does authenticate, so no check today reads less than it
+should". That mitigation is **false**, and [D9](#d9) is why: on this fixture `bzr` selects
+`api_mode=rest` from the server version, so `comment list` never takes the XML-RPC arm
+unless `--api hybrid` is passed. D8 and D9 compound — one makes REST reads anonymous, the
+other makes REST the only transport — and together they are what put the comment-visibility
+criterion out of reach at the default transport.
+
+The `bug view` consequence above is D8 acting alone: `bug view` is REST under both `rest`
+and `hybrid`, so D9's transport gate does not enter into it.

@@ -63,6 +63,7 @@ RUN apt-get update \
       libtheschwartz-perl \
       libxml-perl \
       libxml-twig-perl \
+      libxmlrpc-lite-perl \
       mariadb-client \
       patchutils \
       perlmagick \
