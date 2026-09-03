@@ -215,6 +215,13 @@ def _parse_resource(item: object, index: int, source: str) -> PlannedResource:
 
     if kind in {"group", "product", "keyword"}:
         data["description"] = _text(obj["description"], source, f"{field}.description")
+        if kind == "group":
+            # products this bug group may be set on; same shape and validation as
+            # flag-type's inclusions, so the plan orders the group after them
+            products = _unique_refs(
+                obj.get("products", []), "product", source, f"{field}.products")
+            data["products"] = products
+            dependencies.extend(products)
     elif kind == "actor":
         email = obj["email"]
         if not isinstance(email, str) or _EMAIL.fullmatch(email) is None:
@@ -264,7 +271,7 @@ def _parse_resource(item: object, index: int, source: str) -> PlannedResource:
 
 
 _RESOURCE_FIELDS: dict[str, tuple[set[str], set[str]]] = {
-    "group": ({"kind", "name", "description"}, set()),
+    "group": ({"kind", "name", "description"}, {"products"}),
     "actor": ({"kind", "name", "email", "display_name"}, {"groups"}),
     "product": ({"kind", "name", "description"}, set()),
     "component": ({"kind", "name", "product", "description"}, {"default_assignee"}),

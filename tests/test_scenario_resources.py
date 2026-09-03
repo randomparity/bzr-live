@@ -84,6 +84,40 @@ class ScenarioResourceTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             component.data["description"] = "changed"  # type: ignore[index]
 
+    def test_group_products_resolve_and_order_the_plan(self) -> None:
+        self.write_json("resources.json", {"format_version": 1, "resources": [
+            {"kind": "group", "name": "restricted", "description": "Restricted",
+             "products": [{"ref": "product:checkout"}]},
+            {"kind": "product", "name": "checkout", "description": "Checkout"},
+        ]})
+        scenario = load_scenario(self.root)
+        group = {resource.name: resource for resource in scenario.resources}["restricted"]
+        self.assertEqual(group.data["products"], (Reference("product", "checkout"),))
+        self.assertIn(Reference("product", "checkout"), group.dependencies)
+        self.assertEqual(
+            [resource.name for resource in scenario.resource_plan],
+            ["checkout", "restricted"])
+
+    def test_group_without_products_carries_an_empty_tuple(self) -> None:
+        self.write_json("resources.json", {"format_version": 1, "resources": [
+            {"kind": "group", "name": "plain", "description": "Plain"}]})
+        self.assertEqual(load_scenario(self.root).resources[0].data["products"], ())
+
+    def test_group_products_must_name_a_declared_product(self) -> None:
+        self.write_json("resources.json", {"format_version": 1, "resources": [
+            {"kind": "group", "name": "restricted", "description": "Restricted",
+             "products": [{"ref": "product:absent"}]}]})
+        message = self.assert_invalid("resources.json", "$.resources[0]")
+        self.assertIn("missing dependency product:absent", message)
+
+    def test_group_products_reject_a_duplicate_reference(self) -> None:
+        self.write_json("resources.json", {"format_version": 1, "resources": [
+            {"kind": "product", "name": "checkout", "description": "Checkout"},
+            {"kind": "group", "name": "restricted", "description": "Restricted",
+             "products": [{"ref": "product:checkout"}, {"ref": "product:checkout"}]}]})
+        message = self.assert_invalid("resources.json", "$.resources[1].products[1]")
+        self.assertIn("duplicate reference", message)
+
     def test_rejects_duplicate_json_keys_with_source_and_field(self) -> None:
         (self.root / "resources.json").write_text(
             '{"format_version":1,"resources":[{"kind":"group","name":"x","description":"ok","description":"again"}]}',
