@@ -211,7 +211,7 @@ In `sub dispatch`, immediately before the final `die "unreachable operation\n";`
     my $group   = Bugzilla::Group->check({name => $request->{group}});
     # Settability needs only these two columns: group_is_settable reads
     # groups_mandatory/groups_available, which select on membercontrol and
-    # othercontrol alone (Product.pm:659-748 at the pinned SHA). The privilege
+    # othercontrol alone (Product.pm:659-736, :740-748 at the pinned SHA). The privilege
     # columns -- canedit, editbugs, canconfirm -- would grant the group's members
     # product rights no scenario declared, so they stay unset (ADR 0013).
     $product->set_group_controls($group, {
@@ -233,10 +233,14 @@ In `sub dispatch`, immediately before the final `die "unreachable operation\n";`
     };
   }
   if ($operation eq 'get-group-control') {
-    my $product = product_of($request->{product});
-    my $group   = Bugzilla::Group->check({name => $request->{group}});
+    # ->new, not ->check: a product the scenario declares but the fixture has not
+    # created yet must read as "not settable", not die. The loader already proved
+    # the name is a declared product, so this cannot be hiding a typo.
+    my $product = Bugzilla::Product->new({name => $request->{product}});
+    my $group   = Bugzilla::Group->new({name => $request->{group}});
+    return undef unless $product && $group;
     # group_controls without $full_data constrains the join on product_id, so an
-    # unmapped group is simply absent (Product.pm:604-637 at the pinned SHA).
+    # unmapped group is simply absent (Product.pm:604-657 at the pinned SHA).
     my $controls = $product->group_controls->{$group->id};
     return undef unless $controls;
     return {

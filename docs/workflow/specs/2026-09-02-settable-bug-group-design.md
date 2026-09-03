@@ -84,9 +84,18 @@ othercontrol => CONTROLMAPSHOWN})` and `$product->update()`. It then asserts
 `$product->group_is_settable($group)` on a freshly loaded product and dies if false, so a
 silently ineffective write cannot report success.
 
-`get-group-control` reads `$product->group_controls()` and returns `undef` when the group id
-is absent from it — without `$full_data` that call constrains the join on `product_id`, so an
-unmapped group simply does not appear — and otherwise reports the stored control values plus
+`get-group-control` resolves both objects with `->new` rather than `->check`, and returns
+`undef` when either is absent. "Not settable" is the honest answer to a getter when the
+product does not exist yet, and the loader has already guaranteed every `products` entry
+names a declared product, so a typo cannot reach here. The case this serves is a scenario
+edited to add a product to an existing group's `products`: pass 1 classifies the group before
+pass 2 creates the new product, so `->check` would have died inside the bridge and replaced
+the designed `ProvisionConflictError` — reset hint and all — with a raw Bugzilla error. The
+setter keeps `->check`, so a name that cannot be resolved at mutation time still fails loudly.
+
+Otherwise it reads `$product->group_controls()` and returns `undef` when the group id is
+absent from it — without `$full_data` that call constrains the join on `product_id`, so an
+unmapped group simply does not appear — and reports the stored control values plus
 `$product->group_is_settable($group)`.
 
 `settable` — not the raw control integers — is what the executor compares. The control values
@@ -107,6 +116,7 @@ first bug restricted to it invisible to the actor that restricted it. The digest
 | Declared product missing from the scenario | Existing loader error: `missing dependency product:<name>` |
 | Duplicate product ref | Existing loader error: `duplicate reference` |
 | Group exists, mapping absent | `ProvisionConflictError` with the reset hint; nothing is mutated |
+| Group exists, a newly declared product does not yet | Same `ProvisionConflictError`, because `get-group-control` reports an absent product as unmapped rather than dying. Matches `_classify_actor`, which already refuses an existing actor missing a declared membership |
 | Bridge cannot reach the fixture | Existing `BridgeClient` message naming `--project-root` |
 | `set_group_controls` refuses (inactive or non-bug group) | Bridge returns `ok: false`; `ProvisionError` names the Bugzilla error |
 | Mapping written but not settable | Bridge dies on its own post-assert; the run fails at that resource |
@@ -130,7 +140,8 @@ under review, not untrusted input.
 `BridgeClient.OPERATIONS`) — an unlisted name exits 2 without reaching Bugzilla. Both
 resource names are resolved with `Bugzilla::Product->check` and `Bugzilla::Group->check`, so
 an unknown name dies rather than creating an object, and nothing is interpolated into a
-query. The control values are fixed Perl constants, never scenario input. The bridge runs as
+query. The getter resolves with `->new` instead and answers `null`, which reads no more than
+`->check` would and mutates nothing either way. The control values are fixed Perl constants, never scenario input. The bridge runs as
 the admin user it already resolves (`bridge.pl:69-71`); this change grants it nothing new.
 Neither operation touches a secret, so neither needs `create-api-key`'s output suppression.
 

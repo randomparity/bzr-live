@@ -44,12 +44,12 @@ topological resource plan.
 **It is applied through two new bridge operations, `set-group-control` and
 `get-group-control`, over `Bugzilla::Product`'s object-layer API.** `set-group-control`
 calls `$product->set_group_controls($group, ...)` and `$product->update()`
-(`Bugzilla/Product.pm:519-583`, `:137-283`); `get-group-control` reads
-`$product->group_controls()` (`:604-656`). No SQL statement is written by this repository.
+(`Bugzilla/Product.pm:519-584`, `:137-288`); `get-group-control` reads
+`$product->group_controls()` (`:604-657`). No SQL statement is written by this repository.
 
 **The control values are `entry = 0`, `membercontrol = CONTROLMAPSHOWN`,
 `othercontrol = CONTROLMAPSHOWN`, and nothing else.** That is the minimum
-`group_is_settable` requires: `groups_available` (`:659-700`) admits a group whose
+`group_is_settable` requires: `groups_available` (`:659-711`) admits a group whose
 `othercontrol` is `SHOWN` regardless of the acting user's membership. The three
 privilege-granting columns upstream also sets — `canedit`, `editbugs`, `canconfirm` — are
 deliberately left at 0.
@@ -81,7 +81,7 @@ group membership.
   two-boundary kind in the same way `actor` is already a two-call one. The table records the
   kind's own mutation boundary and is not restructured for a sub-step.
 - Mapping a group is non-destructive to existing bugs. Only `CONTROLMAPMANDATORY` sweeps
-  bugs into a group and only `CONTROLMAPNA` sweeps them out (`Bugzilla/Product.pm:214-283`);
+  bugs into a group and only `CONTROLMAPNA` sweeps them out (`Bugzilla/Product.pm:214-268`);
   `SHOWN` does neither, so a rerun over a populated fixture moves no bug.
 - Any user can restrict a bug to the group, but only members can see it afterwards. That is
   the intended shape — it is what makes group visibility observable — and it means a
@@ -100,20 +100,20 @@ group membership.
   verified: `containers/bugzilla/bridge.pl:5` states the opposite invariant, and
   `Bugzilla::Product::set_group_controls` plus `update()` reach the same end state through
   the object layer, including the `group_control_map` row and its delete-when-all-zero
-  behaviour (`Bugzilla/Product.pm:558-583`, `:186-211`).
+  behaviour (`Bugzilla/Product.pm:576-583`, `:181-211`).
 - **Add a new `group-control` resource kind joining a product and a group.** judgment: a
   third join kind for a two-column relation, when `flag-type` already establishes
   `products:` on the non-product resource as this contract's idiom for the same shape.
 - **Also set `canedit`, `editbugs` and `canconfirm`, as upstream's `INSERT` does.**
   verified: `group_is_settable` (`Bugzilla/Product.pm:740-748`) reads only `isactive`,
   `isbuggroup`, `groups_mandatory` and `groups_available`, and the latter two select on
-  `membercontrol`/`othercontrol` alone (`:659-738`). Those three columns instead grant
+  `membercontrol`/`othercontrol` alone (`:659-736`). Those three columns instead grant
   product privileges to the group's members, which would hand `admin-ops` `editbugs` and
   `canconfirm` on both products by a route no scenario declared — the fixture would stop
   being able to observe a missing permission.
 - **Map one of the 14 `checksetup` groups instead of creating one.** verified: all 14 carry
   `isbuggroup = 0` (issue #34's measurement), and `set_group_controls` refuses a
-  non-bug-group outright with `product_illegal_group` (`Bugzilla/Product.pm:521-522`).
+  non-bug-group outright with `product_illegal_group` (`Bugzilla/Product.pm:522-523`, via `Group::is_active_bug_group`, `Bugzilla/Group.pm:319-322`).
 - **Reconcile a missing mapping in place on rerun rather than refusing.** judgment: every
   other kind in the provisioner refuses on divergence, and reconciling would mutate a
   fixture whose state already disagrees with the contract — the case the reset hint exists
