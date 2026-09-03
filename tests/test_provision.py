@@ -393,7 +393,19 @@ class _FakeBridge:
                 "target": payload["target"],
                 "inclusions": [dict(pair) for pair in payload["inclusions"]]}
             return {"name": payload["name"]}
+        if operation == "set-group-control":
+            key = f"group-control:{payload['product']}:{payload['group']}"
+            self.state[key] = {
+                "product": payload["product"], "group": payload["group"],
+                "entry": 0, "membercontrol": 1, "othercontrol": 1, "settable": True}
+            return dict(self.state[key])
+        if operation == "get-group-control":
+            return self.state.get(
+                f"group-control:{payload['product']}:{payload['group']}")
         raise AssertionError(f"unexpected bridge call: {operation}")
+
+    def calls_of(self, operation):
+        return [payload for op, payload in self.calls if op == operation]
 
 
 def _declared_bzr_state():
@@ -635,6 +647,72 @@ class ExecutorTests(unittest.TestCase):
 
     def test_custom_field_name_mapping(self) -> None:
         self.assertEqual(custom_field_name("risk-level"), "cf_risk_level")
+
+    def test_system_group_declaring_products_is_refused_before_mutation(self) -> None:
+        self.scenario = self._scenario_from([
+            {"kind": "product", "name": "q4-checkout", "description": "Checkout"},
+            {"kind": "group", "name": "editbugs", "description": "Edit bugs",
+             "products": [{"ref": "product:q4-checkout"}]}])
+        bzr = _FakeBzr()
+        bridge = _FakeBridge(bzr)
+        with self.assertRaises(ProvisionError) as ctx:
+            self._provisioner(bzr, bridge).run()
+        message = str(ctx.exception)
+        self.assertIn("editbugs", message)
+        self.assertIn("isbuggroup", message)
+        self.assertEqual(bzr.writes, [])
+        self.assertEqual(bridge.calls, [])
+
+    def test_creating_a_group_maps_every_declared_product(self) -> None:
+        self.scenario = self._scenario_from([
+            {"kind": "product", "name": "q4-checkout", "description": "Checkout"},
+            {"kind": "product", "name": "q4-billing", "description": "Billing"},
+            {"kind": "group", "name": "q4-secret", "description": "Secret",
+             "products": [{"ref": "product:q4-checkout"},
+                          {"ref": "product:q4-billing"}]}])
+        bzr = _FakeBzr()
+        bridge = _FakeBridge(bzr)
+        report = self._provisioner(bzr, bridge).run()
+        self.assertEqual(dict((i, s) for s, i in report)["group:q4-secret"], "created")
+        self.assertEqual(
+            sorted(p["product"] for p in bridge.calls_of("set-group-control")),
+            ["q4-billing", "q4-checkout"])
+
+    def test_rerun_over_a_mapped_group_is_unchanged_and_writes_nothing(self) -> None:
+        self.scenario = self._scenario_from([
+            {"kind": "product", "name": "q4-checkout", "description": "Checkout"},
+            {"kind": "group", "name": "q4-secret", "description": "Secret",
+             "products": [{"ref": "product:q4-checkout"}]}])
+        bzr = _FakeBzr()
+        bridge = _FakeBridge(bzr)
+        self._provisioner(bzr, bridge).run()
+        rerun = _FakeBridge(bzr, dict(bridge.state))
+        report = self._provisioner(bzr, rerun).run()
+        self.assertEqual([status for status, _ in report], ["unchanged", "unchanged"])
+        self.assertEqual(rerun.calls_of("set-group-control"), [])
+        # the rerun must actually have asked, or "unchanged" proves nothing
+        self.assertEqual(
+            [p["product"] for p in rerun.calls_of("get-group-control")], ["q4-checkout"])
+
+    def test_group_present_without_its_mapping_is_a_multi_step_conflict(self) -> None:
+        self.scenario = self._scenario_from([
+            {"kind": "product", "name": "q4-checkout", "description": "Checkout"},
+            {"kind": "group", "name": "q4-secret", "description": "Secret",
+             "products": [{"ref": "product:q4-checkout"}]}])
+        bzr = _FakeBzr({
+            "group:q4-secret": {"name": "q4-secret", "description": "Secret"},
+            "product:q4-checkout": {
+                "name": "q4-checkout", "description": "Checkout",
+                "versions": [{"name": "unspecified"}],
+                "milestones": [{"name": "---"}]}})
+        bridge = _FakeBridge(bzr)  # no group-control state
+        with self.assertRaises(ProvisionConflictError) as ctx:
+            self._provisioner(bzr, bridge).run()
+        message = str(ctx.exception)
+        self.assertIn("group:q4-secret", message)
+        self.assertIn("products", message)
+        self.assertIn("CONFIRM_RESET=1 make reset", message)
+        self.assertEqual(bzr.writes, [])
 
 
 class CliTests(unittest.TestCase):
