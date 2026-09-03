@@ -23,8 +23,9 @@ repository beyond one operator's arm64 macOS run.
 
 Three facts shape the answer. `tests/smoke_scenario.sh:20` mktemps its state root, and
 `verify` reads the journal and actor keys that root holds, so every stage that must see the
-replayed state has to run inside one invocation of that script. (At the time of writing the
-script also removed that root on an `EXIT` trap; decision 8 below changes how.) No published `bzr` release reaches the revision floor `README.md:193-208` states —
+replayed state has to run inside one invocation of that script. (The script removes that
+root on an `EXIT` trap; decision 8 below settles what that trap must do to stay honest about
+a failure.) No published `bzr` release reaches the revision floor `README.md:193-208` states —
 the newest is `v0.8.2`, which carries the D6 defect — so CI cannot install a release.
 `libdbus-1-dev` is not preinstalled on GitHub's Ubuntu images: `bzr`'s own CI installs it
 in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,55-56`).
@@ -85,29 +86,34 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
 7. **Name GitHub-hosted macOS runners as unavailable** for the arm64 live proof, and keep
    that proof operator-run and recorded in `README.md`.
 
-8. **Drop the `EXIT` trap from `tests/smoke_scenario.sh`** and remove the mktemp'd state
-   root explicitly at the end of the success path, so it survives only a run that actually
-   failed. Issue #29 tracks a status-masking `EXIT` trap in the sibling smoke scripts, and
-   this script had the same shape. Measured here, `set -euo pipefail` throughout:
+8. **Give `tests/smoke_scenario.sh` the cleanup-plus-completion-sentinel pattern issue #29
+   landed on the three sibling smoke scripts**: cleanup keeps removing the mktemp'd state
+   root on every path, and a status of 0 that never reached `COMPLETED=1` becomes a named
+   stderr failure. This script had the same status-masking `EXIT` trap shape #29 tracked.
+   Measured here, `set -euo pipefail` throughout:
 
-   | | no `EXIT` trap | `trap ':' EXIT` | status-preserving `cleanup` |
-   |---|---|---|---|
-   | `false` | exits 1 | exits 1 | exits 1 |
-   | `echo "$UNSET"`, bash 3.2.57 | **exits 1** | exits 0 | exits 0 |
-   | `echo "$UNSET"`, bash 5.3.15 | exits 1 | exits 1 | exits 1 |
+   | | no `EXIT` trap | `trap ':' EXIT` | status-preserving `cleanup` | cleanup + sentinel |
+   |---|---|---|---|---|
+   | `false` | exits 1 | exits 1 | exits 1 | exits 1 |
+   | `echo "$UNSET"`, bash 3.2.57 | exits 1 | exits 0 | exits 0 | **exits 1** |
+   | `echo "$UNSET"`, bash 5.3.15 | exits 1 | exits 1 | exits 1 | exits 1 |
 
    An ordinary `set -e` failure — which is what every stage of this script produces —
    propagates through any of them. Only a *fatal expansion error* loses its status, only on
-   bash 3.2, and there `$?` is already 0 at handler entry, so `tests/checkpoint_smoke.sh`'s
-   status-preserving `cleanup(){ local status=$?; …; exit "$status"; }` measures the same 0
-   and fixes nothing. **Removing the handler is what restores exit 1**, on every
-   interpreter, which is why no version guard is needed either.
+   bash 3.2, and there `$?` is already 0 at handler entry, so a status-preserving
+   `cleanup(){ local status=$?; …; exit "$status"; }` measures the same 0 and fixes nothing
+   on its own. The sentinel does not try to recover that status; it derives one from an
+   independent fact — whether control ever reached the end of the body — and consults it
+   only when the captured status is 0.
 
-   This is a real trade against PR #23's stated intent that actor API keys not outlive the
-   script: on a failing run the 0700 state root now stays under `TMPDIR`. `AGENTS.md` scopes
-   secret handling here to owner-only modes and omission from ordinary output "and nothing
-   more", the directory is already `chmod 700`, and the alternative was a masked failure —
-   so the trade is taken and nothing more elaborate is built to compensate.
+   That is why this dominates simply removing the handler rather than trading against it.
+   Both restore exit 1, but removing the handler leaves the 0700 state root under `TMPDIR`
+   on every failing run, against PR #23's stated intent that actor API keys not outlive the
+   script. Measured on this script at its first top-level `uv`, `/bin/bash` 3.2.57: a
+   status-preserving cleanup with no sentinel exits **0**; this pattern exits **1** and
+   names the failure; no trap at all exits 1 but leaves the state root behind. Only one of
+   the three gets both. No version guard is needed either, so `make smoke` stays runnable on
+   the interpreter `PATH` actually finds here.
 
 ## Consequences
 
@@ -216,15 +222,21 @@ in every job that compiles (`randomparity/bzr` `.github/workflows/ci.yml:21-22,5
   #20's were missed without anyone noticing; the next record would depend on the same manual
   step that just failed.
 - **Fix the `EXIT` trap in `tests/smoke_scenario.sh` with the status-preserving `cleanup(){
-  local status=$?; …; exit "$status"; }` pattern `tests/checkpoint_smoke.sh:13-18` uses.**
-  verified: it does not fix the case it is aimed at. On bash 3.2.57 (macOS `/bin/bash`),
+  local status=$?; …; exit "$status"; }` pattern alone, with no sentinel.** verified: it
+  does not fix the case it is aimed at. On bash 3.2.57 (macOS `/bin/bash`),
   `set -euo pipefail; cleanup(){ local s=$?; :; exit "$s"; }; trap cleanup EXIT; echo
   "$NOPE"` exits **0**, identically to the plain trap, because the status is already 0 when
-  the trap runs; the same command on bash 5.3.15 exits 1. Adopting the pattern here would
-  have looked like a fix and changed nothing.
+  the trap runs; the same command on bash 5.3.15 exits 1. Adopting it without the sentinel
+  would have looked like a fix and changed nothing.
+- **Drop the `EXIT` trap outright and remove the state root on the success path only.**
+  verified: it does restore exit 1 on every interpreter, and it was this record's decision
+  before the sentinel replaced it. Rejected because it buys that visibility by leaking the
+  0700 state root — actor API keys included — on every failing run, where decision 8 gets
+  the same visibility and keeps cleanup. It also left this file as the one smoke script not
+  matching the pattern the other four carry.
 - **Keep the trap and refuse to run under bash older than 4.3 instead.** verified: the
-  refusal is unnecessary once the trap is gone — `set -euo pipefail; echo "$NOPE"` with no
-  trap exits 1 on bash 3.2.57 — and it was actively harmful, because `make smoke` resolves
+  refusal is unnecessary once the sentinel is in place — the measured table in decision 8
+  shows exit 1 on 3.2.57 — and it was actively harmful, because `make smoke` resolves
   `bash` from `PATH`, which on this repository's own reference host finds `/bin/bash`
   3.2.57 ahead of `/opt/homebrew/bin/bash` 5.3.15 (`make -n smoke`; `which -a bash`). The
   guard would have blocked the very runs that produce this change's arm64 evidence.

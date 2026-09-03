@@ -11,6 +11,12 @@
 # and a pre-existing fixture may already hold conflicting resource definitions), and
 # BZR_LIVE_BZR pointing at a bzr binary. This script never edits docs/bzr-findings.md;
 # the operator reads its output and transcribes any finding by hand.
+#
+# Runs on bash 3.2 -- macOS /bin/bash, the `bash` the Makefile's smoke recipes resolve to
+# on the development host. So: no bash 4+ syntax here, and no version precondition either.
+# That bash also discards a fatal `set -u` error's status before the EXIT trap runs, which
+# is why cleanup carries a completion sentinel rather than only the status it was handed
+# (issue #29).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -18,17 +24,24 @@ cd "$ROOT"  # uv resolves the project from cwd
 BZR=${BZR_LIVE_BZR:?set BZR_LIVE_BZR to the bzr binary to validate with}
 SCENARIO="$ROOT/scenarios/smoke"
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-smoke-scenario.XXXXXX")
-# No EXIT trap, deliberately. Measured under `set -euo pipefail`: an ordinary command
-# failure -- what every stage below produces -- exits 1 through any trap on bash 3.2.57 and
-# 5.3.15 alike. A fatal expansion error (an unbound variable under `set -u`; this file has
-# no bash-4-only construct) exits 1 with NO trap and 0 with ANY trap on 3.2, including
-# tests/checkpoint_smoke.sh's status-preserving `cleanup(){ local s=$?; ...; exit "$s"; }`,
-# because $? is already 0 at handler entry. Removing the handler is what restores the
-# status, so the state root is removed at the end of the success path instead and a failed
-# run leaves it. That trades against PR #23's intent that actor keys not outlive the
-# script; the directory is mode 0700 and AGENTS.md scopes this fixture's secret handling to
-# owner-only modes "and nothing more", so the trade is deliberate (ADR 0010 decision 8).
-#
+# Cleanup removes the state root on every path, so the actor keys provisioning mints never
+# outlive the run. The sentinel is what makes that safe on bash 3.2: measured under
+# `set -euo pipefail`, a fatal expansion error (an unbound variable under `set -u`) exits 1
+# with NO trap and 0 with ANY trap there, including a status-preserving
+# `cleanup(){ local s=$?; ...; exit "$s"; }`, because $? is already 0 at handler entry. So
+# cleanup does not try to recover that status -- it derives one from an independent fact,
+# whether control ever reached COMPLETED=1 (ADR 0010 decision 8, issue #29).
+COMPLETED=0
+cleanup() {
+  local status=$?
+  rm -rf -- "$STATE"
+  if [ "$status" -eq 0 ] && [ "$COMPLETED" -ne 1 ]; then
+    echo "smoke scenario: exited before finishing; see the error above" >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 # Canonicalize before anything uses it: scripts/checkpoint requires every path argument to
 # equal its own resolve() (src/bzr_live/checkpoint.py:155-167), and on macOS TMPDIR sits
 # under the /var -> /private/var symlink, so the mktemp spelling is refused with
@@ -217,9 +230,5 @@ echo "smoke scenario: resuming the restored journal"
 uv run --python 3.11 python -m bzr_live.replay resume "$SCENARIO" \
   --state-root "$STATE/state" --bzr "$BZR" --base-url "$BASE_URL"
 
-# The success path removes the state root, so the actor keys provisioning minted do not
-# outlive a run that worked. A failing run stops before this line and leaves the 0700
-# directory under TMPDIR for inspection -- see the header note where the trap used to be.
-rm -rf "$STATE"
-
+COMPLETED=1
 echo "smoke scenario: OK"

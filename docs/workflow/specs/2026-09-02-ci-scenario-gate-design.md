@@ -108,12 +108,19 @@ exits **1 with no trap** and **0 with any trap** on bash 3.2, including
 `tests/checkpoint_smoke.sh:13-18`'s status-preserving `cleanup`, because `$?` is already 0 at
 handler entry. ADR 0010 decision 8 carries the table.
 
-So the trap goes, and the state root is removed explicitly at the end of the success path
-instead. No interpreter guard is needed — removing the handler restores the status on every
-bash — and none is added, which matters because `make smoke` resolves `bash` from `PATH` and
-finds `/bin/bash` 3.2.57 first on this repository's reference host. The cost is that a failed
-run leaves its 0700 state root under `TMPDIR`; ADR 0010 records that trade against PR #23's
-intent.
+So the trap stays and gains issue #29's completion sentinel: cleanup still removes the state
+root on every path, and a status of 0 that never reached `COMPLETED=1` becomes a named stderr
+failure. That is the one remedy which both restores the status and keeps the 0700 state root —
+actor API keys included — from outliving a failing run, which is PR #23's intent. Dropping the
+trap restores the status too but leaks the root; a status-preserving cleanup alone leaks
+nothing but measures the same masked 0. No interpreter guard is needed and none is added,
+which matters because `make smoke` resolves `bash` from `PATH` and finds `/bin/bash` 3.2.57
+first on this repository's reference host. It also leaves all five smoke scripts carrying one
+pattern.
+
+`tests/test_smoke_trap_status.py` is the harness that holds this: `tests/smoke_scenario.sh`
+joins its `SMOKE_SCRIPTS` rows, so the same three fault-injection modes run against this
+script under every discovered interpreter.
 
 ### Proving the gate bites (R8)
 

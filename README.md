@@ -200,11 +200,12 @@ at install, and an existing fixture may already hold conflicting definitions of 
 and components the scenario declares. `replay` refuses outright if the fixture already holds
 the scenario's bugs, so a second `make smoke` without a reset stops at that check.
 
-A failing run leaves its mode-0700 state root under `TMPDIR`; a successful one removes it.
-That is deliberate. The script carries no `EXIT` trap, because on bash 3.2 — still macOS's
-`/bin/bash` — any `EXIT` trap turns a fatal expansion error into exit 0, and the
-status-preserving handler `tests/checkpoint_smoke.sh` uses does not help, since `$?` is
-already 0 when the handler runs. Removing the trap is what makes the failure visible.
+Every run removes its mode-0700 state root, so the actor API keys provisioning mints do not
+outlive it. Cleanup runs from an `EXIT` trap carrying a completion sentinel, and the sentinel
+is what keeps that honest: on bash 3.2 — still macOS's `/bin/bash` — any `EXIT` trap turns a
+fatal expansion error into exit 0, and capturing `$?` in the handler does not help, since it
+is already 0 by then. So the handler instead reports a run that never reached the end of the
+script as a named failure on stderr, whatever status bash handed it.
 
 **`make smoke` has been proven at `bzr` `63abb94e` and nowhere else.** Two separate
 requirements bear on the revision, and only one of them is a measurement:
@@ -234,7 +235,7 @@ separate intervals and are not included.
 Those figures were produced under `/bin/bash` 3.2.57, which `make smoke` resolves from
 `PATH` on this machine. Ordinary failures propagate correctly there — issue #20's run was
 proven to bite, a server-side summary edit producing exit 1 and restoring it exit 0 — but
-before the trap removal above, a fatal expansion error under `set -u` would have been
+before the sentinel above, a fatal expansion error under `set -u` would have been
 indistinguishable from success. Nothing indicates one occurred.
 
 The four unverifiable claims are `cart-double-charge`'s `estimated_hours` (finding D8) and

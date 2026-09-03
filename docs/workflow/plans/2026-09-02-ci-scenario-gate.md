@@ -17,7 +17,7 @@ dependencies, GitHub Actions, Docker Compose, `cargo` on the runner.
 Expected implementation size: 320–360 changed lines (M) — summed from the embedded blocks
 below: ~24 changed lines of path entries across both workflows (the offline enumeration is
 replaced, not appended to), ~28 lines of job steps, ~92 lines of shell (the stages, the
-state-root canonicalization, and the trap removal with its success-path cleanup), ~118 lines
+state-root canonicalization, and the cleanup sentinel), ~118 lines
 of new test, ~35 lines of README. The `effort:S` label on issue #25 sized the two
 workflow edits; the test file and the script stages are what put it in M.
 
@@ -232,22 +232,31 @@ either entry is later removed or if an individually-named record reappears.
 `$BASE_URL`, and `elapsed_since <start-ns>` defined at line 79. Provides nothing to later
 tasks except the stages themselves, which Task 3's job step invokes through `make smoke`.
 
-### Step 2.1 — drop the trap, canonicalize the state root, then append the stages
+### Step 2.1 — add the completion sentinel, canonicalize the state root, then append the stages
 
 First, in `tests/smoke_scenario.sh`, replace lines 20-22 — the `mktemp`, the `EXIT` trap and
-the `chmod` — with:
+the `chmod` — with the cleanup-plus-sentinel pattern the sibling smoke scripts carry:
 
 ```bash
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-smoke-scenario.XXXXXX")
-# No EXIT trap. Measured, `set -euo pipefail` throughout: an ordinary command failure -- what
-# every stage below produces -- exits 1 through any trap on bash 3.2.57 and 5.3.15 alike, but
-# a fatal expansion error (an unbound variable under `set -u`) exits 1 with NO trap and 0 with
-# ANY trap on 3.2, including tests/checkpoint_smoke.sh:13-18's status-preserving cleanup,
-# because $? is already 0 at handler entry. Removing the handler is what restores the status,
-# so the state root is removed explicitly at the end of the success path instead and a failed
-# run leaves it behind. That trades against PR #23's intent that actor keys not outlive the
-# script; the directory is mode 0700 and AGENTS.md scopes this fixture's secret handling to
-# owner-only modes "and nothing more", so the trade is taken deliberately (ADR 0010).
+# Cleanup removes the state root on every path, so the actor keys provisioning mints never
+# outlive the run. The sentinel is what makes that safe on bash 3.2: measured under
+# `set -euo pipefail`, a fatal expansion error (an unbound variable under `set -u`) exits 1
+# with NO trap and 0 with ANY trap there, including a status-preserving
+# `cleanup(){ local s=$?; ...; exit "$s"; }`, because $? is already 0 at handler entry. So
+# cleanup does not try to recover that status -- it derives one from an independent fact,
+# whether control ever reached COMPLETED=1 (ADR 0010 decision 8, issue #29).
+COMPLETED=0
+cleanup() {
+  local status=$?
+  rm -rf -- "$STATE"
+  if [ "$status" -eq 0 ] && [ "$COMPLETED" -ne 1 ]; then
+    echo "smoke scenario: exited before finishing; see the error above" >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 #
 # Canonicalize before anything uses it: scripts/checkpoint requires every path argument to
 # equal its own resolve() (src/bzr_live/checkpoint.py:155-167), and on macOS TMPDIR sits under
@@ -352,11 +361,13 @@ echo "smoke scenario: resuming the restored journal"
 uv run --python 3.11 python -m bzr_live.replay resume "$SCENARIO" \
   --state-root "$STATE/state" --bzr "$BZR" --base-url "$BASE_URL"
 
-# The success path removes the state root, so the actor keys provisioning minted do not
-# outlive a run that worked. A failing run stops before this line and leaves the 0700
-# directory under TMPDIR for inspection -- see the header note where the trap used to be.
-rm -rf "$STATE"
+COMPLETED=1
 ```
+
+The `COMPLETED=1` goes immediately before the existing final `echo "smoke scenario: OK"`,
+which is what the sentinel in cleanup reads. Then add the script's row to
+`SMOKE_SCRIPTS` and `SENTINEL_MESSAGE` in `tests/test_smoke_trap_status.py`, so the
+fault-injection harness covers it alongside the four scripts already there.
 
 ### Step 2.2 — confirm the shell guardrails pass
 
