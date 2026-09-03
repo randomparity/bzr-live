@@ -201,6 +201,10 @@ class BridgeClientTests(unittest.TestCase):
         with self.assertRaises(ProvisionError):
             client.call("drop-tables", {})
 
+    def test_group_control_operations_are_allowlisted(self) -> None:
+        self.assertIn("set-group-control", BridgeClient.OPERATIONS)
+        self.assertIn("get-group-control", BridgeClient.OPERATIONS)
+
     def test_call_sends_json_stdin_and_parses_ok_reply(self) -> None:
         reply = json.dumps({"ok": True, "result": {"name": "q4-hot"}}).encode()
         client, fake = self._client([(0, reply, b"")])

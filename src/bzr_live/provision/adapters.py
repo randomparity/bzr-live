@@ -13,6 +13,8 @@ class ProvisionError(Exception):
 
 
 # Resource kind -> mutation boundary. Fixed by issue #4's implementation boundaries.
+# A group's optional product-control mapping is a bridge sub-step of a "bzr" kind
+# (ADR 0013); the table records each kind's own boundary, not its sub-steps.
 BOUNDARIES: dict[str, str] = {
     "group": "bzr",
     "actor": "bzr",
@@ -157,6 +159,7 @@ class BridgeClient:
         "create-version", "create-milestone", "create-custom-field",
         "create-keyword", "create-flag-type", "create-api-key",
         "get-custom-field", "get-keyword", "get-flag-type",
+        "set-group-control", "get-group-control",
     })
 
     def __init__(self, argv_prefix: list[str], project: str,
