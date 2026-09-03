@@ -1,11 +1,28 @@
 #!/usr/bin/env bash
+# Shell lifecycle contract tests, run by `make test`.
+#
+# Runs on bash 3.2 -- macOS /bin/bash, which is what the Makefile's plain
+# `bash tests/lifecycle_test.sh` resolves to on the development host. So: no bash 4+
+# syntax here. That bash also discards a fatal `set -u` error's status before the EXIT
+# trap runs, which is why cleanup carries a completion sentinel rather than only the
+# status it was handed (issue #32, applying the pattern issue #29 measured).
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 LIFECYCLE="$REPO_ROOT/scripts/lifecycle"
 REAL_OPENSSL=$(command -v openssl)
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-test.XXXXXX")
-trap 'rm -rf "$TEST_TMP"' EXIT
+COMPLETED=0
+cleanup() {
+  local status=$?
+  rm -rf -- "$TEST_TMP"
+  if [ "$status" -eq 0 ] && [ "$COMPLETED" -ne 1 ]; then
+    printf 'FAIL: lifecycle test exited before finishing; see the error above\n' >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -379,4 +396,5 @@ assert_contains "$REPO_ROOT/containers/bugzilla/Dockerfile" 'c7474050be80201f1fb
 assert_contains "$REPO_ROOT/containers/bugzilla/Dockerfile" 'b8de37460347bb5474dc01916ccb31dd2fe0cd92242c4a32d730e8eb087c323c'
 assert_not_contains "$REPO_ROOT/containers/bugzilla/Dockerfile" 'cpan -T install'
 
+COMPLETED=1
 printf 'PASS: lifecycle contract\n'
