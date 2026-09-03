@@ -68,6 +68,13 @@ group membership.
 - The scenario schema widens by one optional field on one existing kind. `format_version`
   stays 1: a scenario that omits `products` parses and provisions unchanged, so no existing
   contract is broken.
+- Every scenario's digest moves regardless, including one that declares no `products` at
+  all. `loader._resource_json` emits each key of `PlannedResource.data`, so every `group`
+  now contributes `"products": []` to the canonical envelope. That is a digest change
+  without a behaviour change — journals written against the old content are invalidated by
+  the schema widening itself, not only by the smoke edit below. Measured: `scenarios/smoke`
+  moved to `21695fe0…` on the loader change alone, before its own `resources.json` was
+  touched.
 - `containers/bugzilla/bridge.pl` changes, so the Bugzilla image rebuilds and CI's
   `Container lifecycle / x86_64-linux` job runs — roughly 45 minutes.
 - `scenarios/smoke/resources.json` gains a `restricted` bug group mapped to both products,
