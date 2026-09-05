@@ -541,10 +541,20 @@ Bugzilla SHA `644c66f4`). Without such a row every group name is refused alike.
 `--is-active` (`src/cli/group.rs:20-161`). Both files are byte-identical at `63abb94e` and
 at `v0.9.0`, so the gap is unchanged across the revision move issue #35 owns.
 
+The group `bzr` creates is otherwise fit for the purpose, which is what narrows the gap to
+the mapping alone: `group create` sends `is_active: input.is_active.unwrap_or(true)`
+(`src/commands/group/create.rs:63-70`) and Bugzilla's `WebService::Group::create` forces
+`isbuggroup => 1` (`Bugzilla/WebService/Group.pm:46`), so two of the four conditions
+`group_is_settable` tests are already met. Only the two sourced from `group_control_map`
+are out of reach.
+
 **Class: gap, not defect.** `bzr` cannot expose what the server API does not have: the whole
 of `Bugzilla/WebService/` at `644c66f4` contains no reference to `group_control` or
 `set_group_controls`, so group controls are reachable only through the Perl object layer,
-never over REST or XML-RPC. A `bzr` command for this would have nothing to call.
+never over REST or XML-RPC. A `bzr` command for this would have nothing to call. Product
+group controls are therefore an administrative surface in the same family as versions,
+milestones and flag types — all of which this fixture already reaches through the
+container-local admin bridge rather than through `bzr` (ADR 0004).
 
 **Upstream.** Not filed. It is a server-API limitation surfacing through `bzr`, so there is
 no `bzr`-side defect to file.
