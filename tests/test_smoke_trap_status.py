@@ -47,8 +47,19 @@ Every discovered `bash` is exercised. A fix verified only under Homebrew's bash 
 fixes nothing on a host whose `/bin/bash` is 3.2 -- and `/bin/bash` is what the
 Makefile's plain `bash tests/replay_smoke.sh` resolves to there.
 
-`tests/smoke_scenario.sh` carries the same trap and is deliberately absent: it is
-owned by issue #25, in flight at the time of writing. Add its row once that lands.
+Issue #25 added `tests/smoke_scenario.sh`, the live scenario proof `make smoke` runs.
+It reaches its injection point the way `replay_smoke.sh` does, so its row needs
+nothing structural -- only `BZR_LIVE_BZR` and `BZ_PORT`, because it refuses without
+the first and would otherwise read the second from a generated `.env`. It carries the
+same measured limitation `scripts/lifecycle` does, in a different shape: its first
+`uv` sits inside a `COUNTS=$(...)` command substitution, and a fatal expansion error
+in a subshell reaches the assignment as a real non-zero status, so `set -e` fires with
+a status the trap can preserve. That mode therefore asserts status only here and does
+not exercise the masking. Measured by hand at the script's first *top-level* `uv`,
+under `/bin/bash` 3.2.57: a status-preserving cleanup with no sentinel exits **0**,
+this script exits **1** and names the failure, and dropping the trap instead exits 1
+but leaves the state root -- with the actor API keys in it -- behind. The silent-exit
+mode is what guards that here, and it bites on every interpreter.
 
 Issue #32 added the two scripts outside `tests/` that carried the same defect:
 `scripts/lifecycle`, which `make up`, `make down`, `make reset`, `make clean` and
@@ -96,6 +107,7 @@ SMOKE_SCRIPTS = (
     ("replay_smoke.sh", "uv", {"BZR_LIVE_BZR": "/bin/true", "BZ_PORT": "8080"}),
     ("provision_smoke.sh", "docker", {"BZR_LIVE_BZR": "/bin/true", "BZ_PORT": "8080"}),
     ("checkpoint_smoke.sh", "make", {}),
+    ("smoke_scenario.sh", "uv", {"BZR_LIVE_BZR": "/bin/true", "BZ_PORT": "8080"}),
     ("lifecycle_test.sh", "mkdir", {}),
     ("scripts/lifecycle", "docker", {}),
 )
@@ -118,6 +130,7 @@ SENTINEL_MESSAGE = {
     "provision_smoke.sh": "provision smoke exited before finishing",
     "checkpoint_smoke.sh": "checkpoint smoke failed: exited before finishing",
     "lifecycle_test.sh": "lifecycle test exited before finishing",
+    "smoke_scenario.sh": "smoke scenario: exited before finishing",
 }
 
 # The status the command-failure mode expects, where the script deliberately replaces
