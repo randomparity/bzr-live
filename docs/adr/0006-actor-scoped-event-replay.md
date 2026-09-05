@@ -154,12 +154,15 @@ together with `status` or `resolution` (G5); a `bug.flag` whose flag-type name c
 
 **Amended after the `groups` readback was measured (issue #27): `bug.update` carrying
 `groups` is no longer refused, and the rejected alternative below is withdrawn with it.**
-D3's premise is gone — `a7f6ab70` (`bzr` PR #646) adds `Groups` to the `Bug` serializer
-and is an ancestor of `63abb94e`, this repository's floor — so a declared `groups` set is
-now executed as an add/remove delta against observed state, like `cc` and `keywords`, and
-confirmed from `bug view` by set comparison. Measured at `63abb94e` against the running
-fixture: `bug view --fields=id,groups` returns `[]` for an unrestricted bug and the real
-member list for a bug restricted to a group, on the default transport.
+The refusal read "`bzr bug view` does not return groups, so no delta can be computed and no
+result confirmed (finding D3)". Every clause of that is dead **by measurement**, not by
+inference from an upstream commit: at `bzr 0.8.3-dev (63abb94e)`, this repository's floor,
+a default-transport `bug view --fields=id,groups` returns `[]` for an unrestricted bug and
+`['restricted']` for a bug restricted to the group issue #34 made settable. `a7f6ab70`
+(`bzr` PR #646, adding `Groups` to the `Bug` serializer, an ancestor of the floor) explains
+the reading; it does not substitute for having taken it. A declared `groups` set is
+therefore executed as an add/remove delta against observed state, like `cc` and `keywords`,
+and confirmed from `bug view` by set comparison.
 
 That second reading survives finding **D8** for a reason worth stating, because it is what
 separates `groups` from the two time fields this amendment leaves alone. `bzr`'s header
@@ -177,30 +180,49 @@ That is a property of the request rather than of the field: the loudness in the 
 case comes from the bug's visibility, not from `groups` itself. The second disjunct's
 added clause is not hypothetical — when the retry's credential is *not* authorized, the
 fallback draws 401 in its turn and finding D10 below reports the first attempt's error
-instead, which is the failure the third residual describes.
+instead, which is the first of the two residuals recorded below.
 The grounds were never the same, and the single shared rationale over the always-retry set
 is what let D3's staleness cover both time fields at once; each now names its own.
 
-Three residuals this amendment does not close. No bug group is settable on any product in
-this fixture — `group_control_map` is empty and every `checksetup` group has
-`isbuggroup = 0`, so an authenticated `groups.add` returns Bugzilla error 120 — which is a
-fixture-configuration gap for `containers/`, reported rather than taken, and unexercised
-because no scenario under `scenarios/` declares a bug `groups` value. `bzr` masks that
-error: on the alternate-auth retry, a fallback response also carrying HTTP 401 makes it
-report the first attempt's error instead of the fallback's, so error 120 surfaces as 410
-"You must log in". That is finding D10. And `_check_groups` (`Bugzilla/Bug.pm:1851-1887`)
-requires only that the product make a group settable, never that the caller belong to it,
-so an actor can restrict a bug out of its own visibility; the post-mutation read then
-answers `api_code` 102, which `read_bug` raises on by the "inaccessibility is not absence"
-rule above — aborting the run rather than reaching a disposition. Unexercised for the same
-reason as the first, and recorded here so whoever provisions a settable group meets it.
+**The fixture gap this amendment first recorded as its own blocker is closed, and that is
+what makes the removal honest rather than a trade.** When the amendment was drafted, no bug
+group was settable on any product here — `group_control_map` held no rows and every
+`checksetup` group carried `isbuggroup = 0` — so an authenticated `groups.add` returned
+Bugzilla error 120 for every group name alike, and dropping the refusal would have moved a
+precondition failure into the middle of a mutation. Issue #34 fixed it in the fixture, which
+is where `AGENTS.md` puts a fixture-configuration gap: the scenario contract now declares a
+group's products, the container-local admin bridge writes the `group_control_map` row
+through `Bugzilla::Product::set_group_controls`, and `scenarios/smoke` declares `restricted`
+as settable on `checkout` and `billing` (finding G11, ADR 0013). So the payload a scenario
+declares can now actually execute, and the refusal is removed on the strength of that rather
+than in spite of it.
 
-One more consequence rides on that same gap. `groups` compares by **equality**, like
+Two residuals this amendment does not close. `bzr` masks Bugzilla's stated cause on a
+refused `groups` write: on the alternate-auth retry, a fallback response also carrying HTTP
+401 makes it report the first attempt's error instead of the fallback's, so error 120
+surfaces as 410 "You must log in" — the operator is sent to fix authentication on a request
+that was authenticated. That is finding D10, and it is the one residual here that is `bzr`'s
+rather than Bugzilla's. And `_check_groups` (`Bugzilla/Bug.pm:1851-1887`) requires only that
+the product make a group settable, never that the caller belong to it, so an actor can
+restrict a bug out of its own visibility; the post-mutation read then answers `api_code` 102,
+which `read_bug` raises on by the "inaccessibility is not absence" rule above — aborting the
+run rather than reaching a disposition. **That second residual became reachable when #34
+landed** and is held off only by scenario content: `scenarios/smoke` declares no bug `groups`
+value at all, and its one member of `restricted` is `admin-ops`. A scenario declaring a
+`groups` update through any other actor meets it. Recorded here rather than guarded against,
+because refusing the payload would be this repository's own forbidden substitution and the
+abort is a truthful report of what Bugzilla did.
+
+One consequence rides on how #34 wrote that mapping. `groups` compares by **equality**, like
 `keywords`: `Bugzilla/Bug.pm:1883` unions a product's mandatory groups into the set and
 `:1860-1864` adds its default groups when the caller names none, either of which would make
-the observed set a strict superset of the declared one. Equality is sound only while this
-fixture has neither, and a product that gains one moves `groups` to containment beside
-`cc` — the exception `cc` already carries for the same class of reason.
+the observed set a strict superset of the declared one. Neither occurs here, and the ground
+is now narrower and more durable than "the map is empty": the bridge writes `membercontrol`
+and `othercontrol` as `CONTROLMAPSHOWN` and nothing else (`containers/bugzilla/bridge.pl`,
+per ADR 0013's least-privilege choice), and `groups_mandatory` selects `CONTROLMAPMANDATORY`
+while a default group needs `CONTROLMAPDEFAULT`. A mapping written at either of those values
+would move `groups` to containment beside `cc` — the exception `cc` already carries for the
+same class of reason.
 
 **Four of those grounds are Bugzilla's, not bzr's, and saying so matters as much as naming
 the ones that are.** Charging bzr for a constraint it did not impose corrupts the register
@@ -384,19 +406,23 @@ defaults to reset *to*, and `resolution` and `dupe_of` are cleared by a status t
   `groups` from `a7f6ab70` on (`src/types/bug.rs:242` at `63abb94e`), so the delta is
   computable and the set is confirmable, and the declared set is now applied in full.
 - **Keep refusing a declared `groups` update, re-grounded on the fixture gap rather than on
-  D3, until `containers/` provisions a settable bug group.** verified: the gap is real —
-  `group_control_map` is empty on this fixture and every `checksetup` group has
-  `isbuggroup = 0`, so an authenticated `groups.add` returns Bugzilla error 120 — but the
-  operator's 2026-09-02 narrowing of issue #27 scopes that provisioning out and asks for the
-  refusal removed on D3's staleness alone. A refusal is also the wrong instrument for it:
-  the ground would be Bugzilla's own configuration, not a `bzr` limitation, and
-  `AGENTS.md` puts a fixture-configuration gap in `containers/` rather than in a
+  D3, until `containers/` provisions a settable bug group.** verified: **moot — the gap it
+  proposed to wait on is closed.** The gap was real when this alternative was written:
+  `group_control_map` held no rows and every `checksetup` group carried `isbuggroup = 0`, so
+  an authenticated `groups.add` returned Bugzilla error 120 for every name. Issue #34
+  provisioned the mapping through the container-local admin bridge (finding G11, ADR 0013),
+  and `PUT /rest/bug/4 {"groups":{"add":["restricted"]}}` now answers
+  `"changes":{"groups":{"removed":"","added":"restricted"}}`. There is nothing left to wait
+  on. Its second ground stands on its own and is why the wait was never the right instrument
+  either: a refusal here would have named Bugzilla's configuration, not a `bzr` limitation,
+  and `AGENTS.md` puts a fixture-configuration gap in `containers/` rather than in a
   client-side refusal.
 - **Compare the declared `groups` set by containment, as `cc` is compared.** judgment:
   containment would silently accept a bug carrying groups the scenario never declared, and
   the widening it guards against — a product's mandatory or default bug groups — cannot
-  occur while `group_control_map` is empty. Recorded as the residual above rather than
-  pre-emptively weakened.
+  occur while every `group_control_map` row this fixture writes carries `CONTROLMAPSHOWN` in
+  both control columns, which is neither `CONTROLMAPMANDATORY` nor `CONTROLMAPDEFAULT`.
+  Recorded as the consequence above rather than pre-emptively weakened.
 - **Record the withdrawal in a new ADR 0011 rather than amending this one in place.**
   judgment: the decision changes this record's own refusal table and its own rejected
   alternative, so a separate record would leave both reading as current; ADR 0008 set the

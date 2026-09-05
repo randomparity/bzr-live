@@ -9,14 +9,28 @@ readback was measured".
 
 `src/bzr_live/replay/actions.py` refuses a declared `bug.update` `groups` value as a
 precondition, citing finding **D3** — `bzr bug view` serialising no `groups` entry, so no
-delta can be computed and no result confirmed. D3 is fixed upstream: `a7f6ab70` (`bzr`
-PR #646, closing [bzr#641](https://github.com/randomparity/bzr/issues/641)) adds `Groups`
-to the `Bug` serialiser, and it is an ancestor of `63abb94e`, the revision `README.md:206`
-names as this repository's floor.
+delta can be computed and no result confirmed. That premise is **empirically dead**, not
+merely fixed upstream: at `bzr 0.8.3-dev (63abb94e)`, the revision `README.md:206` names as
+this repository's floor, a default-transport `bug view` returns `groups: ['restricted']` for
+a restricted bug. `a7f6ab70` (`bzr` PR #646, closing
+[bzr#641](https://github.com/randomparity/bzr/issues/641)) adds `Groups` to the `Bug`
+serialiser and is an ancestor of the floor, which is *why* the reading works — but the
+citation this design rests on is the reading, not the commit.
 
 So the refusal now declines work `bzr` can do, on a premise that stopped being true. That
 is the failure `AGENTS.md` warns about from the other direction: asserting a stale limit
 destroys the same evidence as hiding a real one.
+
+**The second half of the premise is gone too.** When this design was first written the
+fixture could not accept a `groups` write at all — `group_control_map` held no rows — so
+removing the refusal would have traded `AGENTS.md`'s fail-before-mutating rule for a
+mid-replay failure. Issue #34 closed that in the fixture where `AGENTS.md` says such a gap
+belongs: `scenarios/smoke/resources.json` declares `restricted` settable on `checkout` and
+`billing`, the admin bridge writes the `group_control_map` row, and
+`PUT /rest/bug/4 {"groups":{"add":["restricted"]}}` answers
+`"changes":{"groups":{"removed":"","added":"restricted"}}` (finding G11, ADR 0013). The
+declared payload can now execute, so the refusal is removed on that strength rather than in
+spite of it.
 
 `docs/adr/0006` carries the same stale premise twice — in its refusal list (line 149) and
 in the rejected alternative "Apply a declared `groups` set on update as adds only"
@@ -32,7 +46,10 @@ each name their own ground.
 
 Non-goals, each owned elsewhere: `estimated_hours` becoming confirmable and any change to
 `bug view`'s transport (#30, finding D8); provisioning a product-settable bug group in
-`containers/` (follow-up, below).
+`containers/` (issue #34, landed — this design consumes it rather than waiting on it);
+declaring a bug `groups` value in `scenarios/smoke` so the live tier exercises the path
+(follow-up, below — that file is not on this issue's surface and its event count is a figure
+`README.md` publishes and issue #35 re-measures).
 
 ## Evidence
 
@@ -134,8 +151,12 @@ Per `actions.py:18-22` its rationale names Bugzilla and cites no findings entry.
 
    It compares by **equality**, like `keywords`, not by containment like `cc`: Bugzilla can
    widen the set behind the caller (`Bugzilla/Bug.pm:1883` and `:1860-1864`), but only
-   through a product's mandatory or default bug groups, which this fixture has none of. The
-   ADR records that as a rejected alternative and as a residual.
+   through a product's mandatory or default bug groups, which this fixture has none of. That
+   ground survived #34 and got narrower: the bridge writes `membercontrol` and `othercontrol`
+   as `CONTROLMAPSHOWN` only, while `groups_mandatory` selects `CONTROLMAPMANDATORY`
+   (`Bugzilla/Product.pm:713-725`) and a default group needs `CONTROLMAPDEFAULT`
+   (`:659-664`) — all read from this fixture's own image. The ADR records it as a rejected
+   alternative and as a consequence.
 
 4. **Give each `_UPDATE_ALWAYS_RETRY` field its own rationale.** The tuple stays a tuple —
    the file's own convention (lines 15-17) keeps grounds in comments rather than in
@@ -202,8 +223,18 @@ added and none widened. Group *semantics* are Bugzilla's, and nothing here asser
 
 ## Testing
 
-Unit only. No scenario under `scenarios/` declares a bug `groups` value, so the live tier
-does not exercise this path and `make smoke` is unchanged by it.
+**Automated: unit only.** No scenario under `scenarios/` declares a bug `groups` value, so
+`make smoke` is unchanged by this and the repository's live tier does not cover the path.
+That is now a property of scenario *content*, not of fixture capability — issue #34 removed
+the capability objection — and closing it means editing `scenarios/smoke`, which is off this
+issue's surface. Reported as a follow-up rather than taken.
+
+**Hand-run live proof, once, recorded not automated.** Unit tests over a fake `bzr` prove the
+arguments this change constructs; they cannot prove that `bzr` accepts those arguments or
+that Bugzilla answers them. So the built `bug update --groups-add=` is replayed once through
+the real engine, the real floor binary and the provisioned fixture, and the transcript is
+what the findings register and the PR cite. Without it this change would ship asserting a
+`bzr` behaviour on the strength of a mock.
 
 Existing tests and comments assert the behaviour being removed and are corrected in the
 same commits rather than left to fail; the fold test needs a new fixture directory, since
@@ -225,12 +256,20 @@ the *created* set, which a test asserting only "the key exists" would pass.
 
 ## Follow-up this design does not take
 
-**No bug group in this fixture is settable on any product**, so a scenario declaring a bug
-`groups` value could not execute against it even after this change. Per `AGENTS.md` ("Fix
-the fixture in the fixture") the gap belongs in `containers/`, not in a client-side
-refusal, and it is out of this issue's narrowed scope. Reported as a follow-up rather than
-taken here.
+**No scenario under `scenarios/` declares a bug `groups` value**, so the path this change
+opens has no coverage in the repository's own live tier. The fixture-side objection is gone —
+issue #34 made `restricted` settable on `checkout` and `billing` — so what remains is a
+scenario edit: a `bug.update` declaring `groups` on a `checkout` bug, authored by
+`admin-ops`. Two reasons it is not taken here. `scenarios/smoke/` is not on this issue's
+surface; and its event count is a figure `README.md` publishes and issue #35 is queued to
+re-measure, so changing it now would stale a number a queued issue exists to fix.
 
-The ADR 0006 amendment is the durable record: it states the measurement, the three
-residuals that wait on this gap, and why `groups` compares by equality while it holds. Read
-it there rather than here.
+Whoever takes it must use `admin-ops`, and not by preference. `_check_groups`
+(`Bugzilla/Bug.pm:1851-1887`) requires only that the *product* make the group settable, never
+that the caller belong to it, so any other smoke actor would restrict the bug out of its own
+visibility; the post-mutation read then answers `api_code` 102 and `read_bug` aborts the run
+by the "inaccessibility is not absence" rule. `admin-ops` is the one smoke actor in
+`restricted`.
+
+The ADR 0006 amendment is the durable record: it states the measurement, the two residuals
+that survive #34, and why `groups` compares by equality. Read it there rather than here.

@@ -53,7 +53,7 @@ not assert — the silent gap issue #27 exists to close.
 | `tests/fixtures/verify-groups-update/{scenario.json,resources.json,events.jsonl}` | create — the scenario the fold test folds |
 | `tests/test_verify_expected.py` | modify — fold regression test; correct the stale D3 comment at `:172-174` |
 | `tests/test_replay.py` | modify — **delete** `test_update_rejects_groups`, add four tests, correct the stale D3 comment at `:640-642` |
-| `docs/bzr-findings.md` | modify — D3's two now-false paragraphs, new D10 entry and table row |
+| `docs/bzr-findings.md` | modify — D3's two now-false paragraphs, new D10 entry and table row, G11's dangling "not yet recorded in this file" |
 | `docs/adr/0006-actor-scoped-event-replay.md` | modified in the design phase |
 | `docs/workflow/specs/2026-09-02-confirm-groups-updates-design.md` | created in the design phase |
 
@@ -168,7 +168,9 @@ this fixture's image).
     make test
     ```
 
-    Expect both to exit 0, count at **383** — 382 at `HEAD` plus this task's one test.
+    Expect both to exit 0, count at **403** — 402 at `HEAD` plus this task's one test.
+    (402, not the 382 an earlier draft of this plan named: the branch has since been
+    refreshed onto `origin/main` at `0e8d8a2e`, which brought #25's and #34's test files.)
 
 ### Acceptance criteria
 
@@ -287,7 +289,7 @@ Depends on Task 1 having landed the fold arm; nothing else crosses between them.
    make test
    ```
 
-   Expect both to exit 0, count at **386** — Task 1 left 383, this task adds four and
+   Expect both to exit 0, count at **406** — Task 1 left 403, this task adds four and
    deletes one.
 
 ### Acceptance criteria
@@ -340,9 +342,19 @@ fixture or **read** from source, the `bzr` source at a commit, a class verdict, 
    logs "auth fallback also failed, returning original 401" and reports the 410. The
    operator is told to log in when the real fault is a configuration gap.
 
+   D10 is the **next free identifier**, not a renumbering: the register holds D1 and D3-D9
+   plus G1-G11, and nothing has ever occupied D10 — earlier campaign material cited it as an
+   existing entry, which was wrong. Two independent observations ground it: this design's
+   proxy capture, and issue #34's own measurement, which is why `G11`'s closing paragraph
+   ends "That masking is its own finding and is not yet recorded in this file." **Resolve
+   that dangling sentence in the same edit** — it is a cross-reference to an entry that did
+   not exist.
+
    Class **defect**; upstream `hold: recording only` — filing on `randomparity/bzr` is not
-   authorised for this campaign. What the fixture does: nothing, the path being unreachable
-   while no group is settable here.
+   authorised for this campaign. What the fixture does: nothing to route around it. The path
+   is reachable now that #34 made a group settable — a `groups` write naming any *other*
+   group still draws 120, and `bzr` still reports 410 — so the register carries the mapping
+   from the message an operator will see to the cause it hides.
 
 3. **Run the guardrails, bare, and commit.**
 
@@ -351,7 +363,7 @@ fixture or **read** from source, the `bzr` source at a commit, a class verdict, 
    make test
    ```
 
-   Expect both to exit 0 with the count unchanged at 386; neither lints Markdown, so this
+   Expect both to exit 0 with the count unchanged at 406; neither lints Markdown, so this
    checks that nothing else broke.
 
 ### Acceptance criteria
@@ -362,6 +374,46 @@ fixture or **read** from source, the `bzr` source at a commit, a class verdict, 
   update.
 - D10 exists with a table row, an observed-at revision, the captured evidence, a class
   verdict, and `hold: recording only`.
+- G11 no longer ends on a cross-reference to an unrecorded finding.
+
+## Task 4 — the path is proven against the real fixture, once
+
+Unit tests over a fake `bzr` prove the argument list this change builds; nothing in them
+proves `bzr` accepts it or that Bugzilla answers it. Task 4 runs the change end to end and
+records the transcript. No repository file changes here except the evidence quoted into
+`docs/bzr-findings.md` and the PR body.
+
+### Steps
+
+1. **Establish the binary and the fixture, and state both.** `BZR_LIVE_BZR` is
+   operator-selected at every call site, so name which binary produced the measurement.
+   Use the documented floor, `/Volumes/Source Code Volume/src/bzr/target/release/bzr` =
+   `bzr 0.8.3-dev (63abb94e)` — **not** the installed `0.9.0 (173772b3)`, which is issue
+   #35's to adopt. The fixture must carry #34's provisioning; confirm the
+   `group_control_map` row exists before trusting any result, because a container predating
+   the merge would fail for the wrong reason. That check is the one an earlier worker in
+   this campaign skipped.
+
+2. **Replay a scenario declaring a `groups` update** through the real engine: a `bug.create`
+   on `checkout` by `admin-ops`, then a `bug.update` on it declaring
+   `groups: [{"ref": "group:restricted"}]`. Scratch scenario, not a repository file — the
+   surface exclusion in the design's *Follow-up* section is what keeps it out of
+   `scenarios/`.
+
+3. **Record what the engine emitted and what came back**: the `bug update` argument list
+   carrying `--groups-add=restricted`, the exit status, and the reconciliation's
+   `next_action`. `advance` is the claim this issue makes; anything else is the finding.
+
+4. **Read the result back independently** with `bug view --fields=id,groups`, so the proof
+   does not rest on the same reconciliation path it is testing.
+
+### Acceptance criteria
+
+- The `bug update` `bzr` actually ran is quoted verbatim, with `--groups-add=restricted` in
+  it, and the binary that ran it is named by version and revision.
+- The declared group is present in an independent `bug view` read-back.
+- Reconciliation reached `advance`; if it did not, the divergence is reported as the finding
+  rather than worked around.
 
 ## Deferrals carried from the design review
 
@@ -369,8 +421,10 @@ None. The section exists so a later reader can tell an empty list from an omitte
 
 ## Follow-up discovered, not taken
 
-**No bug group is settable on any product in this fixture**, so no scenario could exercise
-a declared bug `groups` value even after this change. Per `AGENTS.md` the gap belongs in
-`containers/`, not in a client-side refusal, and it is outside this issue's narrowed scope.
-Report it to the campaign rather than taking it here. The ADR 0006 amendment holds the
-measurement and the three residuals that wait on that gap.
+**No scenario under `scenarios/` declares a bug `groups` value**, so the repository's own
+live tier does not cover the path this change opens. The fixture-side blocker is gone — #34
+made `restricted` settable on `checkout` and `billing` — leaving a `scenarios/smoke` edit
+that is off this issue's surface and would stale an event count issue #35 is queued to
+re-measure. Report it to the campaign rather than taking it here, and note that the author
+must use `admin-ops`: the ADR 0006 amendment records why any other smoke actor would abort
+the run.
