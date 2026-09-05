@@ -17,6 +17,7 @@ use Bugzilla::Component;
 use Bugzilla::Field;
 use Bugzilla::Field::Choice;
 use Bugzilla::FlagType;
+use Bugzilla::Group;
 use Bugzilla::Keyword;
 use Bugzilla::Milestone;
 use Bugzilla::Product;
@@ -50,6 +51,7 @@ sub reply_error {
 my %OPERATIONS = map { $_ => 1 } qw(
   create-version create-milestone create-custom-field create-keyword
   create-flag-type create-api-key get-custom-field get-keyword get-flag-type
+  set-group-control get-group-control
 );
 
 my $operation = $ARGV[0] // '';
@@ -201,6 +203,54 @@ sub dispatch {
       # (FlagType.pm:272 at the pinned SHA)
       target      => $flagtype->target_type,
       inclusions  => stored_inclusions($flagtype),
+    };
+  }
+  if ($operation eq 'set-group-control') {
+    my $product = product_of($request->{product});
+    my $group   = Bugzilla::Group->check({name => $request->{group}});
+    # Settability needs only these two columns: group_is_settable reads
+    # groups_mandatory/groups_available, which select on membercontrol and
+    # othercontrol alone (Product.pm:659-736, :740-748 at the pinned SHA). The
+    # privilege columns -- canedit, editbugs, canconfirm -- would grant the
+    # group's members product rights no scenario declared, so they stay unset
+    # (ADR 0013).
+    $product->set_group_controls($group, {
+      entry         => 0,
+      membercontrol => CONTROLMAPSHOWN,
+      othercontrol  => CONTROLMAPSHOWN,
+    });
+    $product->update();
+    # re-read, so a write that did not take cannot report success
+    my $fresh = product_of($request->{product});
+    unless ($fresh->group_is_settable($group)) {
+      die "group " . $group->name . " is still not settable on product "
+        . $fresh->name . "\n";
+    }
+    return {
+      product  => $fresh->name,
+      group    => $group->name,
+      settable => JSON::XS::true,
+    };
+  }
+  if ($operation eq 'get-group-control') {
+    # ->new, not ->check: a product the scenario declares but the fixture has not
+    # created yet must read as "not settable", not die. The loader already proved
+    # the name is a declared product, so this cannot be hiding a typo.
+    my $product = Bugzilla::Product->new({name => $request->{product}});
+    my $group   = Bugzilla::Group->new({name => $request->{group}});
+    return undef unless $product && $group;
+    # group_controls without $full_data constrains the join on product_id, so an
+    # unmapped group is simply absent (Product.pm:604-657 at the pinned SHA).
+    my $controls = $product->group_controls->{$group->id};
+    return undef unless $controls;
+    return {
+      product       => $product->name,
+      group         => $group->name,
+      entry         => $controls->{entry},
+      membercontrol => $controls->{membercontrol},
+      othercontrol  => $controls->{othercontrol},
+      settable      => $product->group_is_settable($group)
+                       ? JSON::XS::true : JSON::XS::false,
     };
   }
   die "unreachable operation\n";

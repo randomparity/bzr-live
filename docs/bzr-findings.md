@@ -33,10 +33,12 @@ already-filed one (D5).
 | [G5](#g5) | design choice | `--dupe-of` conflicts with `--status` and `--resolution` | — |
 | [G6](#g6) | gap | `--permissive` is rejected for a single bug ID | — |
 | [G9](#g9) | design choice | `bug create --from-json` silently defaults an omitted `version` to `unspecified` | — |
+| [G10](#g10) | gap | `bug update` addresses bugs by numeric id only, where `bug view` accepts aliases too | — |
 | [D6](#d6) | defect (fixed upstream) | `component view` reports `default_assignee: null` for a component Bugzilla says has one | fixed by `5fb99362` |
 | [D7](#d7) | defect | `bug history` attributes a `comment_id` to a change that carried no comment | hold: recording only, filing declined |
 | [D8](#d8) | defect | The auth probe concludes header auth works when it does not, so REST reads run effectively unauthenticated | hold: recording only |
 | [D9](#d9) | defect | On Bugzilla >= 5.1 the auto-detected `rest` mode never takes the XML-RPC path `bzr` documents as the only one returning a full comment thread or attachment `data` | not filed |
+| [G11](#g11) | gap | No command makes a bug group settable on a product, because Bugzilla's WebService does not expose group controls at all | — |
 
 ---
 
@@ -281,6 +283,29 @@ accept a bug whose version no scenario ever stated.
 precondition, naming this entry. An omitted `version` is a scenario-contract question rather
 than a bzr one and is settled by the loader.
 
+## G10
+
+**`bug update` addresses bugs by numeric id only, where `bug view` accepts aliases too.**
+*Read from source, at `63abb94e`.*
+
+`UpdateArgs` declares `pub ids: Vec<u64>` (`src/cli/bug/update.rs:79`), so an alias fails
+clap's own parse before any request is built. `ViewArgs` declares `pub ids: Vec<String>` with
+the doc comment "Bug ID(s) or alias(es). Aliases and numeric IDs may be mixed."
+(`src/cli/bug/view.rs:60-62`). Bugzilla's `Bug.update` itself accepts either form in `ids`,
+so the narrowing is `bzr`'s.
+
+It is a **gap** rather than a defect: `bug update --help` documents the argument as
+`[IDS]... Bug ID(s)`, so the CLI does not claim alias support and then drop it — the way
+[D4](#d4) does. Nothing is silently substituted; the command refuses. It is recorded because
+the asymmetry is invisible from either command's help alone: a caller who learns from
+`bug view` that aliases work has no reason to expect `bug update` to differ.
+
+**What the fixture does.** The replay engine never met this, because
+`BugUpdateHandler.build` (`src/bzr_live/replay/actions.py:368-370`) already resolves the
+target to a numeric id from the journal. `tests/smoke_scenario.sh`'s checkpoint probe reads
+the id back from a `bug view` addressed by the declared alias and then mutates by that id,
+rather than addressing `bug update` by alias.
+
 ## D6
 
 **`component view` reports `default_assignee: null` for a component Bugzilla says has one.**
@@ -521,3 +546,61 @@ criterion out of reach at the default transport.
 
 The `bug view` consequence above is D8 acting alone: `bug view` is REST under both `rest`
 and `hybrid`, so D9's transport gate does not enter into it.
+
+## G11
+
+**No `bzr` command makes a bug group settable on a product.** *Observed against a running
+fixture; source read at the documented floor `63abb94e` and re-read at `v0.9.0`.*
+
+Restricting a bug to a group requires a `group_control_map` row making that group mandatory
+or available for the bug's product — `Product::group_is_settable` reads `isactive`,
+`isbuggroup`, `groups_mandatory` and `groups_available`, and the latter two select on
+`membercontrol`/`othercontrol` (`Bugzilla/Product.pm:659-736`, `:740-748` at the pinned
+Bugzilla SHA `644c66f4`). Without such a row every group name is refused alike.
+
+`bzr` has no surface that writes one. `product update` accepts `--description`,
+`--default-milestone` and `--is-open` and nothing else (`src/cli/product.rs:118-133`).
+`bzr group` has six subcommands — `add-user`, `remove-user`, `list-users`, `view`, `create`,
+`update` — none product-facing, and `group update` accepts only `--description` and
+`--is-active` (`src/cli/group.rs:20-161`). Both files are byte-identical at `63abb94e` and
+at `v0.9.0`, so the gap is unchanged across the revision move issue #35 owns.
+
+The group `bzr` creates is otherwise fit for the purpose, which is what narrows the gap to
+the mapping alone: `group create` sends `is_active: input.is_active.unwrap_or(true)`
+(`src/commands/group/create.rs:63-70`) and Bugzilla's `WebService::Group::create` forces
+`isbuggroup => 1` (`Bugzilla/WebService/Group.pm:46`), so two of the four conditions
+`group_is_settable` tests are already met. Only the two sourced from `group_control_map`
+are out of reach.
+
+**Class: gap, not defect.** `bzr` cannot expose what the server API does not have: the whole
+of `Bugzilla/WebService/` at `644c66f4` contains no reference to `group_control` or
+`set_group_controls`, so group controls are reachable only through the Perl object layer,
+never over REST or XML-RPC. A `bzr` command for this would have nothing to call. Product
+group controls are therefore an administrative surface in the same family as versions,
+milestones and flag types — all of which this fixture already reaches through the
+container-local admin bridge rather than through `bzr` (ADR 0004).
+
+**Upstream.** Not filed. It is a server-API limitation surfacing through `bzr`, so there is
+no `bzr`-side defect to file.
+
+**What the fixture does.** Sets the mapping through the container-local admin bridge — the
+epic's authorized surface for exactly this case, setup `bzr` does not offer — using
+`Bugzilla::Product::set_group_controls` and `update()` rather than upstream's raw `INSERT`,
+per `containers/bugzilla/bridge.pl:5` ("Bugzilla object layer only — never raw SQL"). The
+mapping is declared in the scenario contract as a `products` list on the `group` resource,
+not applied out of band. See [ADR 0013](adr/0013-scenario-declared-bug-group-product-controls.md).
+
+Measured before and after on a freshly installed fixture, as `admin-ops`, over the raw REST
+`PUT /rest/bug/4` that issue #34 used. A system group (`editbugs`, `isbuggroup = 0`) and a
+freshly created bug group with no mapping (`isbuggroup = 1`, zero `group_control_map` rows)
+both return error 120, "you are not allowed to restrict bugs to this group in the 'checkout'
+product". The provisioned group `restricted`, differing only in carrying the mapping, returns
+`"changes":{"groups":{"removed":"","added":"restricted"}}`. Through `bzr` itself the same
+contrast holds, except that the two refusals surface as `code 410 "You must log in"` rather
+than as error 120: the server's stated cause is replaced by an authentication message on a
+request that was authenticated, which is why the unmasked measurement above is taken over raw
+REST. That masking is its own finding and is not yet recorded in this file.
+
+A bug created with the group declared up front behaves the same way: `bug create --product
+checkout --component cart --groups restricted` succeeds and reads back `groups:
+['restricted']`, while the same create naming an unmapped group is refused.

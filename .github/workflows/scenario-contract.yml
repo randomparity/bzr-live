@@ -9,13 +9,9 @@ on:
       - src/**
       - tests/**
       - "!tests/lifecycle_test.sh"
-      - docs/adr/0002-versioned-scenario-contract.md
-      - docs/adr/0003-scenario-contract-ci.md
-      - docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md
-      - docs/workflow/plans/2026-08-29-versioned-scenario-contract.md
-      - docs/adr/0006-actor-scoped-event-replay.md
-      - docs/workflow/specs/2026-09-01-replay-actor-scoped-events-design.md
-      - docs/workflow/plans/2026-09-01-replay-actor-scoped-events.md
+      - docs/adr/**
+      - docs/workflow/**
+      - scenarios/**
   push:
     branches: [main]
     paths:
@@ -25,13 +21,9 @@ on:
       - src/**
       - tests/**
       - "!tests/lifecycle_test.sh"
-      - docs/adr/0002-versioned-scenario-contract.md
-      - docs/adr/0003-scenario-contract-ci.md
-      - docs/workflow/specs/2026-08-29-versioned-scenario-contract-design.md
-      - docs/workflow/plans/2026-08-29-versioned-scenario-contract.md
-      - docs/adr/0006-actor-scoped-event-replay.md
-      - docs/workflow/specs/2026-09-01-replay-actor-scoped-events-design.md
-      - docs/workflow/plans/2026-09-01-replay-actor-scoped-events.md
+      - docs/adr/**
+      - docs/workflow/**
+      - scenarios/**
 
 permissions:
   contents: read

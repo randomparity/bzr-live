@@ -120,6 +120,13 @@ class Provisioner:
                     f"custom-field {resource.name!r} declares the reserved value "
                     "'---' (Bugzilla's single-select placeholder); remove it from "
                     "the scenario")
+            if (resource.kind == "group" and resource.data["products"]
+                    and resource.name in SYSTEM_GROUPS):
+                raise ProvisionError(
+                    f"group {resource.name!r} declares products, but Bugzilla's "
+                    "checksetup groups carry isbuggroup = 0 and only a bug group can "
+                    "be made settable on a product; declare a group the fixture "
+                    "creates instead")
 
     def _ensure_admin(self) -> None:
         key = self._keys.admin_key()
@@ -165,10 +172,24 @@ class Provisioner:
         payload = self._bzr.read(["group", "view"], positionals=[resource.name])
         if payload is None:
             return "absent"
-        self._compare(_identity(resource), "description",
+        identity = _identity(resource)
+        self._compare(identity, "description",
                       resource.data["description"],
                       payload.get("description") if isinstance(payload, dict) else None)
+        declared = {ref.name for ref in resource.data["products"]}
+        settable = {name for name in declared if self._group_is_settable(resource, name)}
+        if settable != declared:
+            # the group exists but its mapping does not: the actor path's multi-step
+            # case, carrying the same reset instruction
+            raise ProvisionConflictError(
+                identity, "products", sorted(declared), sorted(settable),
+                multi_step=True)
         return "unchanged"
+
+    def _group_is_settable(self, resource, product: str) -> bool:
+        result = self._bridge.call(
+            "get-group-control", {"product": product, "group": resource.name})
+        return bool(result.get("settable")) if isinstance(result, dict) else False
 
     def _classify_actor(self, resource, cache) -> str:
         email = resource.data["email"]
@@ -289,6 +310,9 @@ class Provisioner:
         self._bzr.write([
             "group", "create", f"--name={resource.name}",
             f"--description={resource.data['description']}"])
+        for ref in resource.data["products"]:
+            self._bridge.call(
+                "set-group-control", {"product": ref.name, "group": resource.name})
 
     def _create_actor(self, resource) -> None:
         email = resource.data["email"]

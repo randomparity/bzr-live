@@ -7,6 +7,14 @@
 # Bugzilla reads Task 0's checksetup answers only at install), and BZR_LIVE_BZR
 # pointing at a bzr binary. This script never edits docs/bzr-findings.md; the
 # operator reads its "findings probe:" lines and transcribes any promotion by hand.
+#
+# Runs on bash 3.2 -- macOS /bin/bash, which is what `make replay-smoke`'s plain
+# `bash` resolves to on the development host. So: no bash 4+ syntax here, and no
+# version precondition either, because a guardrail AGENTS.md lists among the
+# verification commands should not be unrunnable on the host it is documented for.
+# That bash also discards a fatal `set -u` error's status before the EXIT trap
+# runs, which is why cleanup carries a completion sentinel rather than only the
+# status it was handed (issue #29).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -14,7 +22,17 @@ cd "$ROOT"  # uv resolves the project from cwd
 BZR=${BZR_LIVE_BZR:?set BZR_LIVE_BZR to the bzr binary to validate with}
 SCENARIO="$ROOT/tests/fixtures/replay-scenario"
 STATE=$(mktemp -d "${TMPDIR:-/tmp}/bzr-live-replay-smoke.XXXXXX")
-trap 'rm -rf "$STATE"' EXIT
+COMPLETED=0
+cleanup() {
+  local status=$?
+  rm -rf -- "$STATE"
+  if [ "$status" -eq 0 ] && [ "$COMPLETED" -ne 1 ]; then
+    echo "smoke failed: replay smoke exited before finishing; see the error above" >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 chmod 700 "$STATE"
 
 # The fixture's port lives in the checkout's .env; fall back to it when the shell
@@ -47,7 +65,8 @@ print(create.expected_postcondition['values']['server_alias'], s.name, create.na
 
 # The attempt number is not a constant either: a create the engine settles as `retry`
 # is re-executed at attempt 2 by the operator's resume, and only the last record
-# carries the id. Attempts are zero-padded, so the glob sorts numerically.
+# carries the id. Attempts are zero-padded, so the glob sorts numerically. The last
+# element is addressed by computed index rather than `[-1]`, which needs bash 4.3.
 JOURNAL_DIR="$STATE/state/journal/$SCENARIO_NAME"
 shopt -s nullglob
 JOURNAL_RECORDS=("$JOURNAL_DIR/$CREATE_EVENT."*.json)
@@ -56,7 +75,7 @@ if [ ${#JOURNAL_RECORDS[@]} -eq 0 ]; then
   echo "smoke failed: replay wrote no journal record for $CREATE_EVENT under $JOURNAL_DIR" >&2
   exit 1
 fi
-JOURNAL_RECORD="${JOURNAL_RECORDS[-1]}"
+JOURNAL_RECORD="${JOURNAL_RECORDS[${#JOURNAL_RECORDS[@]}-1]}"
 CREATE_BUG_ID=$(uv run --python 3.11 python -c "
 import json
 with open('$JOURNAL_RECORD') as f:
@@ -147,4 +166,5 @@ flag_status=$?
 set -e
 echo "findings probe: D1 hyphenated flag type (--flag=needs-info?) exit $flag_status: $flag_out"
 
+COMPLETED=1
 echo "replay smoke: OK"

@@ -42,7 +42,7 @@ SCENARIO = Path(__file__).resolve().parent.parent / "scenarios" / "smoke"
 # Pinned so that editing the fixture is a deliberate two-file change. Every edit
 # changes this digest and invalidates any journal written against the old content
 # (ADR 0006), which is the consequence ADR 0007 records and this constant enforces.
-EXPECTED_DIGEST = "a222f8f884461f57fe6d3a6d96ede363f854266ddfcdfde3f736f47c4fbc1d9a"
+EXPECTED_DIGEST = "d91d3d34659ac72e209b5b3675aa6317624ee9f9c2ade8f4bd7880f8cd9dd8f5"
 
 # The chain and the diamond, named once so a topology edit fails here rather than
 # in a test body that reads like an incantation.
