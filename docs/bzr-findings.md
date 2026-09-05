@@ -601,5 +601,6 @@ than as error 120: the server's stated cause is replaced by an authentication me
 request that was authenticated, which is why the unmasked measurement above is taken over raw
 REST. That masking is its own finding and is not yet recorded in this file.
 
-Note the identifier: `G10` is claimed by issue #25 and lands with it, so this entry takes
-`G11` and the file will show no `G10` until that branch merges.
+A bug created with the group declared up front behaves the same way: `bug create --product
+checkout --component cart --groups restricted` succeeds and reads back `groups:
+['restricted']`, while the same create naming an unmapped group is refused.
