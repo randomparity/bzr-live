@@ -12,15 +12,15 @@ Expected implementation size: 75–90 changed lines (S) — from the file map: ~
 
 ## Global Constraints
 
-- Python `>=3.11` (`pyproject.toml`). No runtime dependency may be added; `src/bzr_live/` is
-  standard-library only.
-- Branch `feat/journal-float-handler-output-44`, base `main` at `226b607b`.
+- Python `>=3.11` (`pyproject.toml`); no runtime dependency may be added, `src/bzr_live/` is
+  standard-library only. Branch `feat/journal-float-handler-output-44`, base `main` at
+  `226b607b`.
 - Guardrails run **bare** — no pipes, no `|| true`: `make check`, then `make test`.
-- `tests/test_scenario_resources.py`: append the new test at the end of the class only.
-  `test_rejects_floats_and_non_finite_numbers` must stay byte-identical and at line 134.
+- `tests/test_scenario_resources.py`: append the new test at the end of the class only;
+  `test_rejects_floats_and_non_finite_numbers` stays byte-identical and at line 134.
 - Do not touch `tests/test_smoke_trap_status.py`, `docs/bzr-findings.md`, or
-  `.github/workflows/scenario-contract.yml` — concurrent work owns them. Do not run
-  `make clean` or `make reset`; another session owns containers on this host.
+  `.github/workflows/scenario-contract.yml`, and do not run `make clean` / `make reset` —
+  concurrent sessions own them.
 - Deferrals carried from the design review: none.
 
 ## File map
@@ -36,18 +36,14 @@ Expected implementation size: 75–90 changed lines (S) — from the file map: ~
 
 ## One task — admit finite floats, keep rejecting the rest
 
-**Interfaces.** Defines
-`_decode_json_bytes(content: bytes, source: str, field: str = "$", *, allow_float: bool = False) -> object`
-and `JsonValue: TypeAlias = bool | int | float | str | tuple["JsonValue", ...] | Mapping[str, "JsonValue"] | None`.
-Relies on these, confirmed present at `226b607b`: `JournalStore.write_in_flight(record, *,
-known_secrets=()) -> Path`; `JournalStore.replace_completed(record, *, known_secrets=()) ->
-Path`, returning `comment.000001.json` for these fixtures; `JournalStore.read(event,
-attempt=None)`; `CompletedRecord`, `InFlightRecord`, `ScenarioValidationError`,
-`freeze_planned`, already imported by `tests/test_journal.py`; `ScenarioEventTests.write()`
-and its `self.events` list of dicts; `ScenarioResourceTests.assert_invalid(source, field)`,
-which **returns** the exception message (`tests/test_scenario_resources.py:63-69`);
-`load_scenario(path)` and `ScenarioValidationError`, already imported by both scenario test
-modules.
+**Interfaces.** Borrowed names, all confirmed present at `226b607b`:
+`JournalStore.write_in_flight(record, *, known_secrets=()) -> Path`;
+`replace_completed(record, *, known_secrets=()) -> Path`, returning `comment.000001.json`
+here; `read(event, attempt=None)`; `ScenarioResourceTests.assert_invalid(source, field)`,
+which **returns** the message (`tests/test_scenario_resources.py:63-69`);
+`ScenarioEventTests.write()` and its `self.events` list of dicts; and `CompletedRecord`,
+`InFlightRecord`, `ScenarioValidationError`, `freeze_planned`, `load_scenario`, each already
+imported by the test module that uses it below.
 
 **The focused run**, referred to below:
 
@@ -225,21 +221,17 @@ The focused run must report `OK` with all five new test names in the listing.
 Five controlled faults, each reverted immediately after observing red, with the observed
 output recorded in the build ledger:
 
-1. `journal.py`: `if not math.isfinite(value):` → `if False:`. Expect
-   `test_completed_record_rejects_non_finite_numbers_before_writing` red.
-2. `journal.py` `_read_file`: drop `allow_float=True`. Expect
-   `test_completed_record_round_trips_finite_time_tracking_numbers` red with
+1. `journal.py`: `if not math.isfinite(value):` → `if False:` → non-finite write test red.
+2. `journal.py` `_read_file`: drop `allow_float=True` → round-trip test red with
    `floating-point numbers are not supported`.
-3. `loader.py`: `parse_constant=_reject_number(source, field)` → `parse_constant=float`.
-   Expect `test_record_file_holding_a_non_finite_number_fails_to_decode` red.
-4. `loader.py`: `allow_float` default → `True`. Expect **both**
-   `test_rejects_a_float_in_an_event_line` and
-   `test_float_rejection_names_the_decoder_not_a_later_field_error` red — the fault that
-   proves the default is what preserves ADR 0002. `test_rejects_floats_and_non_finite_numbers`
-   is expected to stay green under this fault; that is why the two new tests exist.
-5. `journal.py`: drop `allow_nan=False` from `_write_temp`, and in a scratch check bypass
-   `_validate_json` to place a `NaN` in a record. Expect the store to write a file its own
-   reader refuses. Revert.
+3. `loader.py`: `parse_constant=_reject_number(source, field)` → `parse_constant=float` →
+   the record-file decode test red.
+4. `loader.py`: `allow_float` default → `True` → **both** new authored-input tests red.
+   `test_rejects_floats_and_non_finite_numbers` is expected to stay **green** under this
+   fault; that is exactly why the two new tests exist.
+5. `journal.py`: drop `allow_nan=False` from `_write_temp` and, in a scratch check that
+   bypasses `_validate_json`, place a `NaN` in a record → the store writes a file its own
+   reader refuses.
 
 ### 8. Guardrails, bare, then commit
 
