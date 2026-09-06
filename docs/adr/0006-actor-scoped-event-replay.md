@@ -180,7 +180,7 @@ That is a property of the request rather than of the field: the loudness in the 
 case comes from the bug's visibility, not from `groups` itself. The second disjunct's
 added clause is not hypothetical — when the retry's credential is *not* authorized, the
 fallback draws 401 in its turn and finding D10 below reports the first attempt's error
-instead, which is the first of the two residuals recorded below.
+instead, which is the first of the three residuals recorded below.
 The grounds were never the same, and the single shared rationale over the always-retry set
 is what let D3's staleness cover both time fields at once; each now names its own.
 
@@ -197,21 +197,43 @@ as settable on `checkout` and `billing` (finding G11, ADR 0013). So the payload 
 declares can now actually execute, and the refusal is removed on the strength of that rather
 than in spite of it.
 
-Two residuals this amendment does not close. `bzr` masks Bugzilla's stated cause on a
-refused `groups` write: on the alternate-auth retry, a fallback response also carrying HTTP
-401 makes it report the first attempt's error instead of the fallback's, so error 120
-surfaces as 410 "You must log in" — the operator is sent to fix authentication on a request
-that was authenticated. That is finding D10, and it is the one residual here that is `bzr`'s
-rather than Bugzilla's. And `_check_groups` (`Bugzilla/Bug.pm:1851-1887`) requires only that
-the product make a group settable, never that the caller belong to it, so an actor can
-restrict a bug out of its own visibility; the post-mutation read then answers `api_code` 102,
-which `read_bug` raises on by the "inaccessibility is not absence" rule above — aborting the
-run rather than reaching a disposition. **That second residual became reachable when #34
-landed** and is held off only by scenario content: `scenarios/smoke` declares no bug `groups`
-value at all, and its one member of `restricted` is `admin-ops`. A scenario declaring a
-`groups` update through any other actor meets it. Recorded here rather than guarded against,
-because refusing the payload would be this repository's own forbidden substitution and the
-abort is a truthful report of what Bugzilla did.
+Three residuals this amendment does not close, each recorded rather than guarded against —
+a client-side refusal would be this repository's own forbidden substitution, and each failure
+is a truthful report of what the server did.
+
+**One is `bzr`'s.** It masks Bugzilla's stated cause on a refused `groups` write: on the
+alternate-auth retry, a fallback response also carrying HTTP 401 makes it report the first
+attempt's error instead of the fallback's, so error 120 surfaces as 410 "You must log in" —
+the operator is sent to fix authentication on a request that was authenticated. That is
+finding D10.
+
+**One is Bugzilla's, and it enforces the boundary rather than leaking past it.** A
+`bug.update` reaches groups by a different path from a `bug.create`, and only the create path
+skips the membership check. `Bug.update` runs `set_all` → `_add_remove($params, 'groups')`
+(`Bugzilla/Bug.pm:2455`) → `add_group` / `remove_group` (`:2554-2563`), and `add_group`
+carries two gates: `group_is_settable` at `:3157-3158`, then, for a caller not in the group,
+`ThrowUserError('group_restriction_not_allowed')` at `:3162-3167` unless the same update also
+changes the product. `remove_group` mirrors it at `:3195-3212`. So a declared `groups` update
+by an actor outside the group is refused **before any mutation**, with error 120 — which D10
+then masks as 410, and that masking is the whole of the residual: the payload fails safely and
+reports the wrong reason. The create-time validator `_check_groups` (`:1851-1887`,
+`VALIDATORS` at `:122`) has no such membership gate, so on `bug.create` an actor genuinely can
+restrict a bug out of its own visibility; that path predates this amendment and is not opened
+by it. All read from this fixture's own image.
+
+**One is this repository's own, and it is the residual this amendment newly opens.** Folding
+`groups` into the verifier's asserted state makes the verifier assert a field that decides
+whether the verifier's own reader can read the bug at all — and the reader is chosen by
+membership of `INSIDER_GROUP`, which is `"admin"` (`src/bzr_live/verify/expected.py:16`,
+`:408-415`), never by membership of the group the update restricts to. A scenario that
+restricts a bug to a group the insider is outside makes `ServerReader.bug` read it and get
+`api_code` 102, which `BUG_ABSENT_CODES = {100, 101}` deliberately excludes by the
+"inaccessibility is not absence" rule above — so it raises out of `_read_all` and **aborts the
+whole verification** instead of producing one finding about one bug. The outsider reader, built
+whenever a scenario declares a private comment, is outside `admin` by construction and carries
+the same exposure. `scenarios/smoke` is safe only by coincidence: `admin-ops` is both its
+first `admin` member and its only `restricted` member, and nothing states or enforces that
+they must be the same actor. Whoever declares the first live `groups` update owes that check.
 
 One consequence rides on how #34 wrote that mapping. `groups` compares by **equality**, like
 `keywords`: `Bugzilla/Bug.pm:1883` unions a product's mandatory groups into the set and

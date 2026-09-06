@@ -31,7 +31,7 @@ not assert — the silent gap issue #27 exists to close.
 
 ## Global Constraints
 
-- **`bzr` floor.** `README.md:206` — "Use `b80303b7` or later, and treat anything below
+- **`bzr` floor.** `README.md:223` — "Use `b80303b7` or later, and treat anything below
   `63abb94e` as untested." Everything relied on here was measured at
   `bzr 0.8.3-dev (63abb94e)`; do not cite `b80303b7` for behaviour that starts at
   `a7f6ab70`.
@@ -317,12 +317,12 @@ fixture or **read** from source, the `bzr` source at a commit, a class verdict, 
    **fixed**" in the table and "Read from source" in its section; keep the description of
    the defect as found. Two present-tense paragraphs become false when Task 2 lands:
 
-   - **`:135-139`, "What still depends on the defect"** says `actions.py` "has **not** been
+   - **`:137-141`, "What still depends on the defect"** says `actions.py` "has **not** been
      revisited: it still refuses a declared `groups` set on `bug.update`". Replace: it has
      now been revisited under issue #27 — the refusal is gone and the field confirms —
      while both time fields stay never-confirming, `estimated_hours` under D8 and
      `remaining_hours` under Bugzilla's decrement.
-   - **`:146-149`, "What the fixture does"** says it "Refuses a declared `groups` set on
+   - **`:148-151`, "What the fixture does"** says it "Refuses a declared `groups` set on
      `bug.update`". Replace with the post-change behaviour: executes it as an add/remove
      delta and confirms it by set comparison; both time fields still never confirm, on the
      two distinct grounds above.
@@ -345,10 +345,9 @@ fixture or **read** from source, the `bzr` source at a commit, a class verdict, 
    D10 is the **next free identifier**, not a renumbering: the register holds D1 and D3-D9
    plus G1-G11, and nothing has ever occupied D10 — earlier campaign material cited it as an
    existing entry, which was wrong. Two independent observations ground it: this design's
-   proxy capture, and issue #34's own measurement, which is why `G11`'s closing paragraph
-   ends "That masking is its own finding and is not yet recorded in this file." **Resolve
-   that dangling sentence in the same edit** — it is a cross-reference to an entry that did
-   not exist.
+   proxy capture, and issue #34's own measurement — which is why `G11` says, at `:602`,
+   "That masking is its own finding and is not yet recorded in this file." **Resolve that
+   dangling sentence in the same edit**: it points at an entry that did not exist.
 
    Class **defect**; upstream `hold: recording only` — filing on `randomparity/bzr` is not
    authorised for this campaign. What the fixture does: nothing to route around it. The path
@@ -396,24 +395,62 @@ records the transcript. No repository file changes here except the evidence quot
 
 2. **Replay a scenario declaring a `groups` update** through the real engine: a `bug.create`
    on `checkout` by `admin-ops`, then a `bug.update` on it declaring
-   `groups: [{"ref": "group:restricted"}]`. Scratch scenario, not a repository file — the
-   surface exclusion in the design's *Follow-up* section is what keeps it out of
-   `scenarios/`.
+   `groups: [{"ref": "group:restricted"}]`, then a second `bug.update` **narrowing the set
+   back to empty**. Scratch scenario, not a repository file — the surface exclusion in the
+   design's *Follow-up* section is what keeps it out of `scenarios/`.
 
-3. **Record what the engine emitted and what came back**: the `bug update` argument list
-   carrying `--groups-add=restricted`, the exit status, and the reconciliation's
-   `next_action`. `advance` is the claim this issue makes; anything else is the finding.
+   `admin-ops` is not a convenience. `add_group` (`Bugzilla/Bug.pm:3162-3167`) and
+   `remove_group` (`:3195-3212`) both refuse a caller outside the group, so any other actor
+   would prove only that Bugzilla says no.
+
+   The narrowing event is what puts `--groups-remove` on a real server. The two flags are not
+   symmetric there — `remove_group` carries a mandatory-group refusal `add_group` does not —
+   so an add-only run would ship half the pair on the strength of a mock, which is the thing
+   this task exists to prevent.
+
+3. **Record what the engine emitted and what came back**: each `bug update` argument list,
+   carrying `--groups-add=restricted` and then `--groups-remove=restricted`, and each exit
+   status.
 
 4. **Read the result back independently** with `bug view --fields=id,groups`, so the proof
-   does not rest on the same reconciliation path it is testing.
+   does not rest on the same code path it is testing.
+
+5. **Drive the reconciliation arm deliberately, both ways.** A clean run never reaches it:
+   `engine._execute` writes `next_action` `"advance"` at `engine.py:196` straight after a
+   zero-exit invocation, and `BugUpdateHandler` inherits `ActionHandler.resolved_ids`
+   returning `{}` (`actions.py:264-265`), which cannot raise. `reconcile` is reached only
+   from `_settle`, inside the `except (ProvisionError, ReplayError)` arm. So a plain replay
+   would record `"advance"` whether or not Task 2 step 5 ever added the projection — the
+   criterion this step replaces was satisfiable by code that does not exist.
+
+   Reach it with a `BZR_LIVE_BZR` wrapper, the boundary the repository already treats as
+   operator-selected. Two runs, and the pair is the proof:
+
+   - **positive** — the wrapper execs the real floor binary, then exits non-zero. The server
+     applied the change; `reconcile` reads the bug back, the declared set matches, and
+     `_execute` returns `"reconciled"` with `_RECONCILED_EXIT` in the journal.
+   - **negative** — the wrapper exits non-zero *without* running `bzr`. Nothing was applied;
+     `reconcile` reads the bug back, the declared set differs, and the run must fail with
+     `declared 'groups' differs from the fixture`.
+
+   The negative is the half that bites. The positive alone advances even for a field absent
+   from `_UPDATE_COMPARE_SETS`, because `reconcile` skips what it does not know; only the
+   mismatch distinguishes a live projection from a missing one. This is the repository's own
+   controlled-fault discipline applied to a live server rather than to a double.
+
+6. **Restore the fixture** to the state step 1 found it in, and say what was left behind if
+   anything was.
 
 ### Acceptance criteria
 
-- The `bug update` `bzr` actually ran is quoted verbatim, with `--groups-add=restricted` in
-  it, and the binary that ran it is named by version and revision.
-- The declared group is present in an independent `bug view` read-back.
-- Reconciliation reached `advance`; if it did not, the divergence is reported as the finding
-  rather than worked around.
+- Both `bug update` invocations `bzr` actually ran are quoted verbatim — one carrying
+  `--groups-add=restricted`, one carrying `--groups-remove=restricted` — and the binary that
+  ran them is named by version and revision.
+- The declared group is present in an independent `bug view` read-back after the add, and
+  absent after the remove.
+- The positive fault run records `"reconciled"`; the negative fault run fails naming
+  `groups`. If either does not, the divergence is reported as the finding rather than worked
+  around.
 
 ## Deferrals carried from the design review
 

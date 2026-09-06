@@ -10,7 +10,7 @@ readback was measured".
 `src/bzr_live/replay/actions.py` refuses a declared `bug.update` `groups` value as a
 precondition, citing finding **D3** — `bzr bug view` serialising no `groups` entry, so no
 delta can be computed and no result confirmed. That premise is **empirically dead**, not
-merely fixed upstream: at `bzr 0.8.3-dev (63abb94e)`, the revision `README.md:206` names as
+merely fixed upstream: at `bzr 0.8.3-dev (63abb94e)`, the revision `README.md:223` names as
 this repository's floor, a default-transport `bug view` returns `groups: ['restricted']` for
 a restricted bug. `a7f6ab70` (`bzr` PR #646, closing
 [bzr#641](https://github.com/randomparity/bzr/issues/641)) adds `Groups` to the `Bug`
@@ -34,7 +34,7 @@ spite of it.
 
 `docs/adr/0006` carries the same stale premise twice — in its refusal list (line 149) and
 in the rejected alternative "Apply a declared `groups` set on update as adds only"
-(line 330) — so it needs a matching amendment.
+(line 424) — so it needs a matching amendment.
 
 ## Goal
 
@@ -264,12 +264,36 @@ scenario edit: a `bug.update` declaring `groups` on a `checkout` bug, authored b
 surface; and its event count is a figure `README.md` publishes and issue #35 is queued to
 re-measure, so changing it now would stale a number a queued issue exists to fix.
 
-Whoever takes it must use `admin-ops`, and not by preference. `_check_groups`
-(`Bugzilla/Bug.pm:1851-1887`) requires only that the *product* make the group settable, never
-that the caller belong to it, so any other smoke actor would restrict the bug out of its own
-visibility; the post-mutation read then answers `api_code` 102 and `read_bug` aborts the run
-by the "inaccessibility is not absence" rule. `admin-ops` is the one smoke actor in
-`restricted`.
+Whoever takes it must use `admin-ops`, and for two independent reasons — both of which the
+ADR records in full.
 
-The ADR 0006 amendment is the durable record: it states the measurement, the two residuals
-that survive #34, and why `groups` compares by equality. Read it there rather than here.
+- **Bugzilla will refuse anyone else.** On the update path `add_group`
+  (`Bugzilla/Bug.pm:3162-3167`) throws `group_restriction_not_allowed` for a caller outside
+  the group, and `remove_group` mirrors it at `:3195-3212`. The refusal is pre-mutation, so
+  nothing is half-applied — but by finding D10 it reaches the operator as 410 "You must log
+  in" rather than as error 120. (`_check_groups` at `:1851-1887` has no membership gate, but
+  it is the *create*-time validator only, registered at `VALIDATORS` `:122`; the update path
+  never reaches it.)
+- **The verifier's reader would abort.** `INSIDER_GROUP` is `"admin"`
+  (`src/bzr_live/verify/expected.py:16`, `:408-415`), so the reader is chosen by `admin`
+  membership and not by the restricting group. Restrict a bug to a group the insider is
+  outside and `ServerReader.bug` gets `api_code` 102, which `BUG_ABSENT_CODES` excludes on
+  purpose, so it raises out of `_read_all` and ends the whole run rather than yielding one
+  finding. `admin-ops` is the one smoke actor that is in both `admin` and `restricted`, and
+  nothing enforces that coincidence.
+
+**One more payload class this change newly admits**, named here so it is not discovered at
+replay time. Nothing checks that a declared group's `products` list (ADR 0013's field) covers
+the target bug's product. A `bug.update` declaring, say, `groups: [group:editbugs]` on a
+`checkout` bug is loader-valid, reaches Bugzilla, and is refused by `group_is_settable`
+(`Bugzilla/Product.pm:740-748` — a system group carries `isbuggroup = 0`) with error 120,
+which D10 again presents as an authentication message. A pre-mutation check is **declined
+here, not overlooked**: the scenario contract holds everything needed for it, but the ground
+would be Bugzilla's configuration rather than a `bzr` limitation, so per `actions.py:18-22` it
+does not belong in the refusal table, and the natural home — validating a scenario's declared
+groups against the products it declares — is `scenario/loader.py`, which is off this issue's
+surface. Reported as a follow-up.
+
+The ADR 0006 amendment is the durable record: it states the measurement, the three residuals
+this change leaves standing, and why `groups` compares by equality. Read it there rather than
+here.
