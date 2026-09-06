@@ -76,14 +76,16 @@ def _decode_pairs(value: object, source: str, field: str) -> object:
     return value
 
 
-def _reject_number(source: str, field: str) -> Callable[[str], object]:
+def _reject_number(source: str, field: str, message: str) -> Callable[[str], object]:
     def reject(_: str) -> object:
-        raise _error(source, field, "floating-point numbers are not supported")
+        raise _error(source, field, message)
 
     return reject
 
 
-def _decode_json_bytes(content: bytes, source: str, field: str = "$") -> object:
+def _decode_json_bytes(
+    content: bytes, source: str, field: str = "$", *, allow_float: bool = False
+) -> object:
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -92,8 +94,16 @@ def _decode_json_bytes(content: bytes, source: str, field: str = "$") -> object:
         raw = json.loads(
             text,
             object_pairs_hook=_Pairs,
-            parse_float=_reject_number(source, field),
-            parse_constant=_reject_number(source, field),
+            # Authored scenario input excludes floats (ADR 0002); captured journal handler
+            # output admits finite ones (ADR 0014). `parse_constant` is unconditional -- its
+            # message says "non-finite" rather than "floating-point" because it also fires on
+            # the journal path, where floats are supported. An overflow literal like 1e400
+            # reaches parse_float instead, and is caught downstream by `_validate_json`.
+            parse_float=(
+                float if allow_float
+                else _reject_number(source, field, "floating-point numbers are not supported")
+            ),
+            parse_constant=_reject_number(source, field, "non-finite numbers are not supported"),
         )
     except ScenarioValidationError:
         raise
