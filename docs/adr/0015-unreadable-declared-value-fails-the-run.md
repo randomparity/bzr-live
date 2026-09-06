@@ -38,13 +38,20 @@ record follows: *"This issue makes the fixture **fail loudly**, not compensate."
 wrong.** #59 does not convert waivers generally: its Scope is two items — turn
 `UNVERIFIABLE_FIELDS["estimated_hours"]` into a conditional refusal, and retarget
 `check_comment_transport`'s diagnostic. `remaining_hours` and the work-time hours stay waived,
-as this record's Decision also says. It scopes itself to *"fields Bugzilla withholds while
-still answering 200"* and rules the other class out by name: *"A `401` is not usable, because
-`bzr` repairs it."* D12 is squarely that 401 class. And the alternative weighed here was never
-a `UNVERIFIABLE_FIELDS` entry at all — it would have been a `Finding("unverifiable", ...)`
+as this record's Decision also says. And the alternative weighed here was never a
+`UNVERIFIABLE_FIELDS` entry at all — it would have been a `Finding("unverifiable", ...)`
 emitted from `Verifier._links`, a different mechanism in a different module. **So #59 would
 not have removed the waiver this record declines to add.** #59 is also `status:blocked` on
 issue #58.
+
+**What #59 shares with this is the signal, and that is why its approach is the precedent.**
+#59's detectable class is *"fields Bugzilla withholds while still answering 200"*, and it
+rules out the other by name: *"A `401` is not usable, because `bzr` repairs it."* D12's read
+is in the first class, not the second — the search endpoint answers **200** with an empty
+list, which is precisely a withheld 200. The 401 in this story belongs to the *direct*
+endpoint `bug view` reads, where `bzr`'s retry does repair it and the read succeeds. So #59
+and this record answer the same shape of problem the same way; they differ only in which
+field, and in which module the answer lives.
 
 One conflict follows and is recorded rather than smoothed: #59's acceptance criteria require
 *"a live `make smoke`"* to pass. While this decision stands and `bzr#719` is open, `make smoke`

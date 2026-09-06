@@ -148,32 +148,40 @@ class SmokeScenarioTest(unittest.TestCase):
 
     @staticmethod
     def _declared_groups(event):
-        """The group names an event declares on its bug, empty where it declares none.
+        """The group set an event declares on its bug, or None where it declares none.
 
-        Both payload forms land here. A create's postcondition carries every key, so
-        an undeclared `groups` is an empty collection; an update's carries only the
-        keys its `set` block names. Emptiness marks a non-declaration in either, so
-        the guards below bind to the create form the day one declares a group,
-        without being written twice.
+        The two payload forms differ, and collapsing them loses a real declaration. A
+        create's postcondition carries every key, so an empty `groups` there cannot be
+        told from an omitted one -- and need not be, since both leave the bug
+        unrestricted. An update's carries only the keys its `set` block names, and
+        `loader._update_set` accepts an empty list, so `{"set": {"groups": []}}` is a
+        valid event meaning *remove every group*, which the replay sends as one
+        `--groups-remove` per current member. Reading that as a non-declaration would
+        leave the guards below asserting a restriction the scenario had just lifted.
         """
-        declared = event.expected_postcondition["values"].get("groups") or ()
-        return {ref.name for ref in declared}
+        values = event.expected_postcondition["values"]
+        if event.action == "bug.create":
+            return {ref.name for ref in values["groups"]} or None
+        if "groups" not in values:
+            return None
+        return {ref.name for ref in values["groups"]}
 
     def _restrictions(self):
-        """alias -> the group set the last declaring event leaves the bug in.
+        """alias -> the groups the last declaring event leaves the bug in, when any.
 
         A declaration replaces rather than extends, exactly as `BugUpdateHandler.build`'s
-        add/remove delta does on the server, so the last one wins.
+        add/remove delta does on the server, so the last one wins -- including a declared
+        empty set, which lifts the restriction and drops the bug from this mapping.
         """
         final: dict[str, set[str]] = {}
         for event in self.scenario.events:
             alias, declared = self._touched_bug(event), self._declared_groups(event)
-            if alias is not None and declared:
+            if alias is not None and declared is not None:
                 final[alias] = declared
-        return final
+        return {alias: groups for alias, groups in final.items() if groups}
 
     def _restricted_bugs(self):
-        """The aliases of every bug some event declares a group on."""
+        """The aliases of every bug left carrying a group by the events that declare one."""
         return set(self._restrictions())
 
     def test_digest_matches_the_pinned_value(self):
@@ -308,12 +316,12 @@ class SmokeScenarioTest(unittest.TestCase):
                     f"is not a member of group {name!r} an earlier event restricted "
                     "the bug to")
             declared = self._declared_groups(event)
-            for name in sorted(declared):
+            for name in sorted(declared or ()):
                 self.assertIn(
                     name, held,
                     f"{event.name!r} restricts {alias!r} to group {name!r} as "
                     f"{event.actor.name!r}, who is not a member of it")
-            if declared:
+            if declared is not None:
                 restricted[alias] = declared      # replaces, per `_restrictions`
 
     def test_group_restricted_bugs_declare_no_private_comment(self):
