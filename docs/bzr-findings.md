@@ -655,6 +655,15 @@ optional, since `bug update` takes numeric ids only ([G10](#g10)). The paired ra
 the same measurement was taken as `admin-ops` over `PUT /rest/bug/4`; see [G11](#g11), which
 records that side in full.
 
+**Which leg is observed, and which is read.** The two reported errors in the table above were
+both measured. That `bzr`'s *own* retry received the 120-carrying body and discarded it is
+**read from source** at `63abb94e` and inferred from the raw-REST half — no `bzr` transcript of
+the fallback was captured, so this entry quotes none. The inference rests on the retry
+authenticating the same way the raw-REST half does, which [D8](#d8) establishes independently.
+Confirming it outright would take one `RUST_LOG=debug` run showing the "auth fallback also
+failed, returning original 401" line; that run has not been made, and this entry does not claim
+it has.
+
 **Mechanism.** Two unrelated Bugzilla faults share one HTTP status, and `bzr`'s fallback reads
 only that status.
 
