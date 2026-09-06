@@ -21,9 +21,10 @@ continues. Authored scenario input keeps rejecting floats.
 the fixture binds to 127.0.0.1 and every datum is fabricated, so the only realistic actor is
 an unexpected response from the fixture's own Bugzilla. **Controls:** the widening is one
 document-scoped decoder flag, so the exact `int` guards ADR 0014 enumerates carry every
-non-`handler_output` field; non-finite values are refused by `parse_constant`,
-`math.isfinite`, and `allow_nan=False` between them; file modes, symlink refusal, and the
-retained-descriptor discipline are untouched. **Out of scope:** magnitude and precision are
+non-`handler_output` field; non-finite values are refused by `parse_constant` and
+`math.isfinite` between them, both reachable and both tested; file modes, symlink refusal,
+and the retained-descriptor discipline are untouched. **Out of scope:** magnitude and
+precision are
 deliberately unbounded — `1e308` and `5e-324` round-trip exactly and the fixture has no
 reason to police what Bugzilla returns.
 
@@ -43,8 +44,7 @@ reason to police what Bugzilla returns.
 4. A record file fails to decode when `handler_output` holds a literal `NaN` (refused by
    `parse_constant`) **and** when it holds `1e400` (valid JSON, decodes to `inf`, refused by
    `math.isfinite` — `parse_constant` is never called for it). A float in `attempt` fails the
-   same way, through the exact `int` guard. `_write_temp`'s `allow_nan=False` is unreachable
-   while the validator runs first and raises `ValueError`, not `ScenarioValidationError`.
+   same way, through the exact `int` guard.
 5. Loading a `resources.json` or an `events.jsonl` line containing a float fails with the
    decoder's own message, `floating-point numbers are not supported`. Asserting the message
    is the point: `ScenarioResourceTests::test_rejects_floats_and_non_finite_numbers` checks

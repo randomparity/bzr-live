@@ -8,7 +8,7 @@ rejection that governs authored scenario input. Decision and rationale:
 
 **Tech stack.** Python 3.11+, standard library only, `unittest`, run through `uv`.
 
-Expected implementation size: 75–90 changed lines (S) — from the file map: ~19 source lines across three files, ~45 in `tests/test_journal.py`, ~7 each in `tests/test_scenario_events.py` and `tests/test_scenario_resources.py`.
+Expected implementation size: 74–88 changed lines (S) — from the file map: ~18 source lines across three files, ~45 in `tests/test_journal.py`, ~7 each in `tests/test_scenario_events.py` and `tests/test_scenario_resources.py`.
 
 ## Global Constraints
 
@@ -29,7 +29,7 @@ Expected implementation size: 75–90 changed lines (S) — from the file map: ~
 | File | Change |
 |---|---|
 | `src/bzr_live/scenario/loader.py` | `_decode_json_bytes` gains keyword-only `allow_float: bool = False`. |
-| `src/bzr_live/scenario/journal.py` | `import math`; `_validate_json` finite-`float` branch; `_read_file` passes `allow_float=True`; `_write_temp` gains `allow_nan=False`. |
+| `src/bzr_live/scenario/journal.py` | `import math`; `_validate_json` finite-`float` branch; `_read_file` passes `allow_float=True`. |
 | `src/bzr_live/scenario/model.py` | `JsonValue` alias gains `float`. |
 | `tests/test_journal.py` | `completed()` helper takes `handler_output`; three new tests. |
 | `tests/test_scenario_events.py` | One new test: a float in an `events.jsonl` line still fails. |
@@ -129,16 +129,11 @@ def _decode_json_bytes(
             parse_constant=_reject_number(source, field),
 ```
 
-In `src/bzr_live/scenario/journal.py`, replace `JournalStore._read_file`'s return line, and
-add `allow_nan=False` to `_write_temp`'s `json.dumps` (`journal.py:849`) so the serializer
-cannot emit a non-finite value even by a path that skipped the validator:
+In `src/bzr_live/scenario/journal.py`, replace `JournalStore._read_file`'s return line. Leave
+`_write_temp` alone — ADR 0014 records why no serializer backstop is added.
 
 ```python
         return _record_from_json(_decode_json_bytes(b"".join(chunks), "journal", allow_float=True))
-```
-
-```python
-            content = json.dumps(document, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8") + b"\n"
 ```
 
 In `src/bzr_live/scenario/model.py`, replace the `JsonValue` alias line:
@@ -248,9 +243,9 @@ output recorded in the build ledger:
    `test_rejects_floats_and_non_finite_numbers` is expected to stay **green** under this
    fault; that is exactly why the two new tests exist.
 
-`allow_nan=False` gets no fault of its own: it is unreachable while `_validate_json` runs on
-every construction path, which is why ADR 0014 records it as a structural backstop rather
-than a tested guarantee.
+Every guard this change adds has a fault above. That is the test: a guard with no reachable
+fault would be a guard nothing can prove, which is why ADR 0014 rejects the serializer
+backstop rather than shipping one untested.
 
 ### 8. Guardrails, bare, then commit
 

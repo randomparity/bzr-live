@@ -40,22 +40,19 @@ explicit opt-in.** `_decode_json_bytes` takes a keyword-only `allow_float: bool 
 The default preserves ADR 0002 for every existing caller; `JournalStore._read_file` is the
 sole caller passing `True`. No second decoder, no global loosening.
 
-**Admit finite floats; reject non-finite ones, by three mechanisms that divide the input
-between them.** Bugzilla does not send non-finite values, and a record carrying one would be
-read back only through a `parse_constant` hook. The division is worth stating exactly,
-because it is not symmetric:
+**Admit finite floats; reject non-finite ones, by two mechanisms that divide the input
+between them.** Bugzilla does not send non-finite values. The division is worth stating
+exactly, because it is not symmetric:
 
 - `parse_constant` refuses the three bare tokens `NaN`, `Infinity`, `-Infinity`, in both
   modes, because it is not gated on `allow_float`.
 - An **overflow literal is a different path**: `1e400` is valid JSON, reaches `parse_float`,
   and with `parse_float=float` returns `inf` without `parse_constant` ever being called
-  (checked on CPython 3.11.15). On the read side only `_validate_json`'s `math.isfinite`
-  branch refuses it, via `_record_from_json` (`journal.py:664`).
-- On write, `_validate_json` rejects a non-finite float with `"must be a finite number"`, and
-  `_write_temp`'s `json.dumps` (`journal.py:849`) gains `allow_nan=False` so the serializer
-  cannot emit one by a path that skipped the validator. That last guard is unreachable while
-  the validator runs on every construction path, and it raises a bare `ValueError`, not a
-  `ScenarioValidationError`.
+  (checked on CPython 3.11.15). Only `_validate_json`'s `math.isfinite` branch refuses it —
+  on write from `__post_init__`, and on read via `_record_from_json` (`journal.py:664`).
+
+Both mechanisms are reachable and both are tested. No third guard is added; see the rejected
+alternatives.
 
 **Preserve the exact type test, extended to float as `type(value) is float`.** The exactness
 is load-bearing for numbers, and the codebase already depends on it. `bool` is an `int`
@@ -99,6 +96,12 @@ and no canonicalization step is added.
   record. The round-trip test is the guard, not the flag's default.
 - `_redact_opaque` and `_contains_secret` already fall through to a bare return for a float,
   so redaction stays a no-op on a number and no secret can hide in one.
+- **One follow-up leaves this record unowned**, named here so it is unambiguous: `journal.py:118`
+  admits a `str` by `isinstance`, so a `str` subclass — or a `str`-based `Enum` — is validated
+  as itself and does not come back as itself across the round trip, while the numeric branches
+  reject the equivalent `IntEnum` (both checked on CPython 3.11.15). It predates this change,
+  which neither depends on it nor worsens it, since the widening here is numbers-only. It is
+  recorded rather than filed; filing is outside this change's authority.
 
 ## Considered & rejected
 
@@ -130,6 +133,14 @@ and no canonicalization step is added.
 - **Admit non-finite floats too.** verified: `json.dumps(float("nan"))` emits bare `NaN` on
   CPython 3.11.15, which RFC 8259 does not permit and which `json.loads` accepts only through
   `parse_constant`.
+- **Add `allow_nan=False` to `_write_temp`'s `json.dumps` as a serializer backstop.**
+  verified: it is unreachable — `CompletedRecord.__post_init__` validates `handler_output`
+  (`journal.py:401`) and `replace_completed` re-runs `__post_init__` (`journal.py:902`), so no
+  write path reaches `_write_temp` with a non-finite float — which also makes it untestable
+  by construction. It would raise a bare `ValueError('Out of range float values are not JSON
+  compliant')` (checked), escaping the `ScenarioValidationError` contract every other journal
+  refusal honours. `AGENTS.md` is explicit that production-grade infrastructure here is scope
+  overreach; the two mechanisms above satisfy the requirement without it.
 - **Do nothing and wait for issue #30.** verified: the abort is reachable now on any
   group-restricted bug — issue #44 reproduced it from a control declaring `groups` at create
   time only, a path `main` supported before issue #27 and which issue #27 never touched.
