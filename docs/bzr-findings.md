@@ -661,8 +661,7 @@ both measured. That `bzr`'s *own* retry received the 120-carrying body and disca
 the fallback was captured, so this entry quotes none. The inference rests on the retry
 authenticating the same way the raw-REST half does, which [D8](#d8) establishes independently.
 Confirming it outright would take one `RUST_LOG=debug` run showing the "auth fallback also
-failed, returning original 401" line; that run has not been made, and this entry does not claim
-it has.
+failed, returning original 401" line. That run has not been made.
 
 **Mechanism.** Two unrelated Bugzilla faults share one HTTP status, and `bzr`'s fallback reads
 only that status.
@@ -675,17 +674,14 @@ It then maps both 120 (`:276`) and 410 (`:282`) to `STATUS_NOT_AUTHORIZED`, whic
 not do this" are indistinguishable by status.
 
 On the `bzr` side, `send_raw` sends the request with header auth, and on a 401 calls
-`retry_with_alternate_auth` (`src/client/transport.rs:121-135`).  That retry re-sends with
+`retry_with_alternate_auth` (`src/client/transport.rs:121-135`). That retry re-sends with
 query-parameter auth — which on this fixture is the method that actually authenticates, per
 [D8](#d8) — and then tests the outcome with `alternate_auth_failed(retried.status())`
 (`:141-164`). That predicate is `status == UNAUTHORIZED || status == FORBIDDEN` (`:165-167`):
-**it inspects the status and never the body.** The retry's 401 therefore reads as "auth failed
-again", the retried response is dropped whole, and `send_raw` returns the *original* 401 — whose
-body still carries the header attempt's stale `410 "You must log in"`.
-
-The retry succeeded at authenticating and was refused on policy grounds. Because that refusal is
-also a 401, the response carrying error 120 is discarded unread, and the error the user sees
-names the wrong cause entirely.
+**it inspects the status and never the body.** So a retry that authenticated fine and was then
+refused on policy grounds reads as "auth failed again": the retried response is dropped whole,
+error 120 with it, and `send_raw` returns the *original* 401 — whose body still carries the
+header attempt's stale `410 "You must log in"`.
 
 **Class: defect**, and a `bzr`-side one. Bugzilla answered with a specific error naming the real
 constraint; `bzr` discarded that answer and substituted a message about authentication for a
