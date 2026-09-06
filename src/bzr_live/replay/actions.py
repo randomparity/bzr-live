@@ -29,8 +29,6 @@ _CREATE_UNSUPPORTED = {
     "duplicate_of": "Bugzilla's own Bug.create has no dupe_of field",
 }
 _UPDATE_UNSUPPORTED = {
-    "groups": "bzr bug view does not return groups, so no delta can be computed and no "
-              "result confirmed (finding D3)",
     "version": "bzr bug update has no version flag, though Bugzilla accepts one "
                "(finding G2)",
 }
@@ -49,9 +47,22 @@ _UPDATE_NO_CLEAR = {
 # (src/cli/bug/update.rs:85 and :92), so clap rejects either pairing at parse time.
 _UPDATE_DUPE_CONFLICTS = ("status", "resolution")
 
-# bzr bug view never serializes either, so nothing declared here can be read back;
-# check_supported has already refused the fields (version, groups) and the None forms
-# (resolution, milestone, duplicate_of) that would otherwise need a place here too.
+# Neither field confirms, on two grounds that were never the same -- one shared rationale
+# over both is what let a stale premise cover them together until issue #27 split it.
+#
+# estimated_hours: Bugzilla gates the time-tracking fields on timetrackinggroup (editbugs
+# here) and omits them from an otherwise-successful 200 for a caller that has not cleared
+# it, so finding D8's unauthenticated read never sees the value and no error status fires
+# bzr's alternate-auth retry. This is a floor over the common case, not an absolute: a
+# group-restricted bug 401s the whole read, so that retry does fire, authenticates, and
+# brings the time fields back with it (measured at 63abb94e). Every bug a scenario here
+# declares is anonymously readable, so the floor is what the code assumes.
+#
+# remaining_hours: Bugzilla decrements remaining_time by logged work, so the declared
+# value is not the fixture's final state. Bugzilla's own model, surviving any bzr fix.
+#
+# check_supported has already refused version and the None forms (resolution, milestone,
+# duplicate_of) that would otherwise need a place here too.
 _UPDATE_ALWAYS_RETRY = ("estimated_hours", "remaining_hours")
 
 # Declared field -> (bzr bug view key, projection of the declared value for comparison).
@@ -67,6 +78,11 @@ _UPDATE_COMPARE = {
 
 # Bugzilla list fields compare as sets: the delta bzr applies is order-independent.
 _UPDATE_COMPARE_SETS = {
+    # Equality, like keywords, not cc's containment: Bugzilla widens the set behind the
+    # caller only through a product's mandatory or default bug groups, and every
+    # group_control_map row this fixture writes carries CONTROLMAPSHOWN in both control
+    # columns -- neither CONTROLMAPMANDATORY nor CONTROLMAPDEFAULT (ADR 0006, ADR 0013).
+    "groups": ("groups", lambda context, ref: ref.name),
     "cc": ("cc", lambda context, ref: context.actor_email(ref)),
     "keywords": ("keywords", lambda context, ref: ref.name),
     "depends_on": ("depends_on", lambda context, ref: context.resolve(ref)),
@@ -395,6 +411,7 @@ class BugUpdateHandler(ActionHandler):
             if key in values:
                 args.append(f"{flag}={values[key]}")
         for key, add_flag, remove_flag, project in (
+            ("groups", "--groups-add", "--groups-remove", lambda r: r.name),
             ("cc", "--cc-add", "--cc-remove", lambda r: context.actor_email(r)),
             ("keywords", "--keywords-add", "--keywords-remove", lambda r: r.name),
             ("depends_on", "--depends-on-add", "--depends-on-remove",

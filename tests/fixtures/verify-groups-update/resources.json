@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "resources": [
+    {"kind": "group", "name": "restricted", "description": "Restricted visibility"},
+    {"kind": "group", "name": "escalated", "description": "Escalated visibility"},
+    {"kind": "actor", "name": "developer", "email": "developer@example.test", "display_name": "Devi Developer"},
+    {"kind": "product", "name": "ordering", "description": "Order capture"},
+    {"kind": "component", "name": "queue", "product": {"ref": "product:ordering"}, "description": "Order queue"},
+    {"kind": "version", "name": "ordering-v1", "product": {"ref": "product:ordering"}}
+  ]
+}

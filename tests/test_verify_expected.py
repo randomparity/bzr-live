@@ -8,6 +8,7 @@ from bzr_live.verify.expected import INSIDER_GROUP, fold, link_edges, reachable
 
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / "scenarios" / "smoke"
+GROUPS_UPDATE = ROOT / "tests" / "fixtures" / "verify-groups-update"
 
 
 class FoldSmokeScenarioTest(unittest.TestCase):
@@ -169,12 +170,43 @@ class CcOrderingTest(unittest.TestCase):
         self.assertEqual(len(multi), 1)
 
     def test_created_groups_are_folded_as_an_asserted_field(self) -> None:
-        # bug.update can never supply this case: actions._UPDATE_UNSUPPORTED refuses a
-        # groups update, so bug.create is the only path groups can arrive by. It is
-        # asserted rather than waived -- bzr a7f6ab70 exposes it in bug view.
+        # A create-time groups set that no later event updates, folded as asserted rather
+        # than waived -- bzr a7f6ab70 exposes the field in bug view. The update path is
+        # covered by tests/fixtures/verify-groups-update, which needs its own fixture: an
+        # update here would replace this set and destroy the create-only case.
         bug = self.expected.bugs["ordered"]
         self.assertEqual(bug.names["groups"], frozenset({"restricted"}))
         self.assertNotIn("groups", {name for name, _ in bug.unverifiable})
+
+
+class GroupsUpdateFoldTest(unittest.TestCase):
+    """A declared `groups` set on bug.update reaches expected state (issue #27).
+
+    Regression guard for a silent coupling: `_update_other` ignored every key outside
+    {duplicate_of, estimated_hours, remaining_hours}, which was safe only while
+    actions._UPDATE_UNSUPPORTED refused `groups` before any mutation. With that refusal
+    gone, a fold that drops the update would leave the verifier asserting the *created*
+    set against a server holding the updated one -- confirming a bug it never checked.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.expected = fold(load_scenario(str(GROUPS_UPDATE)))
+
+    def test_a_declared_groups_update_replaces_the_folded_set(self) -> None:
+        # Asserts the VALUE, not the key's presence: a fold that dropped the update
+        # leaves names["groups"] holding {restricted}, which a presence-only test passes.
+        bug = self.expected.bugs["guarded"]
+        self.assertEqual(
+            bug.names["groups"], frozenset({"restricted", "escalated"}))
+
+    def test_the_added_member_reaches_history_as_one_change(self) -> None:
+        bug = self.expected.bugs["guarded"]
+        added = [c for c in bug.history if c.field == "groups"]
+        self.assertEqual(len(added), 1)
+        self.assertEqual(added[0].actor, "developer")
+        self.assertEqual(added[0].value, frozenset({"escalated"}))
+        self.assertFalse(added[0].chain)
 
 
 class TopologyTest(unittest.TestCase):

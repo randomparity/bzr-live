@@ -134,21 +134,46 @@ readable through `bug view --fields` from that commit on. `a7f6ab70` is an ances
 reproduce at any revision this repository supports. It still reproduces on the `0.8.2`
 release, which is what the homebrew binary is.
 
-**What still depends on the defect.** `src/bzr_live/verify/` asserts `groups` and
-`estimated_time` rather than waiving them, because it runs at the supported revision.
-`src/bzr_live/replay/actions.py` has **not** been revisited: it still refuses a declared
-`groups` set on `bug.update` and still treats the two time fields as never-confirming, per
-ADR 0006. Narrowing that is follow-up work, not part of issue #20.
+**What still depends on the defect — nothing, for `groups`.** `src/bzr_live/verify/`
+asserts `groups` and `estimated_time` rather than waiving them, because it runs at the
+supported revision. `src/bzr_live/replay/actions.py` **has now been revisited**, under
+issue #27: the refusal is gone and a declared `groups` set on `bug.update` is executed as
+an add/remove delta and confirmed by set comparison. The two time fields stay
+never-confirming, but no longer on this entry's grounds — `estimated_hours` under
+[D8](#d8), `remaining_hours` under Bugzilla's own decrement of `remaining_time` by logged
+work. See ADR 0006.
+
+**The `groups` half is now observed, not read from source.** Measured at `63abb94e`
+against a freshly installed fixture provisioned from `scenarios/smoke`, as `admin-ops`:
+`bug update --groups-add=restricted` exits 0, `bug view --fields=id,groups` returns
+`{"id":1,"groups":["restricted"]}` on the **default** transport, and `bug_group_map`
+carries the row; `--groups-remove=restricted` exits 0 and both revert. A group-restricted
+read draws HTTP 401 and `bzr`'s alternate-auth retry recovers it, which is the mechanism —
+`bug_access_denied` maps to `STATUS_NOT_AUTHORIZED`
+(`Bugzilla/WebService/Constants.pm:270`).
+
+**The fix is sufficient for `groups` and not for the time fields**, which is the
+correction issue #20's first live run forced. `bzr` does serialize `estimated_time` from
+`a7f6ab70` on; Bugzilla withholds it, gating the time-tracking fields on
+`timetrackinggroup` and omitting them from an otherwise-**successful 200** for a caller
+that has not cleared it. No error status, so nothing fires the retry that rescues
+`groups`. The one exception is worth stating because this repository can now reach it: on
+a *group-restricted* bug the 401 is raised for the whole read, the retry authenticates,
+and the time fields return with everything else — so the `estimated_hours` waiver is a
+floor over anonymously-readable bugs rather than an absolute.
 
 Related but distinct from that epic's own entries: entry 10 (bzr#623) covers
 `groups: []` being unexpressible on *create*, and [bzr#621](https://github.com/randomparity/bzr/issues/621)
 covers the `platform` naming on read and write. Neither covers the read-side omission of
 these three fields.
 
-**What the fixture does.** Refuses a declared `groups` set on `bug.update`, because a delta
-cannot be computed and the result cannot be confirmed; treats `estimated_hours` and
-`remaining_hours` as fields that can never confirm and therefore always re-apply. See
-ADR 0006.
+**What the fixture does.** Executes a declared `groups` set on `bug.update` as an
+add/remove delta against observed state and confirms it by set comparison, exactly as it
+does `cc` and `keywords`. Treats `estimated_hours` and `remaining_hours` as fields that
+never confirm and therefore always re-apply — on two distinct grounds, neither of them
+this entry: Bugzilla withholds `estimated_time` from an unauthenticated read ([D8](#d8)),
+and decrements `remaining_time` by logged work so the declared value is never the final
+state. See ADR 0006.
 
 ## D5
 

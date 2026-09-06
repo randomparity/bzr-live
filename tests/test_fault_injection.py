@@ -137,9 +137,12 @@ class FakeBugzilla:
     tests/replay_smoke.sh's job (ADR 0009).
     """
 
-    # Applied by `bug update` and then unreadable: `bzr bug view` serializes none of the
-    # three (finding D3, ADR 0006). Keeping them off the bug this double returns is what
-    # makes the fixture's update-triage reconcile as `retry` rather than `advance`.
+    # Applied by `bug update` and then unreadable, on grounds that are Bugzilla's rather
+    # than bzr's: it gates the time-tracking fields on timetrackinggroup and omits them
+    # from an otherwise-successful read, and it decrements remaining_time by logged work
+    # so the declared value is never the final state (ADR 0006). Keeping them off the bug
+    # this double returns is what makes the fixture's update-triage reconcile as `retry`
+    # rather than `advance`.
     _UNREADABLE = frozenset({"estimated-time", "remaining-time", "work-time"})
     # Only the two `bug update` flags the scoped events actually send. Modelling
     # --summary, --resolution, --assignee, --dupe-of or the list deltas would add
@@ -458,8 +461,9 @@ class ResponseLossTest(_Fixture):
     def _readable_update(self):
         """The fixture with update-triage replaced by an update that reads back whole.
 
-        update-triage declares `remaining_hours`, which `bzr bug view` never serializes
-        (finding D3), so it can only ever reconcile as `retry`. The `advance` resolution
+        update-triage declares `remaining_hours`, which never confirms -- Bugzilla
+        decrements remaining_time by logged work, so the declared value is not the
+        server's final state -- so it can only ever reconcile as `retry`. The `advance` resolution
         needs an update whose every declared field reads back, and the fixture has none --
         the same reason tests/test_replay.py:484-505 hand-builds one.
         """
