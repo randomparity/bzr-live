@@ -168,7 +168,7 @@ Append both to `JournalTests` in `tests/test_journal.py`:
                     self.completed(handler_output={"estimated_time": value})
                 self.assertIn("$.handler_output.estimated_time", str(caught.exception))
                 self.assertIn("must be a finite number", str(caught.exception))
-        # Reach `replace_completed`'s own re-validation (journal.py:902). Passing
+        # Reach `replace_completed`'s own re-validation. Passing
         # `self.completed(...)` would raise while the argument is evaluated, so the store
         # would never be entered and the assertion would prove nothing.
         smuggled = self.completed()
@@ -228,7 +228,7 @@ check that cannot fail for what it verifies.
 
 `NaN` is refused by `parse_constant`; `1e400` is valid JSON that decodes to `inf` and is
 refused only by `_validate_json`'s `math.isfinite` branch, via `_record_from_json`; the
-`attempt` case is refused by the exact `int` guard at `journal.py:312`, which `allow_float=True`
+`attempt` case is refused by `_validate_common`'s exact `int` guard, which `allow_float=True`
 now leaves as that field's sole float defence. `tests/test_journal.py` already imports
 `MappingProxyType` and `Path`.
 
