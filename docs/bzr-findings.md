@@ -835,9 +835,10 @@ gets right; `scenarios/smoke` declares one, so `make smoke` — a merge gate —
 pull request that runs it until `bzr#719` is fixed. Worse, the refusal unwinds `Verifier.run`
 before it prints, so the verify stage reports no assertions at all while this stands. That
 cost was weighed and accepted rather than discovered: ADR 0008's *Considered & rejected*
-predicted it in terms ("a gate that is always red is a gate nobody reads") and rejected this
-disposition, and the operator overrode that on 2026-09-06 with issue #59 as the reason a
-waiver is the worse direction.
+predicted it in terms ("a gate that is always red is a gate nobody reads") and declined this
+disposition, and [ADR 0015](adr/0015-unreadable-declared-value-fails-the-run.md) records the
+operator's decision of 2026-09-06 to accept that cost for this class, with issue #59 as the
+reason a waiver is now the worse direction.
 
 The refusal retires itself: when the read succeeds the rewrite never fires, so nothing here
 has to be removed. Two alternatives were rejected. Routing the links reads through
