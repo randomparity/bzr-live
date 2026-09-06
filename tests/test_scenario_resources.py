@@ -196,6 +196,13 @@ class ScenarioResourceTests(unittest.TestCase):
         os.mkfifo(target)
         self.assert_invalid("events.jsonl", "$")
 
+    def test_float_rejection_names_the_decoder_not_a_later_field_error(self) -> None:
+        (self.root / "resources.json").write_text(
+            '{"format_version":1,"resources":[],"bad":1.5}', encoding="utf-8"
+        )
+        message = self.assert_invalid("resources.json", "$")
+        self.assertIn("floating-point numbers are not supported", message)
+
 
 if __name__ == "__main__":
     unittest.main()

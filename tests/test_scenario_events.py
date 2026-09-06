@@ -189,6 +189,13 @@ class ScenarioEventTests(unittest.TestCase):
         self.events[0]["payload"]["summary"] = "\ud800"  # type: ignore[index]
         self.assert_invalid("$.payload.summary")
 
+    def test_rejects_a_float_in_an_event_line(self) -> None:
+        self.events[1]["estimated_time"] = 1.5
+        self.write()
+        with self.assertRaises(ScenarioValidationError) as caught:
+            load_scenario(self.root)
+        self.assertIn("floating-point numbers are not supported", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

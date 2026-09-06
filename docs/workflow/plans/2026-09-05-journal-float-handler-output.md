@@ -169,12 +169,17 @@ Append both to `JournalTests` in `tests/test_journal.py`:
             self.assertIsInstance(store.read("comment"), InFlightRecord)
 
     def test_record_file_holding_an_unreadable_number_fails_to_decode(self) -> None:
+        # Each case names the mechanism that must refuse it. Asserting the message, not just
+        # the exception, is what makes the subtests discriminating: all three would raise
+        # `ScenarioValidationError` even if only `math.isfinite` were left.
         cases = (
-            ('"estimated_time":8.0', '"estimated_time":NaN'),
-            ('"estimated_time":8.0', '"estimated_time":1e400'),
-            ('"attempt":1', '"attempt":1.0'),
+            ('"estimated_time":8.0', '"estimated_time":NaN',
+             "journal:$: floating-point numbers are not supported"),
+            ('"estimated_time":8.0', '"estimated_time":1e400',
+             "journal:$.handler_output.estimated_time: must be a finite number"),
+            ('"attempt":1', '"attempt":1.0', "journal:$.attempt: must be a positive integer"),
         )
-        for index, (original, replacement) in enumerate(cases):
+        for index, (original, replacement, expected) in enumerate(cases):
             with self.subTest(replacement=replacement):
                 state = Path(self._temporary.name) / f"state{index}"
                 with JournalStore(state) as store:
@@ -187,9 +192,17 @@ Append both to `JournalTests` in `tests/test_journal.py`:
                 path.write_text(content.replace(original, replacement), encoding="utf-8")
                 path.chmod(0o600)
                 with JournalStore(state) as store:
-                    with self.assertRaises(ScenarioValidationError):
+                    with self.assertRaises(ScenarioValidationError) as caught:
                         store.read("comment")
+                self.assertEqual(str(caught.exception), expected)
 ```
+
+The message assertions are not decoration, and the build proved it: an earlier draft asserted
+only `assertRaises(ScenarioValidationError)`, and fault 3 below did **not** turn it red —
+with `parse_constant` disabled, the `NaN` token decodes to `nan` and `math.isfinite` refuses
+it a step later, so the test passed while the mechanism it was written for was gone. That is
+the same defect shape as the pre-existing `test_rejects_floats_and_non_finite_numbers`: a
+check that cannot fail for what it verifies.
 
 `NaN` is refused by `parse_constant`; `1e400` is valid JSON that decodes to `inf` and is
 refused only by `_validate_json`'s `math.isfinite` branch, via `_record_from_json`; the
@@ -238,7 +251,8 @@ output recorded in the build ledger:
 2. `journal.py` `_read_file`: drop `allow_float=True` → round-trip test red with
    `floating-point numbers are not supported`.
 3. `loader.py`: `parse_constant=_reject_number(source, field)` → `parse_constant=float` →
-   the `NaN` subtest red, the `1e400` subtest green.
+   the `NaN` subtest red on its message assertion, the `1e400` subtest green. **Observed:**
+   red only after the subtests were made to assert the message; see step 5.
 4. `loader.py`: `allow_float` default → `True` → **both** new authored-input tests red.
    `test_rejects_floats_and_non_finite_numbers` is expected to stay **green** under this
    fault; that is exactly why the two new tests exist.

@@ -4,6 +4,7 @@ import ctypes
 import errno
 import fcntl
 import json
+import math
 import os
 import re
 import secrets
@@ -120,6 +121,14 @@ def _validate_json(value: object, field: str) -> JsonValue:
         return value
     if value is None or type(value) in (bool, int):
         return value  # type: ignore[return-value]
+    if type(value) is float:
+        # Exact type, like the numeric scalars above: `bool` is an `int` subclass, and an
+        # `IntEnum` that passed an upstream `isinstance` guard would be refused here after
+        # the in-flight record has landed (see `replay/actions.py:_usable_id`). Non-finite
+        # values are rejected so the store never writes a record no decoder reads back.
+        if not math.isfinite(value):
+            raise _journal_error(field, "must be a finite number")
+        return value
     if isinstance(value, (tuple, list)):
         return tuple(_validate_json(item, f"{field}[]") for item in value)
     if isinstance(value, Mapping):
@@ -797,7 +806,7 @@ class JournalStore:
                 chunks.append(chunk)
         finally:
             os.close(fd)
-        return _record_from_json(_decode_json_bytes(b"".join(chunks), "journal"))
+        return _record_from_json(_decode_json_bytes(b"".join(chunks), "journal", allow_float=True))
 
     def _records(self, event: str) -> list[InFlightRecord | CompletedRecord]:
         self._require_open()

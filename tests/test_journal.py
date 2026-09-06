@@ -48,7 +48,12 @@ class JournalTests(unittest.TestCase):
             reconciliation_marker="bzr-live:smoke:comment",
         )
 
-    def completed(self, attempt: int = 1, next_action: str = "advance") -> CompletedRecord:
+    def completed(
+        self,
+        attempt: int = 1,
+        next_action: str = "advance",
+        handler_output: object | None = None,
+    ) -> CompletedRecord:
         return CompletedRecord(
             scenario_digest=self.digest,
             event="comment",
@@ -63,7 +68,7 @@ class JournalTests(unittest.TestCase):
                 arguments=("--body", "safe"),
                 environment_names=("BUGZILLA_API_KEY",),
             ),
-            handler_output=freeze_planned({"ok": True}),
+            handler_output=freeze_planned({"ok": True}) if handler_output is None else handler_output,
             exit_status=0,
             resolved_ids=MappingProxyType({"bug:race": 42, "actor:ada": 7}),
             next_safe_action=next_action,
@@ -419,6 +424,66 @@ class JournalTests(unittest.TestCase):
         with JournalStore(self.state) as store:
             with self.assertRaises(ScenarioValidationError):
                 store.read("comment")
+
+    def test_completed_record_round_trips_finite_time_tracking_numbers(self) -> None:
+        output = {"estimated_time": 8.0, "remaining_time": 0.0, "id": 42}
+        with JournalStore(self.state) as store:
+            store.write_in_flight(self.in_flight())
+            path = store.replace_completed(self.completed(handler_output=output))
+            record = store.read("comment")
+        self.assertIsInstance(record, CompletedRecord)
+        self.assertEqual(dict(record.handler_output), output)  # type: ignore[union-attr,arg-type]
+        for key in ("estimated_time", "remaining_time"):
+            self.assertIs(type(record.handler_output[key]), float)  # type: ignore[union-attr,index]
+        self.assertIs(type(record.handler_output["id"]), int)  # type: ignore[union-attr,index]
+        self.assertEqual(record.scenario_digest, self.digest)  # type: ignore[union-attr]
+        self.assertIn('"estimated_time":8.0', path.read_text(encoding="utf-8"))
+
+    def test_completed_record_rejects_non_finite_numbers_before_writing(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=repr(value)):
+                with self.assertRaises(ScenarioValidationError) as caught:
+                    self.completed(handler_output={"estimated_time": value})
+                self.assertIn("$.handler_output.estimated_time", str(caught.exception))
+                self.assertIn("must be a finite number", str(caught.exception))
+        # Reach `replace_completed`'s own re-validation. Passing `self.completed(...)` would
+        # raise while the argument is evaluated, so the store would never be entered.
+        smuggled = self.completed()
+        object.__setattr__(smuggled, "handler_output", MappingProxyType({"t": float("nan")}))
+        with JournalStore(self.state) as store:
+            store.write_in_flight(self.in_flight())
+            with self.assertRaises(ScenarioValidationError) as caught:
+                store.replace_completed(smuggled)
+            self.assertIn("must be a finite number", str(caught.exception))
+            self.assertIsInstance(store.read("comment"), InFlightRecord)
+
+    def test_record_file_holding_an_unreadable_number_fails_to_decode(self) -> None:
+        # Each case names the mechanism that must refuse it. Asserting the message, not just
+        # the exception, is what makes the subtests discriminating: all three would raise
+        # `ScenarioValidationError` even if only `math.isfinite` were left.
+        cases = (
+            ('"estimated_time":8.0', '"estimated_time":NaN',
+             "journal:$: floating-point numbers are not supported"),
+            ('"estimated_time":8.0', '"estimated_time":1e400',
+             "journal:$.handler_output.estimated_time: must be a finite number"),
+            ('"attempt":1', '"attempt":1.0', "journal:$.attempt: must be a positive integer"),
+        )
+        for index, (original, replacement, expected) in enumerate(cases):
+            with self.subTest(replacement=replacement):
+                state = Path(self._temporary.name) / f"state{index}"
+                with JournalStore(state) as store:
+                    store.write_in_flight(self.in_flight())
+                    path = store.replace_completed(
+                        self.completed(handler_output={"estimated_time": 8.0})
+                    )
+                content = path.read_text(encoding="utf-8")
+                self.assertIn(original, content)
+                path.write_text(content.replace(original, replacement), encoding="utf-8")
+                path.chmod(0o600)
+                with JournalStore(state) as store:
+                    with self.assertRaises(ScenarioValidationError) as caught:
+                        store.read("comment")
+                self.assertEqual(str(caught.exception), expected)
 
 
 if __name__ == "__main__":

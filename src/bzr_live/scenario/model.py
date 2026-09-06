@@ -19,7 +19,7 @@ class Reference:
     name: str
 
 RecoveryClass: TypeAlias = Literal["unique-create", "idempotent-set", "append"]
-JsonValue: TypeAlias = bool | int | str | tuple["JsonValue", ...] | Mapping[str, "JsonValue"] | None
+JsonValue: TypeAlias = bool | int | float | str | tuple["JsonValue", ...] | Mapping[str, "JsonValue"] | None
 PlannedValue: TypeAlias = (
     bool | int | str | Reference | tuple["PlannedValue", ...] | Mapping[str, "PlannedValue"] | None
 )

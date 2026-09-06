@@ -83,7 +83,9 @@ def _reject_number(source: str, field: str) -> Callable[[str], object]:
     return reject
 
 
-def _decode_json_bytes(content: bytes, source: str, field: str = "$") -> object:
+def _decode_json_bytes(
+    content: bytes, source: str, field: str = "$", *, allow_float: bool = False
+) -> object:
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -92,7 +94,12 @@ def _decode_json_bytes(content: bytes, source: str, field: str = "$") -> object:
         raw = json.loads(
             text,
             object_pairs_hook=_Pairs,
-            parse_float=_reject_number(source, field),
+            # Authored scenario input excludes floats (ADR 0002); captured journal handler
+            # output admits finite ones (ADR 0014). `parse_constant` is unconditional, so the
+            # bare NaN/Infinity tokens are refused in both modes -- but an overflow literal
+            # like 1e400 reaches parse_float, not parse_constant, and is caught downstream by
+            # `_validate_json`'s math.isfinite branch.
+            parse_float=float if allow_float else _reject_number(source, field),
             parse_constant=_reject_number(source, field),
         )
     except ScenarioValidationError:
