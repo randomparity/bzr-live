@@ -40,13 +40,22 @@ explicit opt-in.** `_decode_json_bytes` takes a keyword-only `allow_float: bool 
 The default preserves ADR 0002 for every existing caller; `JournalStore._read_file` is the
 sole caller passing `True`. No second decoder, no global loosening.
 
-**Admit finite floats; reject non-finite ones structurally on both sides.** `NaN` and
-`Infinity` are not JSON (RFC 8259), so a record carrying one is unreadable by a conformant
-parser, and Bugzilla does not send them. On read, `parse_constant` keeps rejecting them
-whatever `allow_float` says. On write, `_validate_json` rejects a non-finite float with
-`"must be a finite number"`, and `_write_temp`'s `json.dumps` (`journal.py:849`) gains
-`allow_nan=False` so the serializer cannot emit one even if a value reached it by a path that
-skipped the validator. Both sides are then structural rather than resting on one branch.
+**Admit finite floats; reject non-finite ones, by three mechanisms that divide the input
+between them.** Bugzilla does not send non-finite values, and a record carrying one would be
+read back only through a `parse_constant` hook. The division is worth stating exactly,
+because it is not symmetric:
+
+- `parse_constant` refuses the three bare tokens `NaN`, `Infinity`, `-Infinity`, in both
+  modes, because it is not gated on `allow_float`.
+- An **overflow literal is a different path**: `1e400` is valid JSON, reaches `parse_float`,
+  and with `parse_float=float` returns `inf` without `parse_constant` ever being called
+  (checked on CPython 3.11.15). On the read side only `_validate_json`'s `math.isfinite`
+  branch refuses it, via `_record_from_json` (`journal.py:664`).
+- On write, `_validate_json` rejects a non-finite float with `"must be a finite number"`, and
+  `_write_temp`'s `json.dumps` (`journal.py:849`) gains `allow_nan=False` so the serializer
+  cannot emit one by a path that skipped the validator. That last guard is unreachable while
+  the validator runs on every construction path, and it raises a bare `ValueError`, not a
+  `ScenarioValidationError`.
 
 **Preserve the exact type test, extended to float as `type(value) is float`.** The exactness
 is load-bearing for numbers, and the codebase already depends on it. `bool` is an `int`
@@ -54,15 +63,13 @@ subclass, so the tuple lists both or `True` would be rejected; an `IntEnum` *is*
 today (checked), and `replay/actions.py:173-181`'s `_usable_id` docstring records why that
 matters — a value that passes every upstream `isinstance` guard and is then refused by the
 journal blames the record for a boundary reply after the in-flight record has landed. `float`
-gets the same exact test for the same reason. This is a property of the numeric branches
-only: `journal.py:118` admits a `str` by `isinstance`, so a `str` subclass survives
-validation as itself and does not come back as itself (checked). This change neither widens
-nor narrows that gap.
+gets the same exact test for the same reason. The closed-set property is about numbers only:
+`journal.py:118` admits a `str` by `isinstance`, so a `str` subclass survives validation as
+itself (checked), and this change neither widens nor narrows that.
 
 **The canonical form is what `json.dumps` already writes.** CPython emits a float via `repr`,
 the shortest decimal that round-trips exactly since 3.1 — checked on CPython 3.11.15 for
-`8.0`, `0.0`, `-0.0`, `0.1`, `1/3`, `1e308`, `5e-324`. The existing
-`sort_keys=True, ensure_ascii=False, separators=(",", ":")` encoding is otherwise unchanged
+`8.0`, `0.0`, `-0.0`, `0.1`, `1/3`, `1e308`, `5e-324`. The encoding is otherwise unchanged
 and no canonicalization step is added.
 
 ## Consequences
@@ -71,18 +78,23 @@ and no canonicalization step is added.
   replay continues, on the group-restricted path reachable today and on the ordinary path
   issue #30 would create.
 - `handler_output` is carried on a digest-bearing record but is **not** an input to
-  `scenario_digest`, which is computed over the scenario package (ADR 0002:36-40). No float
-  can enter the digest domain, and the round-trip test's `scenario_digest` assertion guards
-  that field against disturbance rather than evidencing the digest.
+  `scenario_digest`, which is computed over the normalized envelope in `loader.py:868-880`.
+  No float can enter the digest domain.
+- **`allow_float=True` applies to the whole record document**, not to `handler_output` alone:
+  `_read_file` decodes the entire file through that one call. The exact `int` guards at
+  `journal.py:312` (attempt), `:413` (exit_status), `:424` (resolved_ids values) and `:628`
+  (journal_version), plus `freeze_planned`'s `type(value) in (bool, int, str)`
+  (`model.py:69`), become the sole float refusal for every other field. Relaxing any of them
+  to `isinstance` would now admit a float there.
 - `JsonValue` gains `float`. The alias is exported from `bzr_live.scenario`; `handler_output`
   is produced by `replay/engine.py:228` and consumed by `replay/actions.py`, whose guards are
   `isinstance` on dict/list and `type(value) is int` for ids (`actions.py:181`), so none of
   them changes behaviour under the widened alias.
 - Authored input is unchanged and ADR 0002 is not superseded; its sentence is now read as
-  scoped to its own paragraph. The existing `test_rejects_floats_and_non_finite_numbers`
-  (`tests/test_scenario_resources.py:134`) does not on its own hold that line — it asserts
-  only that loading fails at field `$` — so this change adds a test asserting the decoder's
-  own message for both authored decode paths.
+  scoped to its own paragraph. `test_rejects_floats_and_non_finite_numbers`
+  (`tests/test_scenario_resources.py:134`) does not hold that line by itself — it asserts only
+  that loading fails at field `$`, which a later `unknown field` error also satisfies — so
+  this change adds a test asserting the decoder's own message on both authored decode paths.
 - A future third decode path that forgets `allow_float=True` reintroduces the write-only
   record. The round-trip test is the guard, not the flag's default.
 - `_redact_opaque` and `_contains_secret` already fall through to a bare return for a float,
@@ -94,9 +106,14 @@ and no canonicalization step is added.
   "journal")` raises `journal:$: floating-point numbers are not supported` at `226b607b` on
   CPython 3.11.15, the interpreter `make test` pins. A write-only record is worse than the
   abort it replaces.
-- **Drop the float rejection from `_decode_json_bytes` for every caller.** verified: ADR 0002
-  fixes the scenario digest's accepted domain as excluding floats, so this changes what the
-  digest covers for a gain no authored fixture needs.
+- **Drop the float rejection from `_decode_json_bytes` for every caller.** verified: the
+  scenario digest is unaffected either way — it is computed over the normalized envelope
+  (`loader.py:868-880`), and every authored value first passes a typed helper, `_decimal`
+  (`loader.py:354-356`) requiring a canonical decimal *string* for exactly the time values at
+  issue. What is lost is the decoder's named `floating-point numbers are not supported`,
+  which degrades to an incidental `unknown field` wherever the float happens to land, and one
+  gate becomes per-field coverage. ADR 0002's sentence would also be contradicted at the
+  letter rather than scoped.
 - **Key the policy off the existing `source` tag instead of a flag.** verified: `source` is
   an exact discriminator — `"journal"` from `journal.py:800`, `"scenario.json"` /
   `"resources.json"` from `loader.py:105-106`, `f"events.jsonl:{n}"` from `loader.py:438-439`
@@ -112,7 +129,7 @@ and no canonicalization step is added.
   trip.
 - **Admit non-finite floats too.** verified: `json.dumps(float("nan"))` emits bare `NaN` on
   CPython 3.11.15, which RFC 8259 does not permit and which `json.loads` accepts only through
-  `parse_constant`; the record would depend on a CPython extension to be readable.
+  `parse_constant`.
 - **Do nothing and wait for issue #30.** verified: the abort is reachable now on any
   group-restricted bug — issue #44 reproduced it from a control declaring `groups` at create
   time only, a path `main` supported before issue #27 and which issue #27 never touched.

@@ -53,17 +53,9 @@ uv run --python 3.11 python -m unittest tests.test_journal tests.test_scenario_e
 
 ### 1. Parametrize the test helper
 
-In `tests/test_journal.py`, replace `JournalTests.completed`'s signature line and its
-`handler_output=` line, leaving every other line of the helper alone:
-
-```python
-    def completed(
-        self,
-        attempt: int = 1,
-        next_action: str = "advance",
-        handler_output: object | None = None,
-    ) -> CompletedRecord:
-```
+In `tests/test_journal.py`, add a fourth parameter `handler_output: object | None = None` to
+`JournalTests.completed`'s signature, and replace its `handler_output=` line with the
+expression below. Leave every other line of the helper alone.
 
 ```python
             handler_output=freeze_planned({"ok": True}) if handler_output is None else handler_output,
@@ -128,8 +120,10 @@ def _decode_json_bytes(
 
 ```python
             # Authored scenario input excludes floats (ADR 0002); captured journal handler
-            # output admits finite ones (ADR 0014). Non-finite values are rejected in both
-            # modes, because `parse_constant` is not conditional.
+            # output admits finite ones (ADR 0014). `parse_constant` is unconditional, so the
+            # bare NaN/Infinity tokens are refused in both modes -- but an overflow literal
+            # like 1e400 reaches parse_float, not parse_constant, and is caught downstream by
+            # `_validate_json`'s math.isfinite branch.
             parse_float=float if allow_float else _reject_number(source, field),
             parse_constant=_reject_number(source, field),
 ```
@@ -166,25 +160,46 @@ Append both to `JournalTests` in `tests/test_journal.py`:
                     self.completed(handler_output={"estimated_time": value})
                 self.assertIn("$.handler_output.estimated_time", str(caught.exception))
                 self.assertIn("must be a finite number", str(caught.exception))
+        # Reach `replace_completed`'s own re-validation (journal.py:902). Passing
+        # `self.completed(...)` would raise while the argument is evaluated, so the store
+        # would never be entered and the assertion would prove nothing.
+        smuggled = self.completed()
+        object.__setattr__(smuggled, "handler_output", MappingProxyType({"t": float("nan")}))
         with JournalStore(self.state) as store:
             store.write_in_flight(self.in_flight())
-            with self.assertRaises(ScenarioValidationError):
-                store.replace_completed(self.completed(handler_output={"t": float("nan")}))
+            with self.assertRaises(ScenarioValidationError) as caught:
+                store.replace_completed(smuggled)
+            self.assertIn("must be a finite number", str(caught.exception))
             self.assertIsInstance(store.read("comment"), InFlightRecord)
 
-    def test_record_file_holding_a_non_finite_number_fails_to_decode(self) -> None:
-        with JournalStore(self.state) as store:
-            store.write_in_flight(self.in_flight())
-            path = store.replace_completed(self.completed(handler_output={"estimated_time": 8.0}))
-        content = path.read_text(encoding="utf-8")
-        self.assertIn('"estimated_time":8.0', content)
-        path.write_text(content.replace('"estimated_time":8.0', '"estimated_time":NaN'), encoding="utf-8")
-        path.chmod(0o600)
-        with JournalStore(self.state) as store:
-            with self.assertRaises(ScenarioValidationError) as caught:
-                store.read("comment")
-        self.assertIn("floating-point numbers are not supported", str(caught.exception))
+    def test_record_file_holding_an_unreadable_number_fails_to_decode(self) -> None:
+        cases = (
+            ('"estimated_time":8.0', '"estimated_time":NaN'),
+            ('"estimated_time":8.0', '"estimated_time":1e400'),
+            ('"attempt":1', '"attempt":1.0'),
+        )
+        for index, (original, replacement) in enumerate(cases):
+            with self.subTest(replacement=replacement):
+                state = Path(self._temporary.name) / f"state{index}"
+                with JournalStore(state) as store:
+                    store.write_in_flight(self.in_flight())
+                    path = store.replace_completed(
+                        self.completed(handler_output={"estimated_time": 8.0})
+                    )
+                content = path.read_text(encoding="utf-8")
+                self.assertIn(original, content)
+                path.write_text(content.replace(original, replacement), encoding="utf-8")
+                path.chmod(0o600)
+                with JournalStore(state) as store:
+                    with self.assertRaises(ScenarioValidationError):
+                        store.read("comment")
 ```
+
+`NaN` is refused by `parse_constant`; `1e400` is valid JSON that decodes to `inf` and is
+refused only by `_validate_json`'s `math.isfinite` branch, via `_record_from_json`; the
+`attempt` case is refused by the exact `int` guard at `journal.py:312`, which `allow_float=True`
+now leaves as that field's sole float defence. `tests/test_journal.py` already imports
+`MappingProxyType` and `Path`.
 
 ### 6. Write the two authored-input tests
 
@@ -218,20 +233,23 @@ The focused run must report `OK` with all five new test names in the listing.
 
 ### 7. Verify the tests bite
 
-Five controlled faults, each reverted immediately after observing red, with the observed
+Four controlled faults, each reverted immediately after observing red, with the observed
 output recorded in the build ledger:
 
-1. `journal.py`: `if not math.isfinite(value):` → `if False:` → non-finite write test red.
+1. `journal.py`: `if not math.isfinite(value):` → `if False:` → **both** the non-finite write
+   test and the `1e400` subtest of the decode test red. The `NaN` subtest stays green — that
+   asymmetry is the point of the two cases.
 2. `journal.py` `_read_file`: drop `allow_float=True` → round-trip test red with
    `floating-point numbers are not supported`.
 3. `loader.py`: `parse_constant=_reject_number(source, field)` → `parse_constant=float` →
-   the record-file decode test red.
+   the `NaN` subtest red, the `1e400` subtest green.
 4. `loader.py`: `allow_float` default → `True` → **both** new authored-input tests red.
    `test_rejects_floats_and_non_finite_numbers` is expected to stay **green** under this
    fault; that is exactly why the two new tests exist.
-5. `journal.py`: drop `allow_nan=False` from `_write_temp` and, in a scratch check that
-   bypasses `_validate_json`, place a `NaN` in a record → the store writes a file its own
-   reader refuses.
+
+`allow_nan=False` gets no fault of its own: it is unreachable while `_validate_json` runs on
+every construction path, which is why ADR 0014 records it as a structural backstop rather
+than a tested guarantee.
 
 ### 8. Guardrails, bare, then commit
 
