@@ -19,7 +19,8 @@ prints the field, the alias and the finding citation; it loses no evidence a rea
 it buys is a gate that keeps discriminating for every other assertion, and ADR 0008 valued that
 above the sharper signal a refusal gives. Nothing since has shown the judgment wrong.
 
-Two things have changed around it.
+Two things have changed around it: a defect that makes one read impossible, and a stated
+direction for what the verifier does about that.
 
 Issue #42 declared the first bug `groups` value in `scenarios/smoke`, and its first live run
 produced finding [D12](../bzr-findings.md#d12), filed upstream as
@@ -139,9 +140,10 @@ in this repository at all.
   a future scenario restricts a bug that carries a dependency or duplicate edge, an
   *unrestricted* neighbour's walk loses it silently and `check_links` reports a missing edge as
   a **divergence** — which in this repository means "the replay wrote the wrong thing", against
-  a fixture that is correct. Not reachable today: `scenarios/smoke`'s restricted bug carries no
-  edges, and nothing else names it. A scenario that restricts a bug inside the link graph needs
-  this resolved first.
+  a fixture that is correct. Not reachable today, since no committed scenario restricts a bug at
+  all; and it was not reachable under the reverted-out scenario either, whose restricted bug
+  carried no edges. A scenario that restricts a bug inside the link graph needs this resolved
+  first.
 - **One residual misdiagnosis remains, narrowed but not closed.** `bzr` exits 2 both for
   not-found and for a clap usage error, and `BzrClient.read` maps that status to absent, so a
   malformed invocation against a restricted bug would still be reported as D12. The one route
