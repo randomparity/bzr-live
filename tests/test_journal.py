@@ -466,7 +466,14 @@ class JournalTests(unittest.TestCase):
              "journal:$: non-finite numbers are not supported"),
             ('"estimated_time":8.0', '"estimated_time":1e400',
              "journal:$.handler_output.estimated_time: must be a finite number"),
+            # `allow_float=True` is document-scoped, so these four exact `int` guards are the
+            # only thing keeping a float out of the rest of the record.
             ('"attempt":1', '"attempt":1.0', "journal:$.attempt: must be a positive integer"),
+            ('"exit_status":0', '"exit_status":0.0', "journal:$.exit_status: must be an integer"),
+            ('"journal_version":1', '"journal_version":1.0',
+             "journal:$.journal_version: unsupported journal version"),
+            ('"bug:race":42', '"bug:race":42.0',
+             "journal:$.resolved_ids.bug:race: must be a positive integer"),
         )
         for index, (original, replacement, expected) in enumerate(cases):
             with self.subTest(replacement=replacement):

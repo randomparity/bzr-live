@@ -12,22 +12,21 @@ sits in the paragraph defining the scenario digest, and it is right for what it 
 about — authored fixture content is hand-written and digest-bearing.
 
 The journal's `handler_output` is not authored content. It is whatever the mutation boundary
-returned, decoded by `provision/adapters.py:73-75`'s bare `json.loads` — which has no float
+returned, decoded by `provision/adapters.py`'s `_payload` bare `json.loads` — which has no float
 rejection of its own — and captured verbatim. Bugzilla returns `estimated_time` and
 `remaining_time` as JSON numbers. Issue #44 measured the result: a completed record carrying
 `estimated_time: 8.0` raises `journal:$.handler_output.estimated_time: contains an
 unsupported JSON value`, and the replay aborts. Two layers reject it independently:
 
-- `journal.py:121` admits scalars by an exact type test, `type(value) in (bool, int)`. A
-  `float` matches no branch and falls to `:132`.
-- `_decode_json_bytes` (`loader.py:86-95`) hardcodes `parse_float=_reject_number(...)`, and
-  `JournalStore._read_file` (`journal.py:800`) decodes through it. Admitting `float` in the
+- `_validate_json` admits scalars by an exact type test, `type(value) in (bool, int)`. A
+  `float` matches no branch and falls through to its final `raise`.
+- `_decode_json_bytes` hardcodes `parse_float=_reject_number(...)`, and
+  `JournalStore._read_file` decodes through it. Admitting `float` in the
   validator alone therefore yields a record that writes and then cannot be re-read — a
   strictly worse failure than the abort.
 
-`_decode_json_bytes` is shared: `scenario.json` and `resources.json` (via `_load_json`,
-`loader.py:105-106`) and every `events.jsonl` line (via `_parse_events`, `loader.py:438-439`)
-decode through it, where ADR 0002's exclusion still governs.
+`_decode_json_bytes` is shared: `scenario.json` and `resources.json` (via `_load_json`) and every
+`events.jsonl` line (via `_parse_events`) decode through it, where ADR 0002's exclusion still governs.
 
 The trigger is narrow today — only a group-restricted bug, where `bzr`'s alternate-auth
 retry authenticates, returns the `timetrackinggroup`-gated fields. Issue #30 proposes to
@@ -49,7 +48,7 @@ exactly, because it is not symmetric:
 - An **overflow literal is a different path**: `1e400` is valid JSON, reaches `parse_float`,
   and with `parse_float=float` returns `inf` without `parse_constant` ever being called
   (checked on CPython 3.11.15). Only `_validate_json`'s `math.isfinite` branch refuses it —
-  on write from `__post_init__`, and on read via `_record_from_json` (`journal.py:664`).
+  on write from `__post_init__`, and on read via `_record_from_json`.
 
 Both mechanisms are reachable and both are tested. No third guard is added; see the rejected
 alternatives.
@@ -57,11 +56,11 @@ alternatives.
 **Preserve the exact type test, extended to float as `type(value) is float`.** The exactness
 is load-bearing for numbers, and the codebase already depends on it. `bool` is an `int`
 subclass, so the tuple lists both or `True` would be rejected; an `IntEnum` *is* rejected
-today (checked), and `replay/actions.py:173-181`'s `_usable_id` docstring records why that
+today (checked), and `replay/actions.py`'s `_usable_id` docstring records why that
 matters — a value that passes every upstream `isinstance` guard and is then refused by the
 journal blames the record for a boundary reply after the in-flight record has landed. `float`
 gets the same exact test for the same reason. The closed-set property is about numbers only:
-`journal.py:118` admits a `str` by `isinstance`, so a `str` subclass survives validation as
+`_validate_json`'s `str` branch uses `isinstance`, so a `str` subclass survives validation as
 itself (checked), and this change neither widens nor narrows that.
 
 **The canonical form is what `json.dumps` already writes.** CPython emits a float via `repr`,
@@ -75,20 +74,20 @@ and no canonicalization step is added.
   replay continues, on the group-restricted path reachable today and on the ordinary path
   issue #30 would create.
 - `handler_output` is carried on a digest-bearing record but is **not** an input to
-  `scenario_digest`, which is computed over the normalized envelope in `loader.py:868-880`.
+  `scenario_digest`, which is computed over the normalized envelope `load_scenario` builds.
   No float can enter the digest domain.
 - **`allow_float=True` applies to the whole record document**, not to `handler_output` alone:
   `_read_file` decodes the entire file through that one call. The exact `int` guards at
-  `journal.py:312` (attempt), `:413` (exit_status), `:424` (resolved_ids values) and `:628`
-  (journal_version), plus `freeze_planned`'s `type(value) in (bool, int, str)`
-  (`model.py:69`), become the sole float refusal for every other field. Each refuses a float
+  `_validate_common` (attempt), `CompletedRecord.__post_init__` (exit_status and each
+  `resolved_ids` value) and `_record_from_json` (journal_version), plus `freeze_planned`'s
+  `type(value) in (bool, int, str)`, become the sole float refusal for every other field. Each refuses a float
   because `float` is not an `int` subclass, so the refactor that would reintroduce one is
   dropping a guard or widening it to a number type (`(int, float)`, `numbers.Number`) — not
   relaxing `type(...) is int` to `isinstance`, which still refuses a float and only admits
   `bool` and `IntEnum`.
 - `JsonValue` gains `float`. The alias is exported from `bzr_live.scenario`; `handler_output`
-  is produced by `replay/engine.py:228` and consumed by `replay/actions.py`, whose guards are
-  `isinstance` on dict/list and `type(value) is int` for ids (`actions.py:181`), so none of
+  is produced by `replay/engine.py`'s `_write_completed` and consumed by `replay/actions.py`,
+  whose guards are `isinstance` on dict/list and `_usable_id`'s `type(value) is int`, so none of
   them changes behaviour under the widened alias.
 - Authored input is unchanged and ADR 0002 is not superseded; its sentence is now read as
   scoped to its own paragraph. `test_rejects_floats_and_non_finite_numbers`
@@ -99,7 +98,7 @@ and no canonicalization step is added.
   record. The round-trip test is the guard, not the flag's default.
 - `_redact_opaque` and `_contains_secret` already fall through to a bare return for a float,
   so redaction stays a no-op on a number and no secret can hide in one.
-- **One follow-up leaves this record unowned**, named here so it is unambiguous: `journal.py:118`
+- **One follow-up leaves this record unowned**, named here so it is unambiguous: `_validate_json`
   admits a `str` by `isinstance`, so a `str` subclass — or a `str`-based `Enum` — is validated
   as itself and does not come back as itself across the round trip, while the numeric branches
   reject the equivalent `IntEnum` (both checked on CPython 3.11.15). It predates this change,
@@ -114,15 +113,15 @@ and no canonicalization step is added.
   abort it replaces.
 - **Drop the float rejection from `_decode_json_bytes` for every caller.** verified: the
   scenario digest is unaffected either way — it is computed over the normalized envelope
-  (`loader.py:868-880`), and every authored value first passes a typed helper, `_decimal`
-  (`loader.py:354-356`) requiring a canonical decimal *string* for exactly the time values at
+  that `load_scenario` builds, and every authored value first passes a typed helper —
+  `_decimal` requiring a canonical decimal *string* for exactly the time values at
   issue. What is lost is the decoder's named `floating-point numbers are not supported`,
   which degrades to an incidental `unknown field` wherever the float happens to land, and one
   gate becomes per-field coverage. ADR 0002's sentence would also be contradicted at the
   letter rather than scoped.
 - **Key the policy off the existing `source` tag instead of a flag.** verified: `source` is
-  an exact discriminator — `"journal"` from `journal.py:800`, `"scenario.json"` /
-  `"resources.json"` from `loader.py:105-106`, `f"events.jsonl:{n}"` from `loader.py:438-439`
+  an exact discriminator — `"journal"` from `_read_file`, `"scenario.json"` /
+  `"resources.json"` from `_load_json`, `f"events.jsonl:{n}"` from `_parse_events`
   — so `parse_float=float if source == "journal" else ...` needs no signature or call-site
   change and no future decode path could forget it. judgment: it makes an error-message tag
   load-bearing for validation policy, where a later rewording silently changes behaviour; the
@@ -138,7 +137,7 @@ and no canonicalization step is added.
   `parse_constant`.
 - **Add `allow_nan=False` to `_write_temp`'s `json.dumps` as a serializer backstop.**
   verified: it is unreachable — `CompletedRecord.__post_init__` validates `handler_output`
-  (`journal.py:401`) and `replace_completed` re-runs `__post_init__` (`journal.py:902`), so no
+  in `__post_init__` and `replace_completed` re-runs `__post_init__`, so no
   write path reaches `_write_temp` with a non-finite float — which also makes it untestable
   by construction. It would raise a bare `ValueError('Out of range float values are not JSON
   compliant')` (checked), escaping the `ScenarioValidationError` contract every other journal

@@ -39,7 +39,7 @@ reason to police what Bugzilla returns.
    digest, which `handler_output` is not an input to (ADR 0014 Consequences).
 3. `float("nan")`, `float("inf")`, `float("-inf")` in `handler_output` raise
    `ScenarioValidationError` naming `$.handler_output` and `must be a finite number`, both at
-   construction and inside `replace_completed`, which re-validates at `journal.py:902` — so
+   construction and inside `replace_completed`, which re-runs `__post_init__` — so
    the in-flight record survives a completion the store refuses.
 4. A record file fails to decode when `handler_output` holds a literal `NaN` (refused by
    `parse_constant`) **and** when it holds `1e400` (valid JSON, decodes to `inf`, refused by
