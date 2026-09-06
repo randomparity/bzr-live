@@ -802,7 +802,7 @@ close it independently, which is why this is recorded as one entry and not two:
   even while D8 stands.
 
 Checked against `bzr`'s own records before filing, as the preamble to this file requires.
-Two Accepted ADRs are adjacent and neither settles this entry.
+Three Accepted ADRs are adjacent; none settles this entry, and the third supports its remedy.
 
 `bzr` ADR 0015, "A server error is never masked by an empty result", does not reach it: here
 Bugzilla sends no error at all, which is the part that makes the empty result
@@ -822,6 +822,16 @@ bug exists. Note also that ADR 0006's *Considered & rejected* already declined "
 request per related bug during traversal", which bears on the second remedy below — reading
 the **root** through the direct path is one extra request for one bug, not per neighbour, so
 it does not reopen what that entry rejected.
+
+`bzr` ADR 0024, "Bound multi-bug adjacency at the CLI request boundary" (Accepted), does not
+settle this entry either, but it **supports the remedy**. Its Context distinguishes this
+command by name — "`bug links` performs traversal and omits roots and repeated observations" —
+and its Decision reads each bug's `blocks`/`depends_on` "through an adjacency-specific
+single-ID `Bug.get`", carried on REST as one `ids` query value on `/rest/bug/`. That is the
+direct path, the one whose 401 fires the alternate-auth retry. So reading a links root that
+way is a shape upstream has already accepted elsewhere, rather than a new one this entry is
+asking for. Recorded as evidence for the remedy only: nothing here proposes routing a read
+through `bug adjacency`, which would be the client-side substitution `AGENTS.md` forbids.
 
 **Upstream.** [bzr#719](https://github.com/randomparity/bzr/issues/719), filed 2026-09-06 on
 the operator's authorization. It cross-links [bzr#713](https://github.com/randomparity/bzr/issues/713)

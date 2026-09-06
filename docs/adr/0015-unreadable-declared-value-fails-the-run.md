@@ -30,10 +30,26 @@ unauthenticated and `links.rs` reports the root absent — to a caller that `bug
 same bug to, in the same run. `Verifier._read_all` reads every bug's topology unconditionally,
 so **any** scenario declaring a bug group meets this.
 
-Issue #59 exists to convert `UNVERIFIABLE_FIELDS` waivers into refusals. A new waiver added
-here would be work that issue is already scoped to undo, and would pull against it while it is
-open. That is what makes the waiver the worse direction *now*, and it is a fact about the
-backlog rather than a discovery about ADR 0008.
+Issue #59 sets the repository's direction on exactly this question. Its Notes say what this
+record follows: *"This issue makes the fixture **fail loudly**, not compensate."* That is
+`AGENTS.md`'s rule applied to the verifier, and it is the ground this decision stands on.
+
+**What #59 does not do, stated because an earlier draft of this record relied on it and was
+wrong.** #59 does not convert waivers generally: its Scope is two items — turn
+`UNVERIFIABLE_FIELDS["estimated_hours"]` into a conditional refusal, and retarget
+`check_comment_transport`'s diagnostic. `remaining_hours` and the work-time hours stay waived,
+as this record's Decision also says. It scopes itself to *"fields Bugzilla withholds while
+still answering 200"* and rules the other class out by name: *"A `401` is not usable, because
+`bzr` repairs it."* D12 is squarely that 401 class. And the alternative weighed here was never
+a `UNVERIFIABLE_FIELDS` entry at all — it would have been a `Finding("unverifiable", ...)`
+emitted from `Verifier._links`, a different mechanism in a different module. **So #59 would
+not have removed the waiver this record declines to add.** #59 is also `status:blocked` on
+issue #58.
+
+One conflict follows and is recorded rather than smoothed: #59's acceptance criteria require
+*"a live `make smoke`"* to pass. While this decision stands and `bzr#719` is open, `make smoke`
+does not pass, so #59 cannot satisfy that criterion on `main` without either the upstream fix
+or an amendment to its own criteria. Whoever picks up #59 meets this record first.
 
 ## Decision
 
@@ -61,13 +77,22 @@ in this repository at all.
 
 ## Consequences
 
-- **`make smoke` is red for every pull request that runs it, until upstream moves.** That is
-  the whole cost and it is not narrower than it sounds: `Container lifecycle`'s `x86_64-linux`
-  job runs `make smoke` on every pull request touching `scenarios/`, the containers, the
-  compose file, the lifecycle or checkpoint scripts, `tests/smoke_scenario.sh`, or `README.md`.
-  A genuine replay-engine regression introduced by a later pull request produces the same red
-  as this one, and a reader cannot tell them apart from the job's status alone. This is
-  precisely what ADR 0008 predicted, and it has been accepted rather than disputed.
+- **`make smoke` is red for every run of it, on both CI arms, until upstream moves.**
+  `.github/workflows/container-lifecycle.yml` triggers on `pull_request` **and** on
+  `push: branches: [main]`, over the same path list — `scenarios/**`, the containers, the
+  compose file, `Makefile`, the lifecycle and checkpoint scripts, `tests/smoke_scenario.sh`,
+  and `README.md`. So merging this branch turns the **default branch's own** `Container
+  lifecycle` run red, and keeps it red for every later push touching those paths. A red check
+  on a pull request and a red `main` are different signals: the second is what a maintainer, a
+  status badge, and anyone bisecting reads as "the repository is broken". A genuine
+  replay-engine regression in a later pull request produces the same red as this one, and a
+  reader cannot tell them apart from the job's status alone. This is precisely what ADR 0008
+  predicted, and it has been accepted rather than disputed.
+- **CI's checkpoint round trip stops running.** In that job, `Exercise checkpoint round trip`
+  (`make checkpoint-smoke`) is the step *after* `Exercise the live scenario smoke path`, and
+  only `Clean project resources` carries `if: always()`. Once `make smoke` fails, the
+  checkpoint step never executes, so this decision costs the save/restore coverage as well as
+  the verify coverage. `make checkpoint-smoke` still runs locally.
 - **The verify stage asserts nothing while this stands.** `Verifier.run` prints its findings
   only after every read returns, so the refusal unwinds `_read_all` and discards the findings
   already collected — including the restricted bug's own `groups` comparison. The restricted
@@ -81,14 +106,34 @@ in this repository at all.
 - `ReadNotFound` is added to `verify/__init__.py` and raised by `ServerReader._object`. Callers
   that catch `VerifyError` are unaffected; only a caller that must distinguish absence from an
   unrecognised reply shape needs the subclass.
+- **The narrowing covers the root of a links read and not a neighbour of one.** `bzr`'s own
+  ADR 0006 decides that *"related bugs that cannot be fetched are silently skipped"*, and D12's
+  upstream argument turns on that root-versus-related line. The other side of it lands here: if
+  a future scenario restricts a bug that carries a dependency or duplicate edge, an
+  *unrestricted* neighbour's walk loses it silently and `check_links` reports a missing edge as
+  a **divergence** — which in this repository means "the replay wrote the wrong thing", against
+  a fixture that is correct. Not reachable today: `scenarios/smoke`'s restricted bug carries no
+  edges, and nothing else names it. A scenario that restricts a bug inside the link graph needs
+  this resolved first.
+- **One residual misdiagnosis remains, narrowed but not closed.** `bzr` exits 2 both for
+  not-found and for a clap usage error, and `BzrClient.read` maps that status to absent, so a
+  malformed invocation against a restricted bug would still be reported as D12. The one route
+  reachable from a declared scenario — a graph deeper than `bzr`'s `--depth` ceiling of 10 —
+  is now refused by `check_link_bound` before any argument is built. What is left needs a
+  change to `bzr`'s CLI contract, which the repository already refuses rather than absorbs
+  elsewhere.
 
 ## Considered & rejected
 
 - **Report the links read `unverifiable` and let the run pass, per ADR 0008 unchanged.**
-  judgment: it is the disposition ADR 0008 prescribes and it would keep the gate
-  discriminating — the strongest alternative here. Declined because issue #59 is scoped to
-  convert existing waivers into refusals, so this would add work already planned for removal.
-  The operator weighed this explicitly on 2026-09-06 and chose the refusal.
+  judgment, and the strongest alternative here: it is the disposition ADR 0008 prescribes, it
+  would keep the gate discriminating for every other assertion, it would keep `main` green,
+  and it would leave the checkpoint step running. Its cost is that `make smoke` would pass
+  over a read `bzr` cannot perform, which is the shape `AGENTS.md` names — *"A fixture that
+  quietly compensates reports success while proving nothing"* — and which issue #59 states as
+  the repository's direction for the verifier. The operator weighed both and chose the refusal
+  on 2026-09-06. This is a judgment call between two defensible dispositions, not a
+  correctness result, and this record does not claim otherwise.
 - **Route the links read through `--api xmlrpc`.** verified: measured working — the XML-RPC arm
   fetches each node through the direct path, so the alternate-auth retry fires and the read
   succeeds. Rejected because it would leave `make smoke` green over a read `bzr` cannot perform

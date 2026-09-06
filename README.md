@@ -271,7 +271,11 @@ attributed to `admin-ops`, is the hand-run table in
 **It is now a merge gate.** `Container lifecycle`'s `x86_64-linux` job compiles `bzr` at the
 pinned revision above and runs this same `make smoke` on every pull request touching
 `scenarios/`, the containers, the compose file, the lifecycle or checkpoint scripts,
-`tests/smoke_scenario.sh`, or this file. The offline tier gained the same reach: both
+`tests/smoke_scenario.sh`, or this file — and, on the same path list, on every push to `main`.
+**Both arms are red while D12 stands**, `main`'s own run included, and the job's
+`make checkpoint-smoke` step never reaches execution because it follows `make smoke` and
+carries no `if: always()`. [ADR 0015](docs/adr/0015-unreadable-declared-value-fails-the-run.md)
+records that cost and why it was accepted. The offline tier gained the same reach: both
 workflows now name `scenarios/**`, so a pull request editing only a fixture file runs the
 jobs that prove it. Response-loss fault injection is a separate offline suite
 (`tests/test_fault_injection.py`).
