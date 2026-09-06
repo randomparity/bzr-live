@@ -232,14 +232,15 @@ skips the membership check. `Bug.update` runs `set_all` → `_add_remove($params
 (`Bugzilla/Bug.pm:2455`) → `add_group` / `remove_group` (`:2554-2563`), and `add_group`
 carries two gates: `group_is_settable` at `:3157-3158`, then, for a caller not in the group,
 `ThrowUserError('group_restriction_not_allowed')` at `:3162-3167` unless the same update also
-changes the product. `remove_group` refuses the same caller at `:3205-3211`, but under a
+changes the product. `remove_group` refuses the same caller at `:3205-3211` under a
 *different* error — `group_invalid_removal`, which it also throws at `:3189` for a group the
-bug is not in and at `:3199-3201` for a mandatory group. The two are not mirrors, and the
-distinction is load-bearing for the register: the 120 recorded under D10 was captured on a
-refused **add**, so D10's mapping is stated for that path only and the removal refusal's api
-code is not yet observed. The engine cannot reach `:3189` in ordinary operation, because
-`_delta` (`src/bzr_live/replay/actions.py:119-123`) computes removals from *observed* state
-and so never names a group the bug is not in.
+bug is not in and at `:3199-3201` for a mandatory group. **Different errors, same wire code:**
+`Bugzilla/WebService/Constants.pm:144-145` maps both `group_invalid_removal` and
+`group_restriction_not_allowed` to **120**, and `:276` maps 120 to `STATUS_NOT_AUTHORIZED`.
+So D10's masking covers the removal path as well as the add path, and both were measured
+rather than inferred — see D10's entry. The engine cannot reach `:3189` in ordinary
+operation, because `_delta` (`src/bzr_live/replay/actions.py:119-123`) computes removals from
+*observed* state and so never names a group the bug is not in.
 
 So a declared `groups` update by an actor outside the group is refused **before any
 mutation** — which is the boundary holding, not leaking — and the residual is only that D10

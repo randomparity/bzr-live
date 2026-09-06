@@ -26,11 +26,27 @@ fixture could not accept a `groups` write at all — `group_control_map` held no
 removing the refusal would have traded `AGENTS.md`'s fail-before-mutating rule for a
 mid-replay failure. Issue #34 closed that in the fixture where `AGENTS.md` says such a gap
 belongs: `scenarios/smoke/resources.json` declares `restricted` settable on `checkout` and
-`billing`, the admin bridge writes the `group_control_map` row, and
-`PUT /rest/bug/4 {"groups":{"add":["restricted"]}}` answers
-`"changes":{"groups":{"removed":"","added":"restricted"}}` (finding G11, ADR 0013). The
-declared payload can now execute, so the refusal is removed on that strength rather than in
-spite of it.
+`billing`, and the admin bridge writes the `group_control_map` row (finding G11, ADR 0013).
+
+**#34 proved that over raw REST. This design proved the half #27 actually turns on — the
+`bzr` client path — and it had not been run by anyone.** Measured at the floor
+`bzr 0.8.3-dev (63abb94e)` against a fixture built from this branch, freshly installed and
+provisioned from `scenarios/smoke`, as `admin-ops`; the image under test was confirmed to be
+the tree under review first (`containers/bugzilla/bridge.pl` and the in-container
+`/usr/local/bin/bzr-live-bridge` both `3bd69de6b659…`):
+
+| Probe | Result |
+|---|---|
+| `bug update --groups-add=restricted -- 1` | exit 0, `"action": "updated"` |
+| `bug view --fields=id,groups -- 1` | `{"id":1,"groups":["restricted"]}` |
+| `bug_group_map` | one row, bug 1 → `restricted` |
+| `bug update --groups-remove=restricted -- 1` | exit 0, `"action": "updated"` |
+| `bug view --fields=id,groups -- 1` | `{"id":1,"groups":[]}`; `bug_group_map` back to 0 rows |
+
+Both flags this design adds to `build` therefore work at the floor against a real Bugzilla,
+and the read-back the reconciliation rests on returns the real value on the default
+transport. The declared payload can execute, so the refusal is removed on that strength
+rather than in spite of it.
 
 `docs/adr/0006` carries the same stale premise twice — in its refusal list (line 149) and
 in the rejected alternative "Apply a declared `groups` set on update as adds only"
@@ -288,9 +304,10 @@ ADR records in full.
 - **Bugzilla will refuse anyone else.** On the update path `add_group`
   (`Bugzilla/Bug.pm:3162-3167`) throws `group_restriction_not_allowed` for a caller outside
   the group; `remove_group` refuses the same caller at `:3205-3211` under a *different* error,
-  `group_invalid_removal`. Both refusals are pre-mutation, so nothing is half-applied — but by
-  finding D10 the add refusal reaches the operator as 410 "You must log in" rather than as
-  error 120, and the removal refusal's api code has not been observed. (`_check_groups` at
+  `group_invalid_removal`. Both refusals are pre-mutation, so nothing is half-applied — and
+  both reach the operator as finding D10's 410 "You must log in", because
+  `WebService/Constants.pm:144-145` gives the two errors the same wire code 120 and `:276`
+  maps 120 to `STATUS_NOT_AUTHORIZED`. Measured on both paths. (`_check_groups` at
   `:1851-1887` admits a non-member here, but it is the *create*-time validator only,
   registered at `VALIDATORS` `:122`, and it admits one only because #34's `group_control_map`
   rows carry `othercontrol = CONTROLMAPSHOWN`. The ADR carries the full derivation.)
