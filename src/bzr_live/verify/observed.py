@@ -12,6 +12,16 @@ from . import ReadNotFound, VerifyError
 # bound is checked against the declared graph rather than trusted at read time.
 LINKS_MAX_NODES = 1000
 
+# bzr's ceiling on --depth, declared by clap as `value_parser!(u32).range(1..=10)` on
+# LinksArgs::depth (src/cli/bug/links.rs:30-38 at 63abb94e). Above it bzr rejects the
+# argument and exits 2 -- the same status it uses for not-found, which BzrClient.read maps
+# to absent. An out-of-range depth would therefore arrive at the verifier indistinguishable
+# from a missing bug, and on a group-restricted bug Verifier._links would report it as
+# finding D12. Bounded against the declared graph before any read, so that argument is never
+# constructed; measured: `bug links --recursive --depth=11 -- 1` exits 2 with "11 is not in
+# 1..=10".
+LINKS_MAX_DEPTH = 10
+
 # The explicit field list every bug read requests. Without it `bzr bug view` omits every
 # cf_* field; with it, `bug view 1 --fields id,summary,cf_risk` returns them. Requesting
 # a field bzr does not know costs only a stderr warning, so the list stays declarative.

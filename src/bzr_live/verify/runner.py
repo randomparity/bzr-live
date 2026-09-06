@@ -24,7 +24,7 @@ from .expected import (
     link_edges,
     reachable,
 )
-from .observed import LINKS_MAX_NODES, VIEW_FIELDS, ServerReader
+from .observed import LINKS_MAX_DEPTH, LINKS_MAX_NODES, VIEW_FIELDS, ServerReader
 
 
 # Finding D12 (bzr#719), printed when a group restriction is why a links read was refused.
@@ -103,14 +103,29 @@ def resolve_ids(scenario: ValidatedScenario, store: JournalStore) -> dict[str, i
 
 
 def check_link_bound(expected: ExpectedScenario) -> None:
+    """Both of bzr's link-walk ceilings, against the declared graph, before any read.
+
+    The node bound protects a silent truncation; the depth bound protects a misdiagnosis.
+    An out-of-range `--depth` is a clap usage error exiting 2, which is the same status
+    bzr uses for not-found, so it would reach `_links` as an absent bug and -- on a
+    restricted one -- be reported as finding D12. Refusing here means that argument is
+    never built.
+    """
     edges = link_edges(expected.bugs)
     for alias in expected.bugs:
-        count = len(reachable(edges, alias))
+        hops = reachable(edges, alias)
+        count = len(hops)
         if count > LINKS_MAX_NODES:
             raise VerifyError(
                 f"bug {alias!r} reaches {count} bugs, above bzr's LINKS_MAX_NODES of "
                 f"{LINKS_MAX_NODES}; a recursive walk would truncate and the "
                 "verification would be incomplete")
+        depth = max(hops.values(), default=0)
+        if depth > LINKS_MAX_DEPTH:
+            raise VerifyError(
+                f"bug {alias!r} reaches {depth} hops, above bzr's --depth ceiling of "
+                f"{LINKS_MAX_DEPTH}; bzr would reject the walk as a usage error, which "
+                "exits 2 and is indistinguishable from an absent bug")
 
 
 def check_comment_transport(alias: str, bug: ExpectedBug, comments: list) -> None:

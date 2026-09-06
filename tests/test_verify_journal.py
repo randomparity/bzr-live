@@ -21,7 +21,12 @@ from bzr_live.scenario import (
 )
 from bzr_live.verify import VerifyError
 from bzr_live.verify.expected import ExpectedBug, ExpectedComment, ExpectedScenario, fold
-from bzr_live.verify.observed import LINKS_MAX_NODES, VIEW_FIELDS, ServerReader
+from bzr_live.verify.observed import (
+    LINKS_MAX_DEPTH,
+    LINKS_MAX_NODES,
+    VIEW_FIELDS,
+    ServerReader,
+)
 from bzr_live.verify.runner import (
     Verifier,
     check_comment_transport,
@@ -70,6 +75,22 @@ def _star(leaves: int) -> ExpectedScenario:
     bugs = {"root": _bug("root", edges={"depends_on": frozenset(names)})}
     for name in names:
         bugs[name] = _bug(name, edges={"blocks": frozenset({"root"})})
+    return ExpectedScenario(
+        bugs=bugs, insider="admin-ops", outsider="triager", custom_field_keys=(),
+        actor_emails={})
+
+
+def _chain(hops: int) -> ExpectedScenario:
+    """A path graph whose first bug's eccentricity is `hops`, with both inverse edges."""
+    names = [f"link-{index}" for index in range(hops + 1)]
+    bugs = {}
+    for index, name in enumerate(names):
+        edges = {}
+        if index + 1 < len(names):
+            edges["depends_on"] = frozenset({names[index + 1]})
+        if index:
+            edges["blocks"] = frozenset({names[index - 1]})
+        bugs[name] = _bug(name, edges=edges)
     return ExpectedScenario(
         bugs=bugs, insider="admin-ops", outsider="triager", custom_field_keys=(),
         actor_emails={})
@@ -195,6 +216,21 @@ class LinkBoundTest(unittest.TestCase):
         self.assertIn("'root'", message)
         self.assertIn(str(LINKS_MAX_NODES + 1), message)
         self.assertIn(f"LINKS_MAX_NODES of {LINKS_MAX_NODES}", message)
+
+    def test_a_chain_at_the_depth_ceiling_passes(self) -> None:
+        self.assertIsNone(check_link_bound(_chain(LINKS_MAX_DEPTH)))
+
+    def test_a_chain_past_the_depth_ceiling_is_refused_before_any_read(self) -> None:
+        # bzr's --depth is clap-bounded 1..=10 and rejects anything above it with exit 2 --
+        # the status BzrClient.read reads as absent. Unbounded, `_one_bug` would build that
+        # argument from the declared graph and the refusal would arrive at `_links` as a
+        # missing bug, which on a restricted one is reported as finding D12.
+        with self.assertRaises(VerifyError) as caught:
+            check_link_bound(_chain(LINKS_MAX_DEPTH + 1))
+        message = str(caught.exception)
+        self.assertIn("'link-0'", message)
+        self.assertIn(f"--depth ceiling of {LINKS_MAX_DEPTH}", message)
+        self.assertIn("indistinguishable from an absent bug", message)
 
 
 class CommentTransportTest(unittest.TestCase):
