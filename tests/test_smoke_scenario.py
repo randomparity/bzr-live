@@ -29,6 +29,13 @@ test keeps being trusted for a reason it does not earn:
   at all, and a reader that cannot open the bug every check reads through. Each
   states its own reason where it is written.
 
+  **All three assert nothing today**, and the accounting says so rather than
+  letting a green run imply coverage: no scenario declares a bug `groups` value, so
+  each iterates an empty set. Issue #42 wrote one and it was held back, because the
+  live tier cannot verify a restricted bug while finding D12 stands (ADR 0015).
+  They are here so the first scenario to declare one is checked at `make test`
+  rather than partway through a replay -- which is how all three were found.
+
 See docs/workflow/specs/2026-09-01-smoke-scenario-design.md, "Proof".
 """
 
@@ -50,7 +57,7 @@ SCENARIO = Path(__file__).resolve().parent.parent / "scenarios" / "smoke"
 # Pinned so that editing the fixture is a deliberate two-file change. Every edit
 # changes this digest and invalidates any journal written against the old content
 # (ADR 0006), which is the consequence ADR 0007 records and this constant enforces.
-EXPECTED_DIGEST = "832bc5a1049e116976be79f8d2d9a02fdbe896bc3f3aed68521bbf687af1fec1"
+EXPECTED_DIGEST = "d91d3d34659ac72e209b5b3675aa6317624ee9f9c2ade8f4bd7880f8cd9dd8f5"
 
 # The chain and the diamond, named once so a topology edit fails here rather than
 # in a test body that reads like an incantation.
@@ -230,19 +237,6 @@ class SmokeScenarioTest(unittest.TestCase):
         self.assertIn(
             "CONFIRMED", statuses[resolved + 1:],
             f"no resolved-to-open transition in {statuses}")
-
-    def test_a_bug_group_restriction_is_declared(self):
-        """Issue #42: the groups write path is only proven live if something declares it.
-
-        The contract accepts `groups` on both bug payloads and the verifier folds it as
-        an asserted field, but a path no scenario declares is exercised by the unit
-        suite alone -- and `scenarios/smoke/` is the one CI replays against a real
-        Bugzilla.
-        """
-        self.assertTrue(
-            self._restricted_bugs(),
-            "no event declares a bug 'groups' value, so no live run drives the groups "
-            "write path")
 
     def test_every_handler_action_is_exercised(self):
         self.assertEqual({event.action for event in self.scenario.events}, set(HANDLERS))

@@ -158,21 +158,28 @@ scenario. A finding may instead be
 path; those are counted, printed with their reason, and do not fail the run. Each one is
 recorded in [docs/bzr-findings.md](docs/bzr-findings.md) or against a tracking issue.
 
+One narrow class refuses instead of being waived: a read blocked by a `bzr` defect this
+repository has filed. Today that is a group-restricted bug's `bug links` read, which
+finding [D12](docs/bzr-findings.md#d12) makes report the bug as absent. `verify` stops and
+names the defect and its upstream issue rather than reporting an unverifiable claim.
+[ADR 0015](docs/adr/0015-unreadable-declared-value-fails-the-run.md) records why, and what
+retires it. Nothing triggers it at present — no committed scenario declares a bug group.
+
 Smoke scenario
 --------------
 
 `scenarios/smoke/` is the committed 20-bug scenario. It spans two products and four
-components with five actors, and its 48 events exercise every supported action: a
+components with five actors, and its 47 events exercise every supported action: a
 cross-product dependency chain three deep, a diamond spanning both products, a duplicate
 pair, a reopening cycle, public and private comments, attachments with an obsolescence,
-flags with and without a requestee, work time, keywords, milestones, a bug restricted to a
-group, and text, single-select and multi-select custom fields.
+flags with and without a requestee, work time, keywords, milestones, and text,
+single-select and multi-select custom fields.
 
 Two tiers prove it. The offline tier needs no server and runs with the rest of the suite:
 
     uv run --python 3.11 python -m unittest tests.test_smoke_scenario
 
-Fifteen assertions cover the topology and coverage invariants, including the scenario
+Fourteen assertions cover the topology and coverage invariants, including the scenario
 digest, which is pinned so that editing the fixture is a deliberate change. Six are guards:
 the insider group behind private comments, the 255-byte attachment summary ceiling, the rule
 that any create declaring an assignee or a dependency edge is filed by an actor declaring
@@ -183,6 +190,11 @@ failures a live run would raise anyway into a container-free run; only the third
 substitution Bugzilla makes silently, and on this image even that is unreachable, because
 stock Bugzilla grants `editbugs` to every account by regexp. The offline tier's value is
 speed and no Docker, not extra reach.
+
+The three group guards assert nothing today, because no scenario declares a bug `groups`
+value and each iterates an empty set. They are here so the first one that does is checked
+without a container. [ADR 0015](docs/adr/0015-unreadable-declared-value-fails-the-run.md)
+records why none declares one yet.
 
 The live tier runs ten stages against the running fixture:
 
@@ -227,55 +239,31 @@ So `5fb99362` is where the D6 defect stops, not a floor this repository has evid
 `bzr` revision as its first line for this reason — the same scenario passes or fails on that
 revision alone.
 
-Observed: **48 events replayed in 75.62s**, against a fixture reset immediately beforehand.
-Measured on Apple M5 Max, macOS (Darwin 25.6.0, arm64), Docker 29.7.2, with
-`bzr 0.8.3-dev (63abb94e)`. Provisioning the 29 resources and `make up` are separate
-intervals and are not included.
+Observed: **47 events replayed in 72.80s**, then **69 checks verified in 56.94s**, and after
+the checkpoint round trip the same **69 checks re-verified in 59.02s** — every run reporting
+0 divergences and 4 unverifiable claims. Each figure covers its own stage alone, excluding
+provisioning and `make up`. Measured on Apple M5 Max, macOS (Darwin 25.6.0, arm64), Docker
+29.7.2, with `bzr 0.8.3-dev (63abb94e)`, against a fixture reset immediately beforehand.
+Provisioning the 28 resources, `make up`, and the checkpoint save and restore are each
+separate intervals and are not included.
 
-**The stages after replay have no current figure, and that is finding
-[D12](docs/bzr-findings.md#d12).** Since the scenario began declaring a bug group, `verify`
-refuses at `bug links` on the restricted bug — `bzr` reads links through Bugzilla's search
-endpoint, which hides a bug the caller cannot see instead of faulting — so the run stops
-there and the seven stages after it do not execute. The refusal is deliberate: it names the
-defect and its upstream issue, and is neither waived nor routed around. The figures taken
-before it, describing the 47-event scenario, were 47 events replayed in 72.80s, 69 checks
-verified in 56.94s, and 69 checks re-verified in 59.02s after the checkpoint round trip, each
-reporting 0 divergences and 4 unverifiable claims. Those are history rather than a current
-measurement, and they return when `bzr#719` is fixed.
-
-Every figure here was produced under `/bin/bash` 3.2.57, which `make smoke` resolves from
+Those figures were produced under `/bin/bash` 3.2.57, which `make smoke` resolves from
 `PATH` on this machine. Ordinary failures propagate correctly there — issue #20's run was
 proven to bite, a server-side summary edit producing exit 1 and restoring it exit 0 — but
 before the sentinel above, a fatal expansion error under `set -u` would have been
 indistinguishable from success. Nothing indicates one occurred.
 
-The four unverifiable claims the fold declares are `cart-double-charge`'s `estimated_hours`
-(finding D8) and `remaining_hours` (PR #23), and the work-time hours on the two bugs that log
-any (issue #22). Every other declared value on all 20 bugs is asserted — subject to D12, which
-stops the run before those assertions are reached.
+The four unverifiable claims are `cart-double-charge`'s `estimated_hours` (finding D8) and
+`remaining_hours` (PR #23), and the work-time hours on the two bugs that log any
+(issue #22). Every other declared value on all 20 bugs is asserted.
 
 The live tier proves both that the parts compose and that the state they leave behind is
-the one the scenario declares — up to D12, which currently stops it after replay.
-
-Be precise about what that leaves. The replay stage still proves the whole write path,
-including the group restriction: all 48 events execute against a real Bugzilla. The verify
-stage proves nothing at present, and not only for the restricted bug. `Verifier.run` prints
-its findings only after every read has returned, so the refusal discards the findings already
-collected — the restricted bug's `groups` comparison among them — and `pay-refund-rounding` is
-the eleventh of twenty bugs in fold order, so the nine after it are never read at all. This is
-not a false green: the run exits non-zero either way. It does mean the only live evidence that
-`bug view` reads `groups: ["restricted"]` back, and that `bug history` carries the change
-attributed to `admin-ops`, is the hand-run table in
-[D12](docs/bzr-findings.md#d12) — measured once at `63abb94e`, not asserted by `make smoke`.
+the one the scenario declares.
 
 **It is now a merge gate.** `Container lifecycle`'s `x86_64-linux` job compiles `bzr` at the
 pinned revision above and runs this same `make smoke` on every pull request touching
 `scenarios/`, the containers, the compose file, the lifecycle or checkpoint scripts,
-`tests/smoke_scenario.sh`, or this file — and, on the same path list, on every push to `main`.
-**Both arms are red while D12 stands**, `main`'s own run included, and the job's
-`make checkpoint-smoke` step never reaches execution because it follows `make smoke` and
-carries no `if: always()`. [ADR 0015](docs/adr/0015-unreadable-declared-value-fails-the-run.md)
-records that cost and why it was accepted. The offline tier gained the same reach: both
+`tests/smoke_scenario.sh`, or this file. The offline tier gained the same reach: both
 workflows now name `scenarios/**`, so a pull request editing only a fixture file runs the
 jobs that prove it. Response-loss fault injection is a separate offline suite
 (`tests/test_fault_injection.py`).

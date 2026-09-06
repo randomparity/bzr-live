@@ -30,6 +30,16 @@ unauthenticated and `links.rs` reports the root absent — to a caller that `bug
 same bug to, in the same run. `Verifier._read_all` reads every bug's topology unconditionally,
 so **any** scenario declaring a bug group meets this.
 
+**That scenario data was then held back, and this rule ships unexercised.** Priced honestly,
+the cost was larger than the decision that authorized it had assumed: `make smoke` gates on
+`pull_request` *and* on `push: branches: [main]`, so declaring a group would have turned the
+default branch red for every later push touching those paths, and would have stopped CI's
+checkpoint round trip with it. `scenarios/smoke` therefore declares no bug group, issue #42
+stays open, and nothing triggers the rule below today. The rule is recorded now rather than
+when a scenario first needs it, because the reasoning belongs with the code that implements
+it — and because a reader of ADR 0008 must be able to find out that its disposition no longer
+holds everywhere, whether or not anything currently exercises the difference.
+
 Issue #59 sets the repository's direction on exactly this question. Its Notes say what this
 record follows: *"This issue makes the fixture **fail loudly**, not compensate."* That is
 `AGENTS.md`'s rule applied to the verifier, and it is the ground this decision stands on.
@@ -84,27 +94,33 @@ in this repository at all.
 
 ## Consequences
 
-- **`make smoke` is red for every run of it, on both CI arms, until upstream moves.**
+- **Nothing changes today.** No committed scenario declares a bug group, so the refusal is
+  unreachable and `make smoke` stays green. The consequences below are what happens the first
+  time one does — which is why the scenario data was held back, and why they are stated here
+  in full rather than discovered then.
+- **The cost ADR 0008 predicted is deferred, not avoided.** When a scenario declares a group,
+  `make smoke` goes red for every run of it, on **both** CI arms:
   `.github/workflows/container-lifecycle.yml` triggers on `pull_request` **and** on
   `push: branches: [main]`, over the same path list — `scenarios/**`, the containers, the
   compose file, `Makefile`, the lifecycle and checkpoint scripts, `tests/smoke_scenario.sh`,
-  and `README.md`. So merging this branch turns the **default branch's own** `Container
-  lifecycle` run red, and keeps it red for every later push touching those paths. A red check
-  on a pull request and a red `main` are different signals: the second is what a maintainer, a
-  status badge, and anyone bisecting reads as "the repository is broken". A genuine
-  replay-engine regression in a later pull request produces the same red as this one, and a
-  reader cannot tell them apart from the job's status alone. This is precisely what ADR 0008
-  predicted, and it has been accepted rather than disputed.
-- **CI's checkpoint round trip stops running.** In that job, `Exercise checkpoint round trip`
-  (`make checkpoint-smoke`) is the step *after* `Exercise the live scenario smoke path`, and
-  only `Clean project resources` carries `if: always()`. Once `make smoke` fails, the
-  checkpoint step never executes, so this decision costs the save/restore coverage as well as
-  the verify coverage. `make checkpoint-smoke` still runs locally.
-- **The verify stage asserts nothing while this stands.** `Verifier.run` prints its findings
-  only after every read returns, so the refusal unwinds `_read_all` and discards the findings
-  already collected — including the restricted bug's own `groups` comparison. The restricted
-  bug is the eleventh of twenty in fold order, so the nine after it are never read. Against
-  `main`, where verify reported 69 checks over 20 bugs, this is a loss and not merely a pause.
+  and `README.md`. So the **default branch's own** `Container lifecycle` run goes red and
+  stays red for every later push touching those paths. A red check on a pull request and a red
+  `main` are different signals: the second is what a maintainer, a status badge, and anyone
+  bisecting reads as "the repository is broken". A genuine replay-engine regression would
+  produce the same red, indistinguishable from the job's status alone. That is exactly what
+  ADR 0008's rejected entry described, and pricing it is what moved the scenario data out of
+  this change.
+- **CI's checkpoint round trip would stop running with it.** In that job,
+  `Exercise checkpoint round trip` (`make checkpoint-smoke`) is the step *after*
+  `Exercise the live scenario smoke path`, and only `Clean project resources` carries
+  `if: always()`. Once `make smoke` fails, the checkpoint step never executes, so the cost
+  includes the save/restore coverage, not only the verify coverage.
+- **And the verify stage would assert nothing while it stood.** `Verifier.run` prints its
+  findings only after every read returns, so the refusal unwinds `_read_all` and discards the
+  findings already collected — including the restricted bug's own `groups` comparison — and
+  every bug after it in fold order goes unread. Measured on the reverted-out scenario: the
+  restricted bug was eleventh of twenty, so nine were never read, against a `main` that
+  reports 69 checks over 20 bugs.
 - Nothing silently passes. The exit status is non-zero on either disposition, so no green run
   is produced that would not have been produced before.
 - The refusal's message is the operator's whole diagnosis: it names the finding, the upstream
@@ -152,11 +168,15 @@ in this repository at all.
 - **Narrow the CI trigger so `make smoke` stops gating the affected paths.** judgment: it
   converts a visible cost into an invisible one and removes the gate the repository relies on
   for every other assertion. Explicitly withheld by the operator.
-- **Wait for `bzr#719` before declaring a bug group in any scenario.** judgment: the write path
-  is what issue #42 exists to prove, it works, and it is proven live — 48 events replayed, the
-  restriction applied through `bzr bug update --groups-add`, and the value read back by hand
-  through `bug view` and `bug history`. Withholding the scenario would leave that unproven for
-  as long as an upstream fix takes, to buy back a gate this record has already accounted for.
+- **Ship the rule *and* the scenario data together, accepting a red gate now.** judgment, and
+  the one this record reversed. It was the original decision, taken when the cost was
+  understood as "this pull request's live arm is red". Repriced against the `push: branches:
+  [main]` arm and the checkpoint step, the operator withdrew it on 2026-09-06: the same gate
+  would have been red for every unrelated pull request touching those paths, and for `main`
+  itself. Deferring the scenario costs nothing that this branch proves — the write path was
+  exercised live before the data was reverted out, and that evidence is preserved in
+  [D12](../bzr-findings.md#d12) — and it moves the red to whenever a scenario genuinely needs
+  a bug group, by which time upstream may have closed `bzr#719`.
 - **Amend ADR 0008 in place, or mark it superseded.** judgment: its rule still governs every
   unreadable value outside this class, so a supersession banner would overstate what changed.
   A narrow amending record leaves both readable.

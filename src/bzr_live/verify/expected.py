@@ -25,11 +25,11 @@ CHAIN_FIELDS = frozenset(
 # (PR #646, closing bzr#641). At 63abb94e, the floor README pins make smoke at, a
 # default-transport bug view returns [] for an unrestricted bug and the real member list
 # for a bug restricted to a group: the restricted read draws HTTP 401 and bzr's
-# alternate-auth retry recovers it. scenarios/smoke's restrict-refund-rounding declares one
-# (issue #42), so the fold does compare it against a live reply -- but make smoke does not
-# report the result yet: finding D12 stops the run at the same bug's links read, and run()
-# emits its findings only once every read has returned. The live evidence for the read-back
-# is the hand-run table at docs/bzr-findings.md#d12, not the automated tier.
+# alternate-auth retry recovers it. No scenarios/smoke bug declares one, so that assertion
+# still has unit coverage only. Issue #42 wrote one and it was held back rather than
+# abandoned: a restricted bug now stops the run at its own links read under finding D12, so
+# declaring one turns make smoke red until bzr#719 or bzr#713 lands (ADR 0015). What the
+# read-back does on a restricted bug is measured at docs/bzr-findings.md#d12.
 UNVERIFIABLE_FIELDS: Mapping[str, str] = {
     "remaining_hours":
         "Bugzilla decrements remaining_time by logged work, so the declared value is not "
@@ -46,12 +46,11 @@ UNVERIFIABLE_FIELDS: Mapping[str, str] = {
     # of it: there the 401 is raised for the whole read, so the same alternate-auth retry
     # that recovers groups authenticates, and the time fields return with the rest of the
     # bug. Measured at 63abb94e as an insider on a restricted bug: bug view carries
-    # estimated_time and remaining_time alongside groups. Three bugs in this repository
-    # are restricted -- scenarios/smoke's pay-refund-rounding (issue #42) and one in each
-    # of the verify-cc-order and verify-groups-update fixtures -- and none of the three
-    # declares a time field, so every bug this entry is reached for is anonymously
-    # readable and the general case is the one it states. A scenario that restricts a bug
-    # AND declares a time field on it would need this entry reworded.
+    # estimated_time and remaining_time alongside groups. The two restricted bugs in this
+    # repository are both in test fixtures -- verify-cc-order and verify-groups-update --
+    # and neither declares a time field, so every bug this entry is reached for is
+    # anonymously readable and the general case is the one it states. A scenario that
+    # restricts a bug AND declares a time field on it would need this entry reworded.
     "estimated_hours":
         "Bugzilla gates estimated_time on timetrackinggroup ('editbugs' here) and finding "
         "D8 leaves bzr's REST reads unauthenticated, so bug view returns no "

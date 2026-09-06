@@ -738,9 +738,14 @@ now would make those citations look retroactively correct; bzr-live#39 records t
 serves it to.** *Observed against a running fixture on 2026-09-06, provisioned and replayed
 from `scenarios/smoke` by `make smoke`, as `admin-ops` — a member of the restricting group,
 holding a valid API key. Reproduced identically at `bzr 0.8.3-dev (63abb94e)`, the revision
-`README.md` pins `make smoke` at, and at `bzr 0.9.0 (173772b3)`. Source read at `63abb94e`.*
+`README.md` pins `make smoke` at, and at `bzr 0.9.0 (173772b3)`. Source read at `63abb94e`.
+Reproduced independently on CI's `x86_64-linux` runner — GitHub-hosted Ubuntu, a fixture built
+from scratch, `bzr` compiled at the pinned revision — which rules out this host, this fixture
+instance, and this architecture as the cause.*
 
-`scenarios/smoke`'s `restrict-refund-rounding` restricts one bug to `restricted`. On that bug,
+Measured on a `scenarios/smoke` run carrying a `bug.update` that restricted one bug to
+`restricted` — the event issue #42 wrote and then held back, per the disposition below. On
+that bug,
 one read succeeds and another denies the bug exists:
 
 | Read, as `admin-ops` | Exit | Reply |
@@ -839,16 +844,19 @@ and argues the compounding: #713 leaves the read anonymous, and this entry makes
 links read indistinguishable from a deleted bug.
 
 **What the fixture does.** Refuses, naming this entry and `bzr#719` at the point of failure
-(`src/bzr_live/verify/runner.py`, `Verifier._links`). The verifier reads every bug's topology
-unconditionally, so any scenario declaring a bug group stops `verify` here whatever else it
-gets right; `scenarios/smoke` declares one, so `make smoke` — a merge gate — is red for every
-pull request that runs it until `bzr#719` is fixed. Worse, the refusal unwinds `Verifier.run`
-before it prints, so the verify stage reports no assertions at all while this stands. That
-cost was weighed and accepted rather than discovered: ADR 0008's *Considered & rejected*
-predicted it in terms ("a gate that is always red is a gate nobody reads") and declined this
-disposition, and [ADR 0015](adr/0015-unreadable-declared-value-fails-the-run.md) records the
-operator's decision of 2026-09-06 to accept that cost for this class, with issue #59 as the
-reason a waiver is now the worse direction.
+(`src/bzr_live/verify/runner.py`, `Verifier._links`) — and **no committed scenario triggers it
+today.** The verifier reads every bug's topology unconditionally, so any scenario declaring a
+bug group stops `verify` here whatever else it gets right, and the refusal unwinds
+`Verifier.run` before it prints, so the verify stage would report no assertions at all.
+
+Issue #42 wrote such a scenario, measured that cost, and held the data back rather than turning
+a merge gate red on both CI arms until upstream moves. That is not caution about an unproven
+risk: the scenario ran, on this fixture and again on CI's `x86_64-linux` runner, and both
+stopped here.
+[ADR 0015](adr/0015-unreadable-declared-value-fails-the-run.md) records the decision, the cost
+ADR 0008's *Considered & rejected* predicted in exactly these terms — "a gate that is always
+red is a gate nobody reads" — and the condition that retires it. The rule is latent: it fires
+the first time a scenario genuinely needs a bug group.
 
 The refusal retires itself: when the read succeeds the rewrite never fires, so nothing here
 has to be removed. Two alternatives were rejected. Routing the links reads through
