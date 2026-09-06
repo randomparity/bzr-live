@@ -5,12 +5,22 @@ from collections.abc import Sequence
 from ..provision.adapters import BUG_ABSENT_CODES
 from ..replay.context import ReplayContext
 from ..scenario import Reference
-from . import VerifyError
+from . import ReadNotFound, VerifyError
 
 # bzr's own ceiling on a recursive link walk (src/types/bug/links.rs:13). Above it the
 # walk truncates and warns on stderr, which BzrClient.read discards on exit 0, so the
 # bound is checked against the declared graph rather than trusted at read time.
 LINKS_MAX_NODES = 1000
+
+# bzr's ceiling on --depth, declared by clap as `value_parser!(u32).range(1..=10)` on
+# LinksArgs::depth (src/cli/bug/links.rs:30-38 at 63abb94e). Above it bzr rejects the
+# argument and exits 2 -- the same status it uses for not-found, which BzrClient.read maps
+# to absent. An out-of-range depth would therefore arrive at the verifier indistinguishable
+# from a missing bug, and on a group-restricted bug Verifier._links would report it as
+# finding D12. Bounded against the declared graph before any read, so that argument is never
+# constructed; measured: `bug links --recursive --depth=11 -- 1` exits 2 with "11 is not in
+# 1..=10".
+LINKS_MAX_DEPTH = 10
 
 # The explicit field list every bug read requests. Without it `bzr bug view` omits every
 # cf_* field; with it, `bug view 1 --fields id,summary,cf_risk` returns them. Requesting
@@ -59,7 +69,11 @@ class ServerReader:
         payload = self._client.read(args, positionals=positionals,
                                     absent_codes=absent_codes)
         if payload is None:
-            raise VerifyError(
+            # ReadNotFound, not a bare VerifyError: a caller that can explain why an
+            # object was not found must be able to select this case without also
+            # catching the unrecognised-shape refusals below, which say nothing about
+            # whether the object exists.
+            raise ReadNotFound(
                 f"{' '.join(args)} {' '.join(positionals)} as {self._actor} reported "
                 "not-found; the journal names a bug the fixture does not hold")
         return payload

@@ -21,7 +21,12 @@ from bzr_live.scenario import (
 )
 from bzr_live.verify import VerifyError
 from bzr_live.verify.expected import ExpectedBug, ExpectedComment, ExpectedScenario, fold
-from bzr_live.verify.observed import LINKS_MAX_NODES, VIEW_FIELDS, ServerReader
+from bzr_live.verify.observed import (
+    LINKS_MAX_DEPTH,
+    LINKS_MAX_NODES,
+    VIEW_FIELDS,
+    ServerReader,
+)
 from bzr_live.verify.runner import (
     Verifier,
     check_comment_transport,
@@ -70,6 +75,22 @@ def _star(leaves: int) -> ExpectedScenario:
     bugs = {"root": _bug("root", edges={"depends_on": frozenset(names)})}
     for name in names:
         bugs[name] = _bug(name, edges={"blocks": frozenset({"root"})})
+    return ExpectedScenario(
+        bugs=bugs, insider="admin-ops", outsider="triager", custom_field_keys=(),
+        actor_emails={})
+
+
+def _chain(hops: int) -> ExpectedScenario:
+    """A path graph whose first bug's eccentricity is `hops`, with both inverse edges."""
+    names = [f"link-{index}" for index in range(hops + 1)]
+    bugs = {}
+    for index, name in enumerate(names):
+        edges = {}
+        if index + 1 < len(names):
+            edges["depends_on"] = frozenset({names[index + 1]})
+        if index:
+            edges["blocks"] = frozenset({names[index - 1]})
+        bugs[name] = _bug(name, edges=edges)
     return ExpectedScenario(
         bugs=bugs, insider="admin-ops", outsider="triager", custom_field_keys=(),
         actor_emails={})
@@ -195,6 +216,21 @@ class LinkBoundTest(unittest.TestCase):
         self.assertIn("'root'", message)
         self.assertIn(str(LINKS_MAX_NODES + 1), message)
         self.assertIn(f"LINKS_MAX_NODES of {LINKS_MAX_NODES}", message)
+
+    def test_a_chain_at_the_depth_ceiling_passes(self) -> None:
+        self.assertIsNone(check_link_bound(_chain(LINKS_MAX_DEPTH)))
+
+    def test_a_chain_past_the_depth_ceiling_is_refused_before_any_read(self) -> None:
+        # bzr's --depth is clap-bounded 1..=10 and rejects anything above it with exit 2 --
+        # the status BzrClient.read reads as absent. Unbounded, `_one_bug` would build that
+        # argument from the declared graph and the refusal would arrive at `_links` as a
+        # missing bug, which on a restricted one is reported as finding D12.
+        with self.assertRaises(VerifyError) as caught:
+            check_link_bound(_chain(LINKS_MAX_DEPTH + 1))
+        message = str(caught.exception)
+        self.assertIn("'link-0'", message)
+        self.assertIn(f"--depth ceiling of {LINKS_MAX_DEPTH}", message)
+        self.assertIn("indistinguishable from an absent bug", message)
 
 
 class CommentTransportTest(unittest.TestCase):
@@ -525,6 +561,70 @@ class VerifierRunTest(_JournalFixture):
         self.assertEqual([line for line in self.out if marker in line], [])
         # The visibility family still runs and still proves the outsider cannot see it.
         self.assertEqual(self.out[-1], "verify: 6 checks, 0 divergences, 3 unverifiable")
+
+    def _verifier(self, replies):
+        """A Verifier over canned replies, returned unrun so the fold can be substituted."""
+        context = ReplayContext(
+            self.scenario, self.keys, bzr_path="bzr",
+            base_url="http://127.0.0.1:8080/", workspace=self.workspace,
+            run=_FakeRun(replies))
+        return Verifier(self.scenario, context, self.store, str(FIXTURE), self.keys,
+                        out=self.out.append)
+
+    # `bug view` and `bug history` answer, then the `bug links` read exits 2 -- which is
+    # what bzr returns for the search reply that came back empty (finding D12).
+    LINKS_REFUSED = [(0, BUG_VIEW_41, None), (0, HISTORY_41, None), (2, None, None)]
+
+    def test_a_restricted_bug_whose_links_read_is_refused_names_d12(self) -> None:
+        # D12: bzr reads links through Bugzilla's search endpoint, which filters a bug
+        # the caller cannot see into an empty 200, so the read reports not-found for a
+        # bug the caller demonstrably can read -- `bug view` served it two replies
+        # earlier in this same sequence. The refusal has to say that, because
+        # ServerReader's own message blames the journal for naming a bug the fixture
+        # does not hold, which is exactly backwards here.
+        verifier = self._verifier(self.LINKS_REFUSED)
+        bug = self.expected.bugs["checkout-race"]
+        # Same device, and the same reason, as the private-comment case above: the
+        # committed scenarios that declare a group would either change a shared digest
+        # or import a fixture this file is not written against.
+        verifier._expected = replace(self.expected, bugs={"checkout-race": replace(
+            bug, names={**bug.names, "groups": frozenset({"restricted"})})})
+        with self.assertRaises(VerifyError) as caught:
+            verifier.run()
+        message = str(caught.exception)
+        self.assertIn("D12", message)
+        self.assertIn("bzr#719", message)
+        self.assertIn("'checkout-race'", message)
+        self.assertIn("restricted", message)
+        self.assertNotIn("the fixture does not hold", message)
+
+    def test_a_restricted_bug_whose_links_reply_is_malformed_is_not_d12(self) -> None:
+        # The other half of the narrowing. `ServerReader` raises for an unrecognised
+        # reply shape too, and that says nothing about whether the bug is visible.
+        # Calling it D12 would reintroduce the misattribution `_links` exists to
+        # remove -- and would keep doing so after bzr#719 is closed, because the shape
+        # refusal has nothing to do with the defect.
+        verifier = self._verifier(
+            [(0, BUG_VIEW_41, None), (0, HISTORY_41, None), (0, {"not": "a list"}, None)])
+        bug = self.expected.bugs["checkout-race"]
+        verifier._expected = replace(self.expected, bugs={"checkout-race": replace(
+            bug, names={**bug.names, "groups": frozenset({"restricted"})})})
+        with self.assertRaises(VerifyError) as caught:
+            verifier.run()
+        message = str(caught.exception)
+        self.assertIn("unrecognised shape", message)
+        self.assertNotIn("D12", message)
+
+    def test_an_unrestricted_bug_whose_links_read_is_refused_is_not_d12(self) -> None:
+        # The narrowing that keeps the message honest. With no group declared, a
+        # not-found links read is the ordinary absent-bug case and keeps ServerReader's
+        # own wording; claiming D12 there would send a reader to an upstream defect for
+        # a fixture that genuinely lost the bug.
+        with self.assertRaises(VerifyError) as caught:
+            self._verifier(self.LINKS_REFUSED).run()
+        message = str(caught.exception)
+        self.assertIn("the fixture does not hold", message)
+        self.assertNotIn("D12", message)
 
     def test_a_journal_resolving_no_id_for_a_bug_fails_with_a_message(self) -> None:
         # Every record is complete, so resolve_ids passes; only the create's resolved_ids

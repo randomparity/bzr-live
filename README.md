@@ -158,6 +158,13 @@ scenario. A finding may instead be
 path; those are counted, printed with their reason, and do not fail the run. Each one is
 recorded in [docs/bzr-findings.md](docs/bzr-findings.md) or against a tracking issue.
 
+One narrow class refuses instead of being waived: a read blocked by a `bzr` defect this
+repository has filed. Today that is a group-restricted bug's `bug links` read, which
+finding [D12](docs/bzr-findings.md#d12) makes report the bug as absent. `verify` stops and
+names the defect and its upstream issue rather than reporting an unverifiable claim.
+[ADR 0015](docs/adr/0015-unreadable-declared-value-fails-the-run.md) records why, and what
+retires it. Nothing triggers it at present — no committed scenario declares a bug group.
+
 Smoke scenario
 --------------
 
@@ -172,14 +179,22 @@ Two tiers prove it. The offline tier needs no server and runs with the rest of t
 
     uv run --python 3.11 python -m unittest tests.test_smoke_scenario
 
-Eleven assertions cover the topology and coverage invariants, including the scenario digest,
-which is pinned so that editing the fixture is a deliberate change. Three are guards: the
-insider group behind private comments, the 255-byte attachment summary ceiling, and the rule
+Fourteen assertions cover the topology and coverage invariants, including the scenario
+digest, which is pinned so that editing the fixture is a deliberate change. Six are guards:
+the insider group behind private comments, the 255-byte attachment summary ceiling, the rule
 that any create declaring an assignee or a dependency edge is filed by an actor declaring
-`editbugs`. The first two move failures that a live replay would raise anyway into a
-container-free run; only the third targets a substitution Bugzilla makes silently, and on
-this image even that is unreachable, because stock Bugzilla grants `editbugs` to every
-account by regexp. The offline tier's value is speed and no Docker, not extra reach.
+`editbugs`, and three around bug groups — that every actor touching a group-restricted bug
+holds that group, that such a bug declares no private comment, and that the actor the
+verifier reads back as holds every group any bug is restricted to. All but the third move
+failures a live run would raise anyway into a container-free run; only the third targets a
+substitution Bugzilla makes silently, and on this image even that is unreachable, because
+stock Bugzilla grants `editbugs` to every account by regexp. The offline tier's value is
+speed and no Docker, not extra reach.
+
+The three group guards assert nothing today, because no scenario declares a bug `groups`
+value and each iterates an empty set. They are here so the first one that does is checked
+without a container. [ADR 0015](docs/adr/0015-unreadable-declared-value-fails-the-run.md)
+records why none declares one yet.
 
 The live tier runs ten stages against the running fixture:
 

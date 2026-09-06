@@ -7,7 +7,7 @@ from dataclasses import replace
 from ..provision.keys import KeyStore
 from ..replay.context import ReplayContext
 from ..scenario import CompletedRecord, JournalStore, Reference, ValidatedScenario
-from . import Finding, VerifyError
+from . import Finding, ReadNotFound, VerifyError
 from .checks import (
     check_attachments,
     check_comments,
@@ -24,7 +24,23 @@ from .expected import (
     link_edges,
     reachable,
 )
-from .observed import LINKS_MAX_NODES, VIEW_FIELDS, ServerReader
+from .observed import LINKS_MAX_DEPTH, LINKS_MAX_NODES, VIEW_FIELDS, ServerReader
+
+
+# Finding D12 (bzr#719), printed when a group restriction is why a links read was refused.
+# Worded so a reader learns the cause and where it is filed, because ServerReader's own
+# message blames the journal for naming a bug the fixture does not hold -- the opposite of
+# what happened. No waiver and no transport swap: `--api xmlrpc` would make this read
+# succeed, and adopting it would leave `make smoke` green over a read bzr cannot perform on
+# its default transport, which is the compensation AGENTS.md forbids.
+LINKS_RESTRICTED = (
+    "bug {alias!r} is declared restricted to {groups} and `bzr bug links` reports it not "
+    "found, which is finding D12 (bzr#719). bzr reads links through Bugzilla's search "
+    "endpoint, which filters a bug the caller cannot see into an empty 200 rather than "
+    "faulting, so no status fires the alternate-auth retry -- the retry that recovered this "
+    "same bug for the `bug view` this run issued moments earlier. The fixture and the "
+    "scenario are both correct; the read is not available. This refusal retires itself when "
+    "bzr#719 is fixed, because the read will then succeed on its own")
 
 
 def check_reader_keys(expected: ExpectedScenario, keys: KeyStore) -> None:
@@ -87,14 +103,29 @@ def resolve_ids(scenario: ValidatedScenario, store: JournalStore) -> dict[str, i
 
 
 def check_link_bound(expected: ExpectedScenario) -> None:
+    """Both of bzr's link-walk ceilings, against the declared graph, before any read.
+
+    The node bound protects a silent truncation; the depth bound protects a misdiagnosis.
+    An out-of-range `--depth` is a clap usage error exiting 2, which is the same status
+    bzr uses for not-found, so it would reach `_links` as an absent bug and -- on a
+    restricted one -- be reported as finding D12. Refusing here means that argument is
+    never built.
+    """
     edges = link_edges(expected.bugs)
     for alias in expected.bugs:
-        count = len(reachable(edges, alias))
+        hops = reachable(edges, alias)
+        count = len(hops)
         if count > LINKS_MAX_NODES:
             raise VerifyError(
                 f"bug {alias!r} reaches {count} bugs, above bzr's LINKS_MAX_NODES of "
                 f"{LINKS_MAX_NODES}; a recursive walk would truncate and the "
                 "verification would be incomplete")
+        depth = max(hops.values(), default=0)
+        if depth > LINKS_MAX_DEPTH:
+            raise VerifyError(
+                f"bug {alias!r} reaches {depth} hops, above bzr's --depth ceiling of "
+                f"{LINKS_MAX_DEPTH}; bzr would reject the walk as a usage error, which "
+                "exits 2 and is indistinguishable from an absent bug")
 
 
 def check_comment_transport(alias: str, bug: ExpectedBug, comments: list) -> None:
@@ -213,6 +244,34 @@ class Verifier:
             check_comment_transport(bug.alias, bug, comments)
         return check_comments(bug, comments, emails)
 
+    def _links(self, bug: ExpectedBug, reader: ServerReader, bug_id: int,
+               depth: int | None = None) -> list:
+        """`bug links`, with finding D12 named when a group restriction is why it failed.
+
+        The attribution is established rather than guessed: `_one_bug` has already read
+        this same bug through `reader.bug` before reaching here, so a links read that
+        reports not-found is reporting it about a bug this actor has just been served.
+        `check_comment_transport` draws the same line, on the same kind of evidence.
+
+        A bug declaring no group keeps `ServerReader`'s own message, because there the
+        not-found is the ordinary absent-bug case and citing an upstream defect would
+        send the reader somewhere the cause is not.
+
+        Only `ReadNotFound` is rewritten. `ServerReader` also raises plain `VerifyError`
+        for a reply whose shape it does not recognise, which says nothing about whether
+        the bug is visible -- calling that D12 would reintroduce, in the other
+        direction, exactly the misattribution this method exists to remove, and would
+        keep doing so after bzr#719 is closed.
+        """
+        try:
+            return reader.links(bug_id, depth=depth)
+        except ReadNotFound:
+            groups = bug.names.get("groups")
+            if not groups:
+                raise
+            raise VerifyError(LINKS_RESTRICTED.format(
+                alias=bug.alias, groups=", ".join(sorted(groups)))) from None
+
     def _one_bug(self, bug: ExpectedBug, bug_id: int, reader: ServerReader,
                  outsider: ServerReader | None, alias_of: Mapping[int, str],
                  edges: frozenset[tuple[str, str, str]],
@@ -236,8 +295,8 @@ class Verifier:
         depth = max(hops.values(), default=0)
         recursive = depth >= 2
         findings += check_links(
-            bug.alias, edges, hops if recursive else {}, reader.links(bug_id),
-            reader.links(bug_id, depth=depth) if recursive else [], alias_of)
+            bug.alias, edges, hops if recursive else {}, self._links(bug, reader, bug_id),
+            self._links(bug, reader, bug_id, depth) if recursive else [], alias_of)
         executed += 1
         findings += self._comment_findings(bug, reader.comments(bug_id), emails)
         executed += 1

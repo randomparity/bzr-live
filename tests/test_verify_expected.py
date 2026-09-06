@@ -79,8 +79,17 @@ class FoldSmokeScenarioTest(unittest.TestCase):
         self.assertIn("timetrackinggroup", reason)
         self.assertIn("D8", reason)
 
-    def test_no_bug_declares_a_group_so_that_assertion_is_unit_covered_only(self) -> None:
+    def test_no_smoke_bug_declares_a_group_so_that_assertion_is_unit_covered_only(
+            self) -> None:
         # UNVERIFIABLE_FIELDS says so; this pins the claim rather than leaving it prose.
+        # It also pins the premise of the `estimated_hours` entry beside it: no smoke bug
+        # is restricted, so none forces the authenticated read that returns the time
+        # fields, and the anonymously-readable case that entry states is the only one.
+        #
+        # Issue #42 wrote a restriction here and it was held back rather than abandoned.
+        # The verifier now refuses a restricted bug's links read under finding D12, so
+        # declaring one turns `make smoke` red until bzr#719 or bzr#713 lands -- see
+        # ADR 0015. The fold arm stays covered by tests/fixtures/verify-groups-update.
         self.assertEqual(
             [alias for alias, bug in self.expected.bugs.items() if "groups" in bug.names],
             [])
@@ -146,8 +155,10 @@ class CcOrderingTest(unittest.TestCase):
     No smoke bug declares `cc` after a requestee flag, so the ordering rule -- a later
     declaration replaces the running set and drops the requestee, matching the
     `--cc-remove` the replay engine would compute -- is pinned on a fixture written for
-    it rather than left until a scenario happens to hit it. The same fixture carries the
-    only non-empty declared `groups` in the repository, for the same reason.
+    it rather than left until a scenario happens to hit it. The same fixture declares
+    `groups` at create time and never updates it, which is the arm `verify-groups-update`
+    cannot cover: its own create-time set exists only to be replaced by the update it is
+    written for. `scenarios/smoke/` reaches neither, declaring no bug group at all.
     """
 
     @classmethod

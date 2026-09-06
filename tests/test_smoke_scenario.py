@@ -1,6 +1,6 @@
 """Offline invariants over the committed smoke scenario (issue #19).
 
-These assertions run with no server and no Docker. Three are guards, and what each
+These assertions run with no server and no Docker. Six are guards, and what each
 one buys differs -- the honest accounting, because an overstated rationale is how a
 test keeps being trusted for a reason it does not earn:
 
@@ -21,6 +21,20 @@ test keeps being trusted for a reason it does not earn:
   every account is granted it automatically. The assertion tests the *declared*
   group set, which is the property the scenario controls, and it would bite if that
   regexp were ever cleared.
+- `test_group_restricted_bugs_are_only_touched_by_members`,
+  `test_group_restricted_bugs_declare_no_private_comment` and
+  `test_the_verifier_reader_holds_every_restricted_bugs_group` are the same *loud*
+  shift as the first guard, covering the three ways a declared bug group aborts a
+  live run: a Bugzilla refusal mid-replay, a visibility read that cannot be issued
+  at all, and a reader that cannot open the bug every check reads through. Each
+  states its own reason where it is written.
+
+  **All three assert nothing today**, and the accounting says so rather than
+  letting a green run imply coverage: no scenario declares a bug `groups` value, so
+  each iterates an empty set. Issue #42 wrote one and it was held back, because the
+  live tier cannot verify a restricted bug while finding D12 stands (ADR 0015).
+  They are here so the first scenario to declare one is checked at `make test`
+  rather than partway through a replay -- which is how all three were found.
 
 See docs/workflow/specs/2026-09-01-smoke-scenario-design.md, "Proof".
 """
@@ -36,6 +50,7 @@ from bzr_live.replay.actions import (
     render_attachment_summary,
 )
 from bzr_live.scenario import load_scenario
+from bzr_live.verify.expected import INSIDER_GROUP
 
 SCENARIO = Path(__file__).resolve().parent.parent / "scenarios" / "smoke"
 
@@ -122,6 +137,60 @@ class SmokeScenarioTest(unittest.TestCase):
     def _groups(self, actor_name):
         return {ref.name for ref in self.actors[actor_name].data["groups"]}
 
+    @staticmethod
+    def _touched_bug(event):
+        """The bug alias an event acts on, or None where only the fold can say.
+
+        `expected_postcondition["target"]` is the bug for every action but the two
+        attachment ones; `bug.attach` names its bug in `values`, and
+        `attachment.update` reaches it through the attachment its attach event
+        registered -- a chain `expected._bug_of` owns and this module does not repeat.
+        """
+        target = event.expected_postcondition["target"]
+        if target.kind == "bug":
+            return target.name
+        if event.action == "bug.attach":
+            return event.expected_postcondition["values"]["bug"].name
+        return None
+
+    @staticmethod
+    def _declared_groups(event):
+        """The group set an event declares on its bug, or None where it declares none.
+
+        The two payload forms differ, and collapsing them loses a real declaration. A
+        create's postcondition carries every key, so an empty `groups` there cannot be
+        told from an omitted one -- and need not be, since both leave the bug
+        unrestricted. An update's carries only the keys its `set` block names, and
+        `loader._update_set` accepts an empty list, so `{"set": {"groups": []}}` is a
+        valid event meaning *remove every group*, which the replay sends as one
+        `--groups-remove` per current member. Reading that as a non-declaration would
+        leave the guards below asserting a restriction the scenario had just lifted.
+        """
+        values = event.expected_postcondition["values"]
+        if event.action == "bug.create":
+            return {ref.name for ref in values["groups"]} or None
+        if "groups" not in values:
+            return None
+        return {ref.name for ref in values["groups"]}
+
+    def _restrictions(self):
+        """alias -> the groups the last declaring event leaves the bug in, when any.
+
+        A declaration replaces rather than extends, exactly as `BugUpdateHandler.build`'s
+        add/remove delta does on the server, so the last one wins -- including a declared
+        empty set, which lifts the restriction and drops the bug from this mapping.
+        """
+        final: dict[str, set[str]] = {}
+        for event in self.scenario.events:
+            alias, declared = self._touched_bug(event), self._declared_groups(event)
+            if alias is not None and declared is not None:
+                final[alias] = declared
+        return {alias: groups for alias, groups in final.items() if groups}
+
+    def _restricted_bugs(self):
+        """The aliases of every bug left carrying a group by the events that declare one."""
+        return set(self._restrictions())
+
     def test_digest_matches_the_pinned_value(self):
         self.assertEqual(
             self.scenario.digest, EXPECTED_DIGEST,
@@ -205,6 +274,104 @@ class SmokeScenarioTest(unittest.TestCase):
                 "admin", self._groups(event.actor.name),
                 f"{event.name!r} posts a private comment as {event.actor.name!r}, "
                 "who is not in the insider group")
+
+    def test_group_restricted_bugs_are_only_touched_by_members(self):
+        """Guard: from the restriction onward, a non-member's event is refused.
+
+        `Bugzilla/Bug.pm::add_group` refuses a group the acting user is not a member
+        of, outside a product change; and once the bug carries the group, so is every
+        later event on it -- including the `bug view` `BugUpdateHandler.build` issues
+        to compute its delta. Either way a replay that has already mutated the fixture
+        aborts part-way, and finding D11 renders the refusal as `410 "You must log
+        in"`, which does not name the real cause. This is why the restriction is
+        declared last: nothing after it may reach the bug as another actor.
+
+        Membership is the only half of `add_group` left to guard. Its other refusal,
+        `group_is_settable` on a group the scenario did not map to the bug's product
+        (ADR 0013), is already a load-time failure: `loader._update_set` raises
+        "group is outside the target product" before an event exists to inspect.
+
+        Coverage is the events that name their bug directly -- every action but
+        `attachment.update`, which reaches its bug through the attachment its
+        `bug.attach` registered. Resolving that chain is `expected._bug_of`'s job and
+        is not repeated here; an `attachment.update` on a restricted bug would fail
+        live rather than at `make test`.
+        """
+        restricted: dict[str, set[str]] = {}
+        for event in self.scenario.events:
+            alias = self._touched_bug(event)
+            if alias is None:
+                continue
+            held = self._groups(event.actor.name)
+            for name in sorted(restricted.get(alias, set())):
+                self.assertIn(
+                    name, held,
+                    f"{event.name!r} acts on {alias!r} as {event.actor.name!r}, who "
+                    f"is not a member of group {name!r} an earlier event restricted "
+                    "the bug to")
+            declared = self._declared_groups(event)
+            for name in sorted(declared or ()):
+                self.assertIn(
+                    name, held,
+                    f"{event.name!r} restricts {alias!r} to group {name!r} as "
+                    f"{event.actor.name!r}, who is not a member of it")
+            if declared is not None:
+                restricted[alias] = declared      # replaces, per `_restrictions`
+
+    def test_group_restricted_bugs_declare_no_private_comment(self):
+        """Guard: the verifier's outsider read cannot open a group-restricted bug.
+
+        `check_visibility` proves a private comment is withheld by re-reading the
+        thread as an actor outside the insider group (`verify/runner.py`). That actor
+        is outside the restricting group too, so Bugzilla refuses the whole read
+        rather than returning a thread with the private comment dropped. The refusal
+        raises out of `BzrClient.read` -- api_code 102 at exit 4, which
+        `BUG_ABSENT_CODES` deliberately excludes -- before `ServerReader` inspects a
+        payload at all. Declaring both on one bug asserts comment privacy through a
+        bug the reader may not open, which reads as a fixture fault rather than the
+        scenario's own.
+        """
+        private = {
+            event.expected_postcondition["target"].name
+            for event in self.scenario.events
+            if event.action == "bug.comment"
+            and event.expected_postcondition["values"]["private"]
+        }
+        for alias in sorted(self._restricted_bugs()):
+            self.assertNotIn(
+                alias, private,
+                f"{alias!r} is declared group-restricted and also carries a private "
+                "comment, so the outsider visibility read cannot reach it")
+
+    def test_the_verifier_reader_holds_every_restricted_bugs_group(self):
+        """Guard: the reader every check reads through must be able to open the bug.
+
+        `Verifier._read_all` reads each bug as `insider or outsider`, and
+        `check_reader_keys` proves only that the pick has an API key -- never that it
+        can see a restricted bug. Nothing else covers this: the membership guard above
+        iterates event *actors*, and the reader is chosen from the resource list by
+        `expected._reader`, so it need not act on any event at all. Left unguarded,
+        `bug view` on the restricted bug answers api_code 102 and the run aborts in the
+        live tier, which is the cost these guards exist to avoid.
+
+        The pick is reproduced here rather than imported because `_reader` returns the
+        first matching actor in declaration order, which is the property under test.
+        """
+        insider = next(
+            (name for name in self.actors if INSIDER_GROUP in self._groups(name)), None)
+        outsider = next(
+            (name for name in self.actors
+             if INSIDER_GROUP not in self._groups(name)), None)
+        reader = insider or outsider
+        self.assertIsNotNone(reader, "the scenario declares no actor to read it back")
+        held = self._groups(reader)
+        for alias, groups in sorted(self._restrictions().items()):
+            for name in sorted(groups):
+                self.assertIn(
+                    name, held,
+                    f"{alias!r} is restricted to group {name!r}, which the verifier's "
+                    f"reader {reader!r} does not hold, so every check on that bug "
+                    "reads as an actor the server will refuse")
 
     def test_attachment_summaries_fit(self):
         """Guard: Bugzilla truncates an over-length description instead of refusing."""
