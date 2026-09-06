@@ -11,6 +11,7 @@ on:
       - "!tests/lifecycle_test.sh"
       - docs/adr/**
       - docs/workflow/**
+      - docs/*.md
       - scenarios/**
   push:
     branches: [main]
@@ -23,6 +24,7 @@ on:
       - "!tests/lifecycle_test.sh"
       - docs/adr/**
       - docs/workflow/**
+      - docs/*.md
       - scenarios/**
 
 permissions:
