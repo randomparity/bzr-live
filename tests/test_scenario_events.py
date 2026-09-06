@@ -172,6 +172,24 @@ class ScenarioEventTests(unittest.TestCase):
         self.events[7]["payload"]["obsolete"] = 1  # type: ignore[index]
         self.assert_invalid("$.payload.obsolete")
 
+    def test_rejects_group_outside_declared_product_scope(self) -> None:
+        self.resources["resources"].append({"kind": "product", "name": "other", "description": "Other"})  # type: ignore[union-attr]
+        self.resources["resources"].append({"kind": "group", "name": "restricted", "description": "Restricted", "products": [{"ref": "product:other"}]})  # type: ignore[union-attr]
+        self.events[0]["payload"]["groups"] = [{"ref": "group:restricted"}]  # type: ignore[index]
+        self.assert_invalid("$.payload.groups[0]")
+        self.resources = {"format_version": 1, "resources": self.resource_catalog()}
+        self.resources["resources"].append({"kind": "product", "name": "other", "description": "Other"})  # type: ignore[union-attr]
+        self.resources["resources"].append({"kind": "group", "name": "restricted", "description": "Restricted", "products": [{"ref": "product:other"}]})  # type: ignore[union-attr]
+        self.events = self.event_catalog()
+        self.events[1]["payload"]["set"]["groups"] = [{"ref": "group:restricted"}]  # type: ignore[index]
+        self.assert_invalid("$.payload.set.groups[0]")
+
+    def test_permits_group_with_no_declared_products_on_update(self) -> None:
+        self.events[1]["payload"]["set"]["groups"] = [{"ref": "group:triage"}]  # type: ignore[index]
+        self.write()
+        scenario = load_scenario(self.root)
+        self.assertEqual(scenario.events[1].payload["set"]["groups"], (Reference("group", "triage"),))
+
     def test_rejects_non_string_flag_status(self) -> None:
         self.events[6]["payload"]["status"] = ["?"]  # type: ignore[index]
         self.assert_invalid("$.payload.status")

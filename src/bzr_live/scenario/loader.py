@@ -216,8 +216,9 @@ def _parse_resource(item: object, index: int, source: str) -> PlannedResource:
     if kind in {"group", "product", "keyword"}:
         data["description"] = _text(obj["description"], source, f"{field}.description")
         if kind == "group":
-            # products this bug group may be set on; same shape and validation as
-            # flag-type's inclusions, so the plan orders the group after them
+            # products this bug group may be set on; same shape and event-time
+            # validation as flag-type's inclusions, so the plan orders the group
+            # after them
             products = _unique_refs(
                 obj.get("products", []), "product", source, f"{field}.products")
             data["products"] = products
@@ -580,12 +581,18 @@ def _create_payload(
         else _resolve(raw_assignee, "actor", source, "$.payload.assignee", available)
     )
     for key, kind in (
-        ("cc", "actor"), ("groups", "group"), ("depends_on", "bug"),
+        ("cc", "actor"), ("depends_on", "bug"),
         ("blocks", "bug"), ("keywords", "keyword"),
     ):
         normalized[key] = _resolved_list(
             payload.get(key, []), kind, source, f"$.payload.{key}", available
         )
+    groups = _resolved_list(payload.get("groups", []), "group", source, "$.payload.groups", available)
+    for index, ref in enumerate(groups):
+        catalog = resources[f"group:{ref.name}"].data
+        if catalog["products"] and product not in catalog["products"]:
+            raise _error(source, f"$.payload.groups[{index}]", "group is outside the selected product")
+    normalized["groups"] = groups
     raw_duplicate = payload.get("duplicate_of")
     normalized["duplicate_of"] = (
         None
@@ -652,9 +659,16 @@ def _update_set(
                 normalized[key] = ref
         elif key in {"estimated_hours", "remaining_hours"}:
             normalized[key] = _decimal(raw, source, field)
+        elif key == "groups":
+            refs = _resolved_list(raw, "group", source, field, available)
+            for index, ref in enumerate(refs):
+                catalog = resources[f"group:{ref.name}"].data
+                if catalog["products"] and product not in catalog["products"]:
+                    raise _error(source, f"{field}[{index}]", "group is outside the target product")
+            normalized[key] = refs
         else:
             kind = {
-                "cc": "actor", "groups": "group", "depends_on": "bug",
+                "cc": "actor", "depends_on": "bug",
                 "blocks": "bug", "keywords": "keyword",
             }[key]
             normalized[key] = _resolved_list(raw, kind, source, field, available)
