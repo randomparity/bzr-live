@@ -82,7 +82,7 @@ DEBUG bzr::client::transport: 401 received, retrying with alternate auth method
 DEBUG bzr::client::transport: auth fallback response url=".../rest/bug/3" status=200 OK
 ```
 
-### Why `estimated_time` does not recover the same way
+### Why `estimated_time` does not recover on the bugs the fixture is made of
 
 Every row carries the *same* valid admin key; only the way it is presented differs, which
 is the whole of the contrast.
@@ -103,6 +103,24 @@ Bugzilla gates the time-tracking fields on `timetrackinggroup` (`editbugs` on th
 and, for a caller that does not clear it, omits them from an otherwise-**successful 200**.
 There is no error status, so nothing triggers `bzr`'s alternate-auth retry and the field
 stays unread.
+
+**All four rows above are reads of an unrestricted bug, and that qualifier is not decorative.**
+Restrict the bug and the contrast disappears, because the retry is fired by the bug's
+visibility and then carries an authenticated credential for everything in the reply. Measured
+at the floor against the fixture's one group-restricted bug, as `admin-ops`:
+
+| Probe | result |
+|---|---|
+| `bug view --fields=id,estimated_time,remaining_time,groups`, default transport | `{"id":1,"groups":["restricted"],"estimated_time":0.0,"remaining_time":0.0}` |
+| `GET /rest/bug/1?...` with the key in an `X-BUGZILLA-API-KEY` header | HTTP 401, code 102 |
+| `GET /rest/bug/1?...&Bugzilla_api_key=<key>` | HTTP 200 carrying `estimated_time` |
+
+So `estimated_hours` is unreadable on every bug a caller can read anonymously — every bug
+this fixture holds but that one — and readable on a bug restricted away from them. Keeping it
+in `_UPDATE_ALWAYS_RETRY` is therefore a **conservative floor over the common case**, not a
+claim the field can never be read, and the rationale written into `actions.py` must say so.
+`groups` still moves and the time fields still do not, but the reason is the shape of the
+request, not a property the fields carry.
 
 **That contrast is the rule this design takes**, and it is a property of the *request*
 rather than of the field. Under D8 a read is confirmable when Bugzilla either does not gate
@@ -269,18 +287,23 @@ ADR records in full.
 
 - **Bugzilla will refuse anyone else.** On the update path `add_group`
   (`Bugzilla/Bug.pm:3162-3167`) throws `group_restriction_not_allowed` for a caller outside
-  the group, and `remove_group` mirrors it at `:3195-3212`. The refusal is pre-mutation, so
-  nothing is half-applied — but by finding D10 it reaches the operator as 410 "You must log
-  in" rather than as error 120. (`_check_groups` at `:1851-1887` has no membership gate, but
-  it is the *create*-time validator only, registered at `VALIDATORS` `:122`; the update path
-  never reaches it.)
-- **The verifier's reader would abort.** `INSIDER_GROUP` is `"admin"`
-  (`src/bzr_live/verify/expected.py:16`, `:408-415`), so the reader is chosen by `admin`
-  membership and not by the restricting group. Restrict a bug to a group the insider is
-  outside and `ServerReader.bug` gets `api_code` 102, which `BUG_ABSENT_CODES` excludes on
+  the group; `remove_group` refuses the same caller at `:3205-3211` under a *different* error,
+  `group_invalid_removal`. Both refusals are pre-mutation, so nothing is half-applied — but by
+  finding D10 the add refusal reaches the operator as 410 "You must log in" rather than as
+  error 120, and the removal refusal's api code has not been observed. (`_check_groups` at
+  `:1851-1887` admits a non-member here, but it is the *create*-time validator only,
+  registered at `VALIDATORS` `:122`, and it admits one only because #34's `group_control_map`
+  rows carry `othercontrol = CONTROLMAPSHOWN`. The ADR carries the full derivation.)
+- **The verifier's reader would abort, and so would the replay engine.** `INSIDER_GROUP` is
+  `"admin"` (`src/bzr_live/verify/expected.py:16`, `:408-415`), so the reader is chosen by
+  `admin` membership and not by the restricting group. Restrict a bug to a group the insider
+  is outside and `ServerReader.bug` gets `api_code` 102, which `BUG_ABSENT_CODES` excludes on
   purpose, so it raises out of `_read_all` and ends the whole run rather than yielding one
-  finding. `admin-ops` is the one smoke actor that is in both `admin` and `restricted`, and
-  nothing enforces that coincidence.
+  finding. The engine has the same exposure through `build` and `reconcile`, which read as the
+  *event's* actor — and `build` is called outside `_execute`'s `try` (`engine.py:174`), so
+  there it aborts on an unattributed boundary error. The obligation is therefore on every
+  actor that later touches the bug, not only the insider. `admin-ops` is the one smoke actor
+  in both `admin` and `restricted`, and nothing enforces that coincidence.
 
 **One more payload class this change newly admits**, named here so it is not discovered at
 replay time. Nothing checks that a declared group's `products` list (ADR 0013's field) covers

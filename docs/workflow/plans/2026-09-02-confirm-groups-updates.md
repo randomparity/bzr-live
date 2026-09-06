@@ -48,7 +48,7 @@ not assert — the silent gap issue #27 exists to close.
 
 | File | Change |
 |---|---|
-| `src/bzr_live/verify/expected.py` | modify — `_NAME_SETS`, `_create` loop, `_update_other` docstring, `UNVERIFIABLE_FIELDS` note |
+| `src/bzr_live/verify/expected.py` | modify — Task 1: `_NAME_SETS`, `_create` loop, `UNVERIFIABLE_FIELDS` note and its `estimated_hours` entry. Task 2: `_update_other` docstring, which lands with the refusal removal it describes |
 | `src/bzr_live/replay/actions.py` | modify — refusal table, `build` delta loop, set-comparison table, always-retry comment |
 | `tests/fixtures/verify-groups-update/{scenario.json,resources.json,events.jsonl}` | create — the scenario the fold test folds |
 | `tests/test_verify_expected.py` | modify — fold regression test; correct the stale D3 comment at `:172-174` |
@@ -128,20 +128,26 @@ this fixture's image).
    updated, folded as asserted rather than waived — and point at the new fixture for the
    update path. Assertions unchanged.
 
-7. **Rewrite `_update_other`'s docstring**, which names `groups` among the held-back keys
-   and forward-references issue #27 as pending. Replacement: ignoring anything else is safe
-   only because `_UPDATE_UNSUPPORTED` refuses `version` before any mutation; `groups` was
-   in that set until issue #27 and is now folded through `_update_names`; any key a future
-   change releases from the refusal table needs an arm here, or the verifier will quietly
-   stop asserting it.
+7. *(moved to Task 2 step 7.)* `_update_other`'s docstring describes the refusal table's
+   contents, which Task 2 is what changes. Rewriting it here would commit one intermediate
+   state whose docstring says `_UPDATE_UNSUPPORTED` holds only `version` while it still holds
+   two entries — breaking the inertness this task's whole ordering argument rests on, in the
+   one direction a reader can see.
 
 8. **Correct the `UNVERIFIABLE_FIELDS` header note**, which infers the `groups` readback
    from the upstream commit. Replace the inference with the measurement: at `63abb94e`
    against the running fixture, a default-transport `bug view` returns `[]` for an
    unrestricted bug and the real member list for a bug restricted to a group — D8's header
    read draws a 401 there and `bzr`'s alternate-auth retry recovers it, the loud failure
-   the time fields do not get. Keep the closing sentence: no `scenarios/smoke` bug declares
-   one, so the assertion has unit coverage only.
+   the time fields do not get on a bug that never 401s. Keep the closing sentence: no
+   `scenarios/smoke` bug declares one, so the assertion has unit coverage only.
+
+   **Scope `UNVERIFIABLE_FIELDS["estimated_hours"]` in the same pass.** Its text —
+   "`bug view` returns no `estimated_time` on this verifier's transport; only `--api xmlrpc`
+   reads it back" — is the same over-broad claim Task 2 step 6 corrects in `actions.py`, and
+   it sits three lines from the note being rewritten. It is false for a group-restricted bug,
+   which this change is what makes reachable. Qualify it to the bugs the reader can read
+   anonymously; leave the entry in the mapping, since that is the general case.
 
 9. **Run the test and confirm it passes.**
 
@@ -177,8 +183,11 @@ this fixture's image).
 - A declared `bug.update` `groups` value lands in `names["groups"]` and contributes one
   `ExpectedChange` for the members it added.
 - The regression test has been observed red against a fold that drops the update.
-- `_update_other` no longer forward-references issue #27, and names only `version`.
 - No comment in `tests/test_verify_expected.py` still claims a `groups` update is refused.
+- `UNVERIFIABLE_FIELDS`' header note cites the measurement rather than the upstream commit,
+  and its `estimated_hours` entry no longer claims the field can never be read back.
+- `_update_other`'s docstring is untouched here; it moves with the refusal it describes.
+  This task changes nothing a reader could observe as inconsistent with `actions.py`.
 
 ## Task 2 — `groups` is executed and confirmed on `bug.update`
 
@@ -260,8 +269,13 @@ Depends on Task 1 having landed the fold arm; nothing else crosses between them.
    tuple is unchanged and both fields stay. `estimated_hours`: Bugzilla gates the
    time-tracking fields on `timetrackinggroup` (`editbugs` here) and omits them from an
    otherwise-successful 200 for a caller that has not cleared it, so finding D8's
-   unauthenticated read never sees the value and no error status fires `bzr`'s
-   alternate-auth retry the way a group-restricted read does. `remaining_hours`: Bugzilla
+   unauthenticated read never sees the value and no error status fires `bzr`'s alternate-auth
+   retry. **Write that as a floor, not an absolute** — a group-restricted bug *does* 401 the
+   whole read, the retry authenticates, and the time fields come back (measured at
+   `63abb94e`), so the entry is conservative over the bugs a caller can read anonymously,
+   which is every bug this fixture holds but one. Say the qualifier in the comment rather
+   than shipping the unconditional claim; the spec's *Why `estimated_time` does not recover*
+   section carries the measurement. `remaining_hours`: Bugzilla
    decrements `remaining_time` by logged work, so the declared value is not the fixture's
    final state — Bugzilla's own ground, surviving any `bzr` fix. Keep the trailing sentence
    about `check_supported`, with `groups` dropped from its list.
@@ -269,12 +283,24 @@ Depends on Task 1 having landed the fold arm; nothing else crosses between them.
    What must leave: "bzr bug view never serializes either" is D3's claim and is false for
    both fields — `bzr` serializes them; Bugzilla withholds them.
 
-7. **Correct the same stale claim at `tests/test_replay.py:640-642`**, which explains
+7. **Rewrite `_update_other`'s docstring in `src/bzr_live/verify/expected.py`** — moved here
+   from Task 1, because it describes the refusal table step 3 just emptied. It currently names
+   `groups` among the held-back keys and forward-references issue #27 as pending. Replacement:
+   ignoring anything else is safe only because `_UPDATE_UNSUPPORTED` refuses `version` before
+   any mutation; `groups` was in that set until issue #27 and is now folded through
+   `_update_names`; any key a future change releases from the refusal table needs an arm here,
+   or the verifier will quietly stop asserting it.
+
+   It is the one hunk of this task outside `actions.py`, and it belongs in this commit rather
+   than the previous one: written in Task 1 it would have asserted a table state that did not
+   exist yet.
+
+8. **Correct the same stale claim at `tests/test_replay.py:640-642`**, which explains
    `test_set_retries_when_a_declared_field_is_unreadable` with "it declares
    `remaining_hours`, which bzr bug view never serializes". Replace with the field's real
    ground: Bugzilla decrements `remaining_time` by logged work. Behaviour unchanged.
 
-8. **Run the tests and confirm they pass.**
+9. **Run the tests and confirm they pass.**
 
    ```
    uv run --python 3.11 python -m unittest tests.test_replay -v
@@ -282,7 +308,7 @@ Depends on Task 1 having landed the fold arm; nothing else crosses between them.
 
    Expect `OK`.
 
-9. **Run the guardrails, bare, and commit.**
+10. **Run the guardrails, bare, and commit.**
 
    ```
    make check
@@ -301,6 +327,10 @@ Depends on Task 1 having landed the fold arm; nothing else crosses between them.
 - Reconciliation advances on a matching `groups` set and retries on a differing one.
 - Both time fields remain in `_UPDATE_ALWAYS_RETRY`, `estimated_hours` now under its own
   test, and nothing in the file cites D3.
+- `estimated_hours`' rationale is written as a floor over the anonymously-readable case, not
+  as a claim the field can never be read.
+- `_update_other`'s docstring names only `version`, in the same commit that leaves only
+  `version` in the table.
 - `test_update_rejects_groups` is gone rather than failing, and no comment in
   `tests/test_replay.py` still claims `bug view` omits the time fields.
 
@@ -397,7 +427,8 @@ records the transcript. No repository file changes here except the evidence quot
    on `checkout` by `admin-ops`, then a `bug.update` on it declaring
    `groups: [{"ref": "group:restricted"}]`, then a second `bug.update` **narrowing the set
    back to empty**. Scratch scenario, not a repository file — the surface exclusion in the
-   design's *Follow-up* section is what keeps it out of `scenarios/`.
+   design's *Follow-up* section is what keeps it out of `scenarios/`. Step 6 folds this
+   transcript into the positive fault run rather than replaying it separately.
 
    `admin-ops` is not a convenience. `add_group` (`Bugzilla/Bug.pm:3162-3167`) and
    `remove_group` (`:3195-3212`) both refuse a caller outside the group, so any other actor
@@ -416,7 +447,7 @@ records the transcript. No repository file changes here except the evidence quot
    does not rest on the same code path it is testing.
 
 5. **Drive the reconciliation arm deliberately, both ways.** A clean run never reaches it:
-   `engine._execute` writes `next_action` `"advance"` at `engine.py:196` straight after a
+   `engine._execute` writes `next_action` `"advance"` at `engine.py:197` straight after a
    zero-exit invocation, and `BugUpdateHandler` inherits `ActionHandler.resolved_ids`
    returning `{}` (`actions.py:264-265`), which cannot raise. `reconcile` is reached only
    from `_settle`, inside the `except (ProvisionError, ReplayError)` arm. So a plain replay
@@ -424,22 +455,50 @@ records the transcript. No repository file changes here except the evidence quot
    criterion this step replaces was satisfiable by code that does not exist.
 
    Reach it with a `BZR_LIVE_BZR` wrapper, the boundary the repository already treats as
-   operator-selected. Two runs, and the pair is the proof:
+   operator-selected. **The wrapper must be a pass-through that faults only on `bug update`.**
+   `BZR_LIVE_BZR` names the binary the engine uses for *every* invocation, and three reads
+   have to succeed before the comparison can happen at all: `_sweep_pristine`'s `bug view`
+   (`engine.py:117-119` → `_require_absent` `:105-115`), `BugUpdateHandler.build`'s pre-read
+   that computes the delta (`actions.py:371-372`), and `reconcile`'s own read (`:415`). A
+   wrapper that failed every call would abort at the sweep having executed no event. The
+   `build` read is the one that must not be touched under any circumstance: it is called at
+   `engine.py:174`, *outside* `_execute`'s `try`, so a failure there is not routed into
+   `_settle` — it kills the run instead of reconciling it.
 
-   - **positive** — the wrapper execs the real floor binary, then exits non-zero. The server
-     applied the change; `reconcile` reads the bug back, the declared set matches, and
-     `_execute` returns `"reconciled"` with `_RECONCILED_EXIT` in the journal.
-   - **negative** — the wrapper exits non-zero *without* running `bzr`. Nothing was applied;
-     `reconcile` reads the bug back, the declared set differs, and the run must fail with
-     `declared 'groups' differs from the fixture`.
+   So: forward `argv` to the floor binary unchanged and return its exit status, except when
+   `argv` contains the `bug update` subcommand. Two runs, and the pair is the proof:
+
+   - **positive** — on `bug update`, run the binary, forward its stdout and stderr, then exit
+     non-zero. (Run it; do not `exec` it — `exec` replaces the process image and nothing after
+     it would execute.) The server applied the change; `reconcile` reads the bug back, the
+     declared set matches, and `_execute` returns `"reconciled"` with `_RECONCILED_EXIT` in
+     the journal.
+   - **negative** — on `bug update`, exit non-zero *without* running the binary. Nothing was
+     applied; `reconcile` reads the bug back, the declared set differs, and the run must fail
+     with `declared 'groups' differs from the fixture`.
 
    The negative is the half that bites. The positive alone advances even for a field absent
    from `_UPDATE_COMPARE_SETS`, because `reconcile` skips what it does not know; only the
    mismatch distinguishes a live projection from a missing one. This is the repository's own
    controlled-fault discipline applied to a live server rather than to a double.
 
-6. **Restore the fixture** to the state step 1 found it in, and say what was left behind if
-   anything was.
+6. **Give each run its own scenario name and its own state root.** Two engine preconditions
+   otherwise refuse the second and third replays outright, and neither is negotiable:
+   `_require_empty_journal` (`engine.py:53-67`) refuses `replay` if the journal under the
+   state root holds *any* attempt file, and `_require_absent` (`:105-115`) refuses when the
+   bug alias already exists in the fixture. The alias is not derived from the scenario
+   digest — `loader.py:719-723` hashes the scenario **name** and the bug alias — so editing a
+   scenario's events does not produce a fresh one, but renaming the scenario does.
+
+   That is the whole of the fix, and it is cheaper than a fixture reset per run: each replay
+   gets a scratch scenario whose `name` is unique to it and a fresh `--state-root`. The
+   positive fault run also carries step 2's transcript evidence, since it applies both updates
+   for real *and* exercises the reconciliation arm, so the task needs two replays rather than
+   three.
+
+7. **Report what was left in the fixture.** The runs deliberately leave their bugs behind
+   rather than resetting between them; the negative run additionally leaves a completed record
+   holding `retry`. Say so, and say whether the fixture was reset afterwards.
 
 ### Acceptance criteria
 

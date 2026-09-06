@@ -172,15 +172,34 @@ auth is still not real auth, so the first read of a group-restricted bug draws a
 auth method, whose query-parameter credential this fixture does parse as real auth, and
 gets a 200 carrying the value. Bugzilla instead omits `estimated_time` and `remaining_time`
 from an otherwise-successful **200** for a caller who has not cleared `timetrackinggroup`,
-so no error status ever fires that retry. **Under D8 a read is confirmable when Bugzilla
-either does not gate the field against an anonymous caller, or refuses the whole read with
-an error status that fires the retry *and* the credential that retry carries is authorized
-for the bug; it is unconfirmable when Bugzilla answers 200 and silently omits the field.**
-That is a property of the request rather than of the field: the loudness in the `groups`
-case comes from the bug's visibility, not from `groups` itself. The second disjunct's
-added clause is not hypothetical — when the retry's credential is *not* authorized, the
-fallback draws 401 in its turn and finding D10 below reports the first attempt's error
-instead, which is the first of the three residuals recorded below.
+so on a bug the caller could have read anonymously, nothing fires the retry and the field
+stays unread. **Under D8 a read is confirmable when Bugzilla either does not gate the field
+against an anonymous caller, or refuses the whole read with an error status that fires the
+retry *and* the credential that retry carries is authorized for the bug; it is unconfirmable
+when Bugzilla answers 200 and silently omits the field.** That is a property of the request
+rather than of the field: the loudness in the `groups` case comes from the bug's visibility,
+not from `groups` itself. The second disjunct's added clause is not hypothetical — when the
+retry's credential is *not* authorized, the fallback draws 401 in its turn and finding D10
+below reports the first attempt's error instead, which is the first of the three residuals
+recorded below.
+
+**Follow that rule to its conclusion and it reaches the time fields too, which is why the
+always-retry entry for `estimated_hours` is a conservative floor and not an absolute.** On a
+*group-restricted* bug the 401 is raised for the whole read, so the retry fires and its
+query-parameter credential — authenticated, and a `timetrackinggroup` member — brings the
+time fields back with everything else. Measured at `63abb94e` against this fixture, reading
+the one group-restricted bug as `admin-ops`: `bug view --fields=id,estimated_time,
+remaining_time,groups` returns `{"id":1,"groups":["restricted"],"estimated_time":0.0,
+"remaining_time":0.0}`, and at the wire the header read is HTTP 401 code 102 while the
+query-parameter read is a 200 carrying `estimated_time`. So `estimated_hours` is
+unconfirmable on every bug a caller can read anonymously — which is every bug the fixture
+holds but that one — and confirmable on a bug restricted away from them. It stays in
+`_UPDATE_ALWAYS_RETRY` because the readable case is the general one and a rule that
+confirmed a field only on restricted bugs would be a worse contract than never confirming
+it; but the entry is a floor over the common case, not a claim the field can never be read.
+This amendment is what makes the exception reachable at all, since restricting a bug through
+`bug.update` was refused until now.
+
 The grounds were never the same, and the single shared rationale over the always-retry set
 is what let D3's staleness cover both time fields at once; each now names its own.
 
@@ -213,13 +232,27 @@ skips the membership check. `Bug.update` runs `set_all` → `_add_remove($params
 (`Bugzilla/Bug.pm:2455`) → `add_group` / `remove_group` (`:2554-2563`), and `add_group`
 carries two gates: `group_is_settable` at `:3157-3158`, then, for a caller not in the group,
 `ThrowUserError('group_restriction_not_allowed')` at `:3162-3167` unless the same update also
-changes the product. `remove_group` mirrors it at `:3195-3212`. So a declared `groups` update
-by an actor outside the group is refused **before any mutation**, with error 120 — which D10
-then masks as 410, and that masking is the whole of the residual: the payload fails safely and
-reports the wrong reason. The create-time validator `_check_groups` (`:1851-1887`,
-`VALIDATORS` at `:122`) has no such membership gate, so on `bug.create` an actor genuinely can
-restrict a bug out of its own visibility; that path predates this amendment and is not opened
-by it. All read from this fixture's own image.
+changes the product. `remove_group` refuses the same caller at `:3205-3211`, but under a
+*different* error — `group_invalid_removal`, which it also throws at `:3189` for a group the
+bug is not in and at `:3199-3201` for a mandatory group. The two are not mirrors, and the
+distinction is load-bearing for the register: the 120 recorded under D10 was captured on a
+refused **add**, so D10's mapping is stated for that path only and the removal refusal's api
+code is not yet observed. The engine cannot reach `:3189` in ordinary operation, because
+`_delta` (`src/bzr_live/replay/actions.py:119-123`) computes removals from *observed* state
+and so never names a group the bug is not in.
+
+So a declared `groups` update by an actor outside the group is refused **before any
+mutation** — which is the boundary holding, not leaking — and the residual is only that D10
+masks the stated cause. The create path differs, and the reason is this fixture's own
+configuration rather than Bugzilla's model: `_check_groups` (`:1851-1887`, `VALIDATORS` at
+`:122`) carries no `in_group` call and gates solely through `Product::group_is_settable`,
+whose `groups_available` arm (`Bugzilla/Product.pm:659-693`) selects member groups behind
+`groups_in_sql()` but admits *other* groups on `othercontrol` alone, with no membership
+check, whenever that column is `CONTROLMAPSHOWN` or `CONTROLMAPDEFAULT`. #34's rows carry
+`CONTROLMAPSHOWN`, so here a non-member can restrict a bug out of its own visibility on
+`bug.create`. Under a stricter `othercontrol` the create/update asymmetry would disappear —
+it is the same row this record's equality consequence below rests on. That path predates this
+amendment and is not opened by it. All read from this fixture's own image.
 
 **One is this repository's own, and it is the residual this amendment newly opens.** Folding
 `groups` into the verifier's asserted state makes the verifier assert a field that decides
@@ -229,11 +262,23 @@ membership of `INSIDER_GROUP`, which is `"admin"` (`src/bzr_live/verify/expected
 restricts a bug to a group the insider is outside makes `ServerReader.bug` read it and get
 `api_code` 102, which `BUG_ABSENT_CODES = {100, 101}` deliberately excludes by the
 "inaccessibility is not absence" rule above — so it raises out of `_read_all` and **aborts the
-whole verification** instead of producing one finding about one bug. The outsider reader, built
-whenever a scenario declares a private comment, is outside `admin` by construction and carries
-the same exposure. `scenarios/smoke` is safe only by coincidence: `admin-ops` is both its
-first `admin` member and its only `restricted` member, and nothing states or enforces that
-they must be the same actor. Whoever declares the first live `groups` update owes that check.
+whole verification** instead of producing one finding about one bug. The outsider reader,
+which is built on every run and read only where a scenario declares a private comment
+(`runner.py:175-178`), is outside `admin` by construction and carries the same exposure.
+
+**The replay engine carries it too, and less gracefully.** Every later event on a restricted
+bug reads it as *its own* actor, not as the insider: `BugUpdateHandler.build`
+(`actions.py:371-372`), `BugUpdateHandler.reconcile` (`:415`) and `_require_absent`
+(`engine.py:112`) all go through the same `BUG_ABSENT_CODES`. An actor outside the restricting
+group gets 102 → `ProvisionError`. The `build` site is the unpleasant one: `engine.py:174`
+calls it *before* `_execute`'s `try`, so the failure is never routed into `_settle` and the run
+dies on a bare "bzr boundary failure (exit 4) running bug view" that names neither the event
+nor the group.
+
+`scenarios/smoke` is safe only by coincidence: `admin-ops` is both its first `admin` member
+and its only `restricted` member, and nothing states or enforces that they must be the same
+actor. Whoever declares the first live `groups` update owes the check for **every actor that
+later touches the bug**, not only for the insider.
 
 One consequence rides on how #34 wrote that mapping. `groups` compares by **equality**, like
 `keywords`: `Bugzilla/Bug.pm:1883` unions a product's mandatory groups into the set and
