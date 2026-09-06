@@ -27,6 +27,22 @@ from .expected import (
 from .observed import LINKS_MAX_NODES, VIEW_FIELDS, ServerReader
 
 
+# Finding D12 (bzr#719), printed when a group restriction is why a links read was refused.
+# Worded so a reader learns the cause and where it is filed, because ServerReader's own
+# message blames the journal for naming a bug the fixture does not hold -- the opposite of
+# what happened. No waiver and no transport swap: `--api xmlrpc` would make this read
+# succeed, and adopting it would leave `make smoke` green over a read bzr cannot perform on
+# its default transport, which is the compensation AGENTS.md forbids.
+LINKS_RESTRICTED = (
+    "bug {alias!r} is declared restricted to {groups} and `bzr bug links` reports it not "
+    "found, which is finding D12 (bzr#719). bzr reads links through Bugzilla's search "
+    "endpoint, which filters a bug the caller cannot see into an empty 200 rather than "
+    "faulting, so no status fires the alternate-auth retry -- the retry that recovered this "
+    "same bug for the `bug view` this run issued moments earlier. The fixture and the "
+    "scenario are both correct; the read is not available. This refusal retires itself when "
+    "bzr#719 is fixed, because the read will then succeed on its own")
+
+
 def check_reader_keys(expected: ExpectedScenario, keys: KeyStore) -> None:
     """Every reader role the scenario declares must have a key, before any read.
 
@@ -213,6 +229,28 @@ class Verifier:
             check_comment_transport(bug.alias, bug, comments)
         return check_comments(bug, comments, emails)
 
+    def _links(self, bug: ExpectedBug, reader: ServerReader, bug_id: int,
+               depth: int | None = None) -> list:
+        """`bug links`, with finding D12 named when a group restriction is why it failed.
+
+        The attribution is established rather than guessed: `_one_bug` has already read
+        this same bug through `reader.bug` before reaching here, so a links read that
+        reports not-found is reporting it about a bug this actor has just been served.
+        `check_comment_transport` draws the same line, on the same kind of evidence.
+
+        A bug declaring no group keeps `ServerReader`'s own message, because there the
+        not-found is the ordinary absent-bug case and citing an upstream defect would
+        send the reader somewhere the cause is not.
+        """
+        try:
+            return reader.links(bug_id, depth=depth)
+        except VerifyError:
+            groups = bug.names.get("groups")
+            if not groups:
+                raise
+            raise VerifyError(LINKS_RESTRICTED.format(
+                alias=bug.alias, groups=", ".join(sorted(groups)))) from None
+
     def _one_bug(self, bug: ExpectedBug, bug_id: int, reader: ServerReader,
                  outsider: ServerReader | None, alias_of: Mapping[int, str],
                  edges: frozenset[tuple[str, str, str]],
@@ -236,8 +274,8 @@ class Verifier:
         depth = max(hops.values(), default=0)
         recursive = depth >= 2
         findings += check_links(
-            bug.alias, edges, hops if recursive else {}, reader.links(bug_id),
-            reader.links(bug_id, depth=depth) if recursive else [], alias_of)
+            bug.alias, edges, hops if recursive else {}, self._links(bug, reader, bug_id),
+            self._links(bug, reader, bug_id, depth) if recursive else [], alias_of)
         executed += 1
         findings += self._comment_findings(bug, reader.comments(bug_id), emails)
         executed += 1
