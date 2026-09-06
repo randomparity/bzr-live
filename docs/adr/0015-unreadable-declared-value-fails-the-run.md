@@ -63,10 +63,14 @@ endpoint `bug view` reads, where `bzr`'s retry does repair it and the read succe
 and this record answer the same shape of problem the same way; they differ only in which
 field, and in which module the answer lives.
 
-One conflict follows and is recorded rather than smoothed: #59's acceptance criteria require
-*"a live `make smoke`"* to pass. While this decision stands and `bzr#719` is open, `make smoke`
-does not pass, so #59 cannot satisfy that criterion on `main` without either the upstream fix
-or an amendment to its own criteria. Whoever picks up #59 meets this record first.
+**A conflict followed from that, and deferring the scenario data is what resolves it.** #59's
+acceptance criteria require *"a live `make smoke`"* to pass. Under this change's original
+scope, which declared a bug group in `scenarios/smoke`, `make smoke` did not pass — so #59
+could not have met that criterion on `main` without the upstream fix or an amendment to its own
+criteria. With the data held back the rule never fires, `make smoke` stays green, and #59's
+criteria stay satisfiable. The analysis is kept rather than deleted because it is part of why
+the deferral is right, and because the conflict returns the moment a scenario declares a bug
+group: whoever does that meets #59 as well as this record.
 
 ## Decision
 
