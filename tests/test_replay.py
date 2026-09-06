@@ -190,12 +190,14 @@ class SupportedPayloadTest(unittest.TestCase):
         HANDLERS["bug.create"].check_supported(
             self._event("bug.create", version="1.0", description="a race on checkout"))
 
-    def test_update_rejects_groups(self) -> None:
-        event = self._event("bug.update", groups=())
-        with self.assertRaises(ReplayError) as caught:
-            HANDLERS["bug.update"].check_supported(event)
-        self.assertIn("groups", str(caught.exception))
-        self.assertIn("finding D3", str(caught.exception))
+    def test_update_accepts_groups(self) -> None:
+        # Issue #27 removed this refusal: every clause of its premise is dead. Measured
+        # at the floor 63abb94e against a provisioned fixture, `bug update --groups-add`
+        # exits 0 and `bug view --fields=id,groups` reads the member list back on the
+        # default transport. version stays refused -- test_update_rejects_version covers
+        # it.
+        HANDLERS["bug.update"].check_supported(
+            self._event("bug.update", groups=()))
 
     def test_update_rejects_a_null_resolution(self) -> None:
         event = self._event("bug.update", resolution=None)
@@ -409,6 +411,48 @@ class BuildTest(unittest.TestCase):
         self.assertIn("--cc-add=join@x", invocation.args)
         self.assertIn("--cc-remove=drop@x", invocation.args)
 
+    def _groups_event(self, name, declared):
+        return PlannedEvent(
+            name=name,
+            actor=Reference("actor", "triager"),
+            action="bug.update",
+            action_class="idempotent-set",
+            payload={},
+            dependencies=(),
+            reconciliation_marker=f"bzr-live:replay-demo:{name}",
+            expected_postcondition={
+                "action": "bug.update",
+                "target": Reference("bug", "checkout-race"),
+                "values": {"groups": declared},
+                "marker": f"bzr-live:replay-demo:{name}",
+            },
+            creates=None,
+        )
+
+    def test_update_computes_the_groups_delta(self) -> None:
+        # bug view reports groups [b, c]; the event declares [a, b]. A group reference
+        # projects to its name, not to an email -- only actors project to emails.
+        self.context.adopt({"bug:checkout-race": 41})
+        event = self._groups_event(
+            "update-groups-delta",
+            (Reference("group", "a"), Reference("group", "b")))
+        self.run.replies.append((0, {"id": 41, "groups": ["b", "c"]}, None))
+        invocation = HANDLERS["bug.update"].build(self.context, event)
+        self.assertIn("--groups-add=a", invocation.args)
+        self.assertIn("--groups-remove=c", invocation.args)
+        self.assertNotIn("--groups-add=b", invocation.args)
+        self.assertNotIn("--groups-remove=b", invocation.args)
+
+    def test_update_emits_no_groups_flag_when_the_set_already_agrees(self) -> None:
+        # A delta is a delta: declaring what the server already holds sends nothing, so a
+        # re-run of a settled event is not a no-op write.
+        self.context.adopt({"bug:checkout-race": 41})
+        event = self._groups_event(
+            "update-groups-settled", (Reference("group", "restricted"),))
+        self.run.replies.append((0, {"id": 41, "groups": ["restricted"]}, None))
+        invocation = HANDLERS["bug.update"].build(self.context, event)
+        self.assertFalse([a for a in invocation.args if a.startswith("--groups-")])
+
     def test_flag_renders_bugzilla_syntax(self) -> None:
         # The fixture's flag-review event is actor triager requesting review of
         # reporter, so this asserts the suffix comes from `requestee` and not from
@@ -484,8 +528,9 @@ class ReconcileTest(unittest.TestCase):
     def _set_event(self, values):
         # Hand-built the way Task 3 hand-built a PlannedEvent for its delta test: no
         # fixture bug.update event declares a postcondition free of remaining_hours,
-        # which bzr bug view never serializes and would force retry regardless of
-        # what this checks.
+        # which never confirms -- Bugzilla decrements remaining_time by logged work, so
+        # the declared value is not the server's final state -- and would force retry
+        # regardless of what this checks.
         marker = "bzr-live:replay-demo:update-status"
         return PlannedEvent(
             name="update-status",
@@ -639,13 +684,80 @@ class ReconcileTest(unittest.TestCase):
 
     def test_set_retries_when_a_declared_field_is_unreadable(self) -> None:
         # update-triage is the fixture's own bug.update event; it declares
-        # remaining_hours, which bzr bug view never serializes, so even a reply that
-        # matches every other declared field still forces retry.
+        # remaining_hours, which never confirms -- Bugzilla decrements remaining_time by
+        # logged work, so the declared value is not the server's final state -- so even a
+        # reply that matches every other declared field still forces retry.
         run = _FakeRun(
             [(0, {"id": 41, "status": "CONFIRMED", "target_milestone": "m1"}, None)])
         result = HANDLERS["bug.update"].reconcile(
             self._context(run), self._event("update-triage"))
         self.assertEqual(result.next_action, "retry")
+
+    def _groups_set_event(self, declared):
+        marker = "bzr-live:replay-demo:update-groups"
+        return PlannedEvent(
+            name="update-groups",
+            actor=Reference("actor", "triager"),
+            action="bug.update",
+            action_class="idempotent-set",
+            payload={},
+            dependencies=(),
+            reconciliation_marker=marker,
+            expected_postcondition={
+                "action": "bug.update",
+                "target": Reference("bug", "checkout-race"),
+                "values": {"groups": declared},
+                "marker": marker,
+            },
+            creates=None,
+        )
+
+    def test_set_advances_when_the_observed_groups_match(self) -> None:
+        # groups is compared through _UPDATE_COMPARE_SETS, so order is not significant.
+        run = _FakeRun([(0, {"id": 41, "groups": ["escalated", "restricted"]}, None)])
+        event = self._groups_set_event(
+            (Reference("group", "restricted"), Reference("group", "escalated")))
+        result = HANDLERS["bug.update"].reconcile(self._context(run), event)
+        self.assertEqual(result.next_action, "advance")
+
+    def test_set_retries_when_the_observed_groups_differ(self) -> None:
+        # The half that bites: without a _UPDATE_COMPARE_SETS entry, reconcile skips a
+        # field it does not know and advances, so only a MISMATCH distinguishes a live
+        # projection from a missing one.
+        run = _FakeRun([(0, {"id": 41, "groups": ["restricted"]}, None)])
+        event = self._groups_set_event(
+            (Reference("group", "restricted"), Reference("group", "escalated")))
+        result = HANDLERS["bug.update"].reconcile(self._context(run), event)
+        self.assertEqual(result.next_action, "retry")
+        self.assertIn("groups", result.detail)
+
+    def test_set_retries_on_a_declared_estimated_hours(self) -> None:
+        # estimated_hours has no update-path coverage otherwise -- every existing mention
+        # is on the bug.create G1 path -- so this pins criterion 4: the field stays in
+        # _UPDATE_ALWAYS_RETRY even when every other declared field reads back.
+        run = _FakeRun([(0, {"id": 41, "summary": "Checkout races when two carts submit"},
+                         None)])
+        marker = "bzr-live:replay-demo:update-estimate"
+        event = PlannedEvent(
+            name="update-estimate",
+            actor=Reference("actor", "triager"),
+            action="bug.update",
+            action_class="idempotent-set",
+            payload={},
+            dependencies=(),
+            reconciliation_marker=marker,
+            expected_postcondition={
+                "action": "bug.update",
+                "target": Reference("bug", "checkout-race"),
+                "values": {"summary": "Checkout races when two carts submit",
+                           "estimated_hours": "8"},
+                "marker": marker,
+            },
+            creates=None,
+        )
+        result = HANDLERS["bug.update"].reconcile(self._context(run), event)
+        self.assertEqual(result.next_action, "retry")
+        self.assertIn("estimated_hours", result.detail)
 
     def test_flag_compares_the_requestee_not_just_the_name_and_status(self) -> None:
         # flag-review declares status "?" with requestee actor:reporter. Bugzilla emits

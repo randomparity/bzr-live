@@ -346,7 +346,11 @@ Depends on Task 1 having landed the fold arm; nothing else crosses between them.
   as a claim the field can never be read.
 - `_update_other`'s docstring names only `version`, in the same commit that leaves only
   `version` in the table.
-- `rg 'finding D3' src tests` returns nothing outside `docs/`.
+- No site in `src/` or `tests/` **asserts** D3's premise. Two references survive and are
+  correct as they stand, so the criterion is "nothing asserts it", not "no match":
+  `tests/test_verify_expected.py:68` says the `estimated_hours` waiver is *not* on D3's
+  grounds, and `src/bzr_live/verify/observed.py:19` explains that the fields warn and are
+  dropped *below* the floor, which is why `README` pins `63abb94e`.
 - `test_update_rejects_groups` is gone rather than failing, and no comment in
   `tests/test_replay.py` still claims `bug view` omits the time fields.
 

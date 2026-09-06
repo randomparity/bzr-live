@@ -255,10 +255,11 @@ def _update_other(bug: _Bug, key: str, raw: object,
     """The declared update keys that are neither a scalar, a name set, nor an edge set.
 
     Silently ignoring anything else is safe ONLY because
-    `src/bzr_live/replay/actions.py`'s `_UPDATE_UNSUPPORTED` refuses `groups` and
-    `version` before any mutation, so no journalled run can carry one. Issue #27 removes
-    that refusal; when it does, this fold has to grow an arm for each key it releases, or
-    the verifier will quietly stop asserting it.
+    `src/bzr_live/replay/actions.py`'s `_UPDATE_UNSUPPORTED` refuses `version` before any
+    mutation, so no journalled run can carry one. `groups` was in that set until issue
+    #27 and is now folded through `_update_names`. Any key a future change releases from
+    that refusal table needs an arm here too, or the verifier will quietly stop asserting
+    it -- confirming a bug on a field it never checked.
     """
     if key == "duplicate_of":
         bug.duplicate_of = raw.name
