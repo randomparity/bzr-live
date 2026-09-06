@@ -87,6 +87,29 @@ class ScenarioTreeIsGated(unittest.TestCase):
                      and entry.endswith(".md")]
             self.assertEqual(named, [], f"{trigger}: enumerated records are back")
 
+    def test_the_offline_workflow_gates_the_findings_register(self) -> None:
+        """`docs/bzr-findings.md` sits directly under `docs/` -- outside both
+        `docs/adr/**` and `docs/workflow/**` -- so it was the one file under `docs/`
+        the #25 glob switch did not cover (issue #40). A `docs/*.md` glob closes it
+        and, unlike a `docs/bzr-findings.md` entry, cannot miss a future sibling file
+        added directly under `docs/` the way the pre-#25 per-record enumeration did.
+        """
+        for trigger, entries in path_filters(
+                WORKFLOWS / "scenario-contract.yml").items():
+            self.assertIn("docs/*.md", entries, trigger)
+
+    def test_the_live_workflow_does_not_gate_the_findings_register(self) -> None:
+        """ADR 0010 decision #2's asymmetry is deliberate: the offline job is a
+        two-minute Python job, so gating it broadly is nearly free, while the live
+        job costs roughly 20 minutes and compiles a second repository, so a prose-only
+        edit must not trigger it. A `docs/*.md` glob on the live workflow would erase
+        that asymmetry, so its absence there is asserted, not merely left unstated.
+        """
+        for trigger, entries in path_filters(
+                WORKFLOWS / "container-lifecycle.yml").items():
+            self.assertNotIn("docs/*.md", entries, trigger)
+            self.assertNotIn("docs/bzr-findings.md", entries, trigger)
+
 
 class LiveJobSteps(unittest.TestCase):
     def test_the_smoke_step_runs_before_the_checkpoint_round_trip(self) -> None:
