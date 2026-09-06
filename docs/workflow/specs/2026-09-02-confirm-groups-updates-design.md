@@ -292,6 +292,64 @@ The fold test is the one the issue names specifically, so it asserts the value a
 the key's presence: a fold that dropped the update would leave `names["groups"]` holding
 the *created* set, which a test asserting only "the key exists" would pass.
 
+## What the live run proved, and what it found
+
+Run at the floor `bzr 0.8.3-dev (63abb94e)` against a fixture built from this branch,
+freshly installed and provisioned from `scenarios/smoke`, with the in-container bridge
+confirmed byte-identical to the tree (`3bd69de6b659…`). Two replays through the real engine,
+each with its own scenario name and therefore its own journal and server alias.
+
+**Positive — the flag is built from the observed delta, sent, and reconciled.** A bug created
+restricted, then a `bug.update` declaring `groups: []`, with a `BZR_LIVE_BZR` wrapper that
+runs the real binary and then discards the reply. The completed record:
+
+```
+invocation.arguments : ["bug", "update", "--groups-remove=restricted", "6"]
+exit_status          : -1        (_RECONCILED_EXIT -- written by _settle, so reconcile ran)
+next_safe_action     : "advance"
+handler_output.groups: []
+```
+
+`bug_group_map` confirms the removal landed. `exit_status` is what makes this more than a
+happy path: a clean run writes `"advance"` at `engine.py:197` without ever calling
+`reconcile`, so only `_RECONCILED_EXIT` proves the comparison executed.
+
+**Negative — and this is the half that discriminates.** The same shape with the wrapper
+faulting *before* the binary runs, so nothing reaches the server:
+
+```
+event 'restrict-guarded' failed: bzr boundary failure (exit 1) running
+bug update --groups-add=restricted: fault: mutation never sent.
+event 'restrict-guarded': declared 'groups' differs from the fixture
+```
+
+**Proved live that this bites**, by deleting `_UPDATE_COMPARE_SETS["groups"]` and re-running
+the identical scenario: it **advanced**, exit 0, silently accepting a bug whose declared
+`groups` never reached the server. Restored. That is the discrimination the positive run
+cannot supply on its own — `reconcile` skips a field it does not know and advances — and it
+is why this task's acceptance criterion was rewritten during design review.
+
+### A pre-existing defect this run uncovered
+
+`src/bzr_live/scenario/journal.py:115-132`'s `_validate_json` accepts `None`, `bool`, `int`,
+`str`, list and mapping — **not `float`**. Bugzilla returns `estimated_time` and
+`remaining_time` as JSON numbers, so any reconciliation whose `bug view` read is
+*authenticated* records a payload the journal refuses, and the run aborts with
+`journal:$.handler_output.estimated_time: contains an unsupported JSON value`.
+
+The trigger is the mechanism this design already documents: a group-restricted read 401s,
+`bzr`'s alternate-auth retry authenticates, and the time fields come back as floats.
+
+**Not caused by this change, and that was established by control rather than asserted.** A
+control replay with a `summary` update on an *unrestricted* bug reconciles cleanly — the read
+is unauthenticated, so no float appears. A second control declaring `groups` **at create
+time only** — a path `origin/main` fully supports and this change does not touch — reproduces
+the abort exactly. `git diff origin/main` over `journal.py`, `engine.py`, `context.py` and
+`adapters.py` is empty. This change widens the defect's reachability, because a bug can now
+become restricted through `bug.update` as well as through `bug.create`; it does not create
+it. Reported as a follow-up, not fixed here: the fix is a `float` arm in a shared journal
+validator, which is its own change with its own round-trip and precision questions.
+
 ## Follow-up this design does not take
 
 **No scenario under `scenarios/` declares a bug `groups` value**, so the path this change
