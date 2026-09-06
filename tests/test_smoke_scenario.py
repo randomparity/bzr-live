@@ -176,9 +176,6 @@ class SmokeScenarioTest(unittest.TestCase):
         """The aliases of every bug some event declares a group on."""
         return set(self._restrictions())
 
-    def _groups_of(self, alias):
-        return self._restrictions()[alias]
-
     def test_digest_matches_the_pinned_value(self):
         self.assertEqual(
             self.scenario.digest, EXPECTED_DIGEST,
@@ -317,9 +314,7 @@ class SmokeScenarioTest(unittest.TestCase):
                     f"{event.name!r} restricts {alias!r} to group {name!r} as "
                     f"{event.actor.name!r}, who is not a member of it")
             if declared:
-                # A declaration replaces rather than extends, exactly as
-                # `BugUpdateHandler.build`'s add/remove delta does on the server.
-                restricted[alias] = declared
+                restricted[alias] = declared      # replaces, per `_restrictions`
 
     def test_group_restricted_bugs_declare_no_private_comment(self):
         """Guard: the verifier's outsider read cannot open a group-restricted bug.
@@ -361,16 +356,15 @@ class SmokeScenarioTest(unittest.TestCase):
         first matching actor in declaration order, which is the property under test.
         """
         insider = next(
-            (name for name, resource in self.actors.items()
-             if INSIDER_GROUP in self._groups(name)), None)
+            (name for name in self.actors if INSIDER_GROUP in self._groups(name)), None)
         outsider = next(
-            (name for name, resource in self.actors.items()
+            (name for name in self.actors
              if INSIDER_GROUP not in self._groups(name)), None)
         reader = insider or outsider
         self.assertIsNotNone(reader, "the scenario declares no actor to read it back")
         held = self._groups(reader)
-        for alias in sorted(self._restricted_bugs()):
-            for name in sorted(self._groups_of(alias)):
+        for alias, groups in sorted(self._restrictions().items()):
+            for name in sorted(groups):
                 self.assertIn(
                     name, held,
                     f"{alias!r} is restricted to group {name!r}, which the verifier's "
