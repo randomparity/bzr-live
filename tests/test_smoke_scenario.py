@@ -156,12 +156,10 @@ class SmokeScenarioTest(unittest.TestCase):
         declared = event.expected_postcondition["values"].get("groups") or ()
         return {ref.name for ref in declared}
 
-    def _group_restrictions(self):
-        """(event, bug alias, declared group names) per bug-group declaration."""
-        return [
-            (event, self._touched_bug(event), self._declared_groups(event))
-            for event in self.scenario.events
-            if self._touched_bug(event) is not None and self._declared_groups(event)]
+    def _restricted_bugs(self):
+        """The aliases of every bug some event declares a group on."""
+        return {self._touched_bug(event) for event in self.scenario.events
+                if self._declared_groups(event)} - {None}
 
     def test_digest_matches_the_pinned_value(self):
         self.assertEqual(
@@ -219,7 +217,7 @@ class SmokeScenarioTest(unittest.TestCase):
         Bugzilla.
         """
         self.assertTrue(
-            self._group_restrictions(),
+            self._restricted_bugs(),
             "no event declares a bug 'groups' value, so no live run drives the groups "
             "write path")
 
@@ -322,7 +320,7 @@ class SmokeScenarioTest(unittest.TestCase):
             if event.action == "bug.comment"
             and event.expected_postcondition["values"]["private"]
         }
-        for _event, alias, _groups in self._group_restrictions():
+        for alias in sorted(self._restricted_bugs()):
             self.assertNotIn(
                 alias, private,
                 f"{alias!r} is declared group-restricted and also carries a private "
