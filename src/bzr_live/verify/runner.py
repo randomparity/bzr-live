@@ -7,7 +7,7 @@ from dataclasses import replace
 from ..provision.keys import KeyStore
 from ..replay.context import ReplayContext
 from ..scenario import CompletedRecord, JournalStore, Reference, ValidatedScenario
-from . import Finding, VerifyError
+from . import Finding, ReadNotFound, VerifyError
 from .checks import (
     check_attachments,
     check_comments,
@@ -241,10 +241,16 @@ class Verifier:
         A bug declaring no group keeps `ServerReader`'s own message, because there the
         not-found is the ordinary absent-bug case and citing an upstream defect would
         send the reader somewhere the cause is not.
+
+        Only `ReadNotFound` is rewritten. `ServerReader` also raises plain `VerifyError`
+        for a reply whose shape it does not recognise, which says nothing about whether
+        the bug is visible -- calling that D12 would reintroduce, in the other
+        direction, exactly the misattribution this method exists to remove, and would
+        keep doing so after bzr#719 is closed.
         """
         try:
             return reader.links(bug_id, depth=depth)
-        except VerifyError:
+        except ReadNotFound:
             groups = bug.names.get("groups")
             if not groups:
                 raise

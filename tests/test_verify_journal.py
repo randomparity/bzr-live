@@ -562,6 +562,23 @@ class VerifierRunTest(_JournalFixture):
         self.assertIn("restricted", message)
         self.assertNotIn("the fixture does not hold", message)
 
+    def test_a_restricted_bug_whose_links_reply_is_malformed_is_not_d12(self) -> None:
+        # The other half of the narrowing. `ServerReader` raises for an unrecognised
+        # reply shape too, and that says nothing about whether the bug is visible.
+        # Calling it D12 would reintroduce the misattribution `_links` exists to
+        # remove -- and would keep doing so after bzr#719 is closed, because the shape
+        # refusal has nothing to do with the defect.
+        verifier = self._verifier(
+            [(0, BUG_VIEW_41, None), (0, HISTORY_41, None), (0, {"not": "a list"}, None)])
+        bug = self.expected.bugs["checkout-race"]
+        verifier._expected = replace(self.expected, bugs={"checkout-race": replace(
+            bug, names={**bug.names, "groups": frozenset({"restricted"})})})
+        with self.assertRaises(VerifyError) as caught:
+            verifier.run()
+        message = str(caught.exception)
+        self.assertIn("unrecognised shape", message)
+        self.assertNotIn("D12", message)
+
     def test_an_unrestricted_bug_whose_links_read_is_refused_is_not_d12(self) -> None:
         # The narrowing that keeps the message honest. With no group declared, a
         # not-found links read is the ordinary absent-bug case and keeps ServerReader's

@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from ..provision.adapters import BUG_ABSENT_CODES
 from ..replay.context import ReplayContext
 from ..scenario import Reference
-from . import VerifyError
+from . import ReadNotFound, VerifyError
 
 # bzr's own ceiling on a recursive link walk (src/types/bug/links.rs:13). Above it the
 # walk truncates and warns on stderr, which BzrClient.read discards on exit 0, so the
@@ -59,7 +59,11 @@ class ServerReader:
         payload = self._client.read(args, positionals=positionals,
                                     absent_codes=absent_codes)
         if payload is None:
-            raise VerifyError(
+            # ReadNotFound, not a bare VerifyError: a caller that can explain why an
+            # object was not found must be able to select this case without also
+            # catching the unrecognised-shape refusals below, which say nothing about
+            # whether the object exists.
+            raise ReadNotFound(
                 f"{' '.join(args)} {' '.join(positionals)} as {self._actor} reported "
                 "not-found; the journal names a bug the fixture does not hold")
         return payload
