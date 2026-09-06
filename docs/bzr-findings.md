@@ -40,7 +40,7 @@ already-filed one (D5).
 | [D9](#d9) | defect | On Bugzilla >= 5.1 the auto-detected `rest` mode never takes the XML-RPC path `bzr` documents as the only one returning a full comment thread or attachment `data` | [bzr#714](https://github.com/randomparity/bzr/issues/714) |
 | [G11](#g11) | gap | No command makes a bug group settable on a product, because Bugzilla's WebService does not expose group controls at all | — |
 | [D11](#d11) | defect | The alternate-auth retry is judged by HTTP status alone, so a policy refusal that is also 401 is discarded and surfaces as `410 "You must log in"` | [bzr#715](https://github.com/randomparity/bzr/issues/715) |
-| [D12](#d12) | defect | `bug links` reports a group-restricted bug as not found to a member who can read it through `bug view`, because its REST arm reads Bugzilla's search endpoint | hold: not filed |
+| [D12](#d12) | defect | `bug links` reports a group-restricted bug as not found to a member who can read it through `bug view`, because its REST arm reads Bugzilla's search endpoint, which filters silently | hold: not filed; blocked on #30 |
 
 ---
 
@@ -755,25 +755,38 @@ The bug carries no edges, so the correct answer is the empty list the XML-RPC ar
 an unrestricted bug that does carry edges, the default and XML-RPC arms return byte-identical
 results, so the disagreement is the restriction and nothing else.
 
-**Mechanism.** The two commands read different Bugzilla endpoints, and only one of them faults
-for a caller who may not see the bug.
+**Mechanism, measured.** The two commands read different Bugzilla endpoints, and only one of
+them faults for a caller who may not see the bug. Both endpoints were driven directly against
+the same fixture and the same key, in all three auth modes, which is what promotes this from a
+source reading to an observation:
 
-`get_bug_links_nodes` (`src/client/resources/bug.rs:490-508`) routes both `Rest` and `Hybrid`
-to `get_bug_links_nodes_rest` (`:510-524`), which issues
-`GET /rest/bug?id=<id>&include_fields=…` — Bugzilla's **search** endpoint. That path filters
-bugs the caller cannot see into an empty `200` instead of faulting; `bzr`'s own regression test
-records exactly that behaviour in its heading (`src/client/resources/bug_tests.rs:1327-1336`,
-"Bugzilla's search path filters bugs the caller cannot see into an empty 200 result instead of
-faulting"). No error status is returned, so `retry_with_alternate_auth`
-(`src/client/transport.rs:121-135`) never fires and the read stays effectively unauthenticated
-— which is [D8](#d8). `handle` then fails the whole command, because the root is missing from
-the reply (`src/commands/bug/links.rs:25-31`, `BzrError::NotFound`).
+| Request, as `admin-ops` | no auth | `X-BUGZILLA-API-KEY` header | `Bugzilla_api_key` param |
+|---|---|---|---|
+| `GET /rest/bug/11?include_fields=id,groups,estimated_time` — the **direct** path `bug view` reads | `401` code 102 | `401` code 102 | `200` `{"id":11,"groups":["restricted"],"estimated_time":0}` |
+| `GET /rest/bug?id=11&include_fields=…` — the **search** path `bug links` reads | `200` `{"bugs":[]}` | `200` `{"bugs":[]}` | `200`, the bug |
+| `GET /rest/bug/1?include_fields=id,estimated_time,remaining_time` — unrestricted | `200` `{"id":1}` | `200` `{"id":1}` | `200` `{"id":1,"estimated_time":8,"remaining_time":3.5}` |
 
-`bug view` reads `/rest/bug/<id>` — the direct path — which answers **401** for a bug the
-anonymous caller may not see. That status is what fires the retry, the retry authenticates, and
-the bug comes back with its `groups` and its time fields. The `XmlRpc` arm of
-`get_bug_links_nodes` takes the same direct shape, one `get_bug` per id, which is why it
-succeeds where the REST arm does not.
+Header auth is byte-for-byte identical to no auth on every row, because this Bugzilla has no
+API-key header path at all: `grep -ril` over the docroot's `.pm`/`.cgi`/`.pl` for
+`X-BUGZILLA-API-KEY`, `X_BUGZILLA_API_KEY`, `HTTP_X_BUGZILLA` and `Bearer` returns zero hits,
+and `Bugzilla::Auth::Login::APIKey::get_login_info:33` reads `Bugzilla_api_key` out of
+`$params` only. That is issue #30's finding, re-measured here rather than relayed.
+
+Row 1 is why `bug view` works: the **401** fires `retry_with_alternate_auth`
+(`src/client/transport.rs:121-135`), the retry re-sends with query-parameter auth, and the bug
+comes back complete. Row 2 is this entry: `get_bug_links_nodes`
+(`src/client/resources/bug.rs:490-508`) routes both `Rest` and `Hybrid` to
+`get_bug_links_nodes_rest` (`:510-524`), which reads the search endpoint — and Bugzilla filters
+a bug the caller cannot see into an empty **200** instead of faulting. `bzr`'s own regression
+test records exactly that server behaviour (`src/client/resources/bug_tests.rs:1327-1336`).
+**No error status means nothing fires the retry**, so the read stays anonymous and `handle`
+turns the missing root into `BzrError::NotFound` (`src/commands/bug/links.rs:25-31`). The
+`XmlRpc` arm takes the direct shape instead, one `get_bug` per id, which is why it succeeds.
+
+Row 3 is [D8](#d8)'s ordinary case, included because it settles a question this entry would
+otherwise leave open: an unrestricted bug's read is *not* retried — there is no 401 to trigger
+it — so it returns the anonymous projection, with both time fields absent. A restricted bug is
+the exception in both directions: the read authenticates, and `estimated_time` arrives with it.
 
 **Class: defect.** `get_bug_links_nodes`'s doc comment states the conflation deliberately —
 "Inaccessible/nonexistent ids are omitted from the result; the caller decides whether an
@@ -794,11 +807,15 @@ authorization, which has not been given. `bzr` ADR 0015, "A server error is neve
 empty result", is adjacent but does not settle this one: here Bugzilla sends no error at all,
 which is the part that makes the empty result indistinguishable from absence at this layer.
 
-**What the fixture does.** Not yet decided, and that decision is the operator's. The verifier
-reads every bug's topology unconditionally (`src/bzr_live/verify/runner.py`,
-`ServerReader.links`), so any scenario declaring a bug group aborts `verify` on this entry
-whatever else it gets right. Two responses are open, and issue #42 is parked on the choice:
-route the links reads through `--api xmlrpc`, as `observed.py` already routes comments and
-attachments through `--api hybrid` for a documented transport reason; or report a restricted
-bug's links as `unverifiable` with this entry as the reason, as `UNVERIFIABLE_FIELDS` already
-does for the time-tracking fields. No substitution is made in the meantime.
+**What the fixture does.** Nothing, and waits. The verifier reads every bug's topology
+unconditionally (`src/bzr_live/verify/runner.py`, `ServerReader.links`), so any scenario
+declaring a bug group aborts `verify` here whatever else it gets right — which is why issue #42
+is parked rather than shipped.
+
+Routing the links reads through `--api xmlrpc` would make the abort go away, and is deliberately
+not done: it would leave `make smoke` green over a read `bzr` cannot perform on its default
+transport, which is the compensation `AGENTS.md` forbids. The measurement above is also what
+makes the wait cheap — row 2's query-parameter column already returns the bug, so **the moment
+the search request authenticates, `bug links` answers correctly with no change to this
+repository at all.** That makes this entry blocked on issue #30's auth work rather than on a
+fixture decision, and the loud abort is the correct behaviour until then.
