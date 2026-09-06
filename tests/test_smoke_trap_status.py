@@ -86,6 +86,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Resolved via PATH rather than hardcoded: `true` lives at /usr/bin/true on macOS and
+# /bin/true on Linux, and the rows below need only a value that is non-empty and, for
+# smoke_scenario.sh, actually executable -- it execs "$BZR" --version for real before
+# ever reaching its shadowed command (issue #38). Every POSIX host ships `true` on
+# PATH, so a `None` here means the host itself cannot run these scripts.
+TRUE_BINARY = shutil.which("true")
+assert TRUE_BINARY, "no `true` executable found on PATH"
+
 # Distinguishable from 0 and from 1, so the command-failure mode separates "the
 # cleanup preserved the failing status" from "the cleanup re-exited with a literal".
 STUB_STATUS = 3
@@ -104,10 +112,10 @@ SHADOWED_COMMANDS = ("uv", "docker", "make")
 # `.env` in the checkout. A row names a script under `tests/`, or carries a
 # repo-relative path when the script lives elsewhere.
 SMOKE_SCRIPTS = (
-    ("replay_smoke.sh", "uv", {"BZR_LIVE_BZR": "/bin/true", "BZ_PORT": "8080"}),
-    ("provision_smoke.sh", "docker", {"BZR_LIVE_BZR": "/bin/true", "BZ_PORT": "8080"}),
+    ("replay_smoke.sh", "uv", {"BZR_LIVE_BZR": TRUE_BINARY, "BZ_PORT": "8080"}),
+    ("provision_smoke.sh", "docker", {"BZR_LIVE_BZR": TRUE_BINARY, "BZ_PORT": "8080"}),
     ("checkpoint_smoke.sh", "make", {}),
-    ("smoke_scenario.sh", "uv", {"BZR_LIVE_BZR": "/bin/true", "BZ_PORT": "8080"}),
+    ("smoke_scenario.sh", "uv", {"BZR_LIVE_BZR": TRUE_BINARY, "BZ_PORT": "8080"}),
     ("lifecycle_test.sh", "mkdir", {}),
     ("scripts/lifecycle", "docker", {}),
 )
@@ -173,6 +181,25 @@ class SmokeTrapStatusTest(unittest.TestCase):
     def test_a_bash_interpreter_was_discovered(self):
         """Guard: an empty interpreter list would make every case below vacuous."""
         self.assertTrue(discovered_bash_interpreters(), "no bash interpreter found")
+
+    def test_a_configured_bzr_live_bzr_stub_exists_and_is_executable(self):
+        """Guard: a row's `BZR_LIVE_BZR` need only be non-empty for its script's
+        `BZR=${BZR_LIVE_BZR:?...}` precondition, but `smoke_scenario.sh` execs it for
+        real at its first line of output (`"$BZR" --version`), before ever reaching
+        its shadowed command. A stub that does not exist on this host does not fail
+        that exec -- `set -euo pipefail` does not see it, because the exec sits inside
+        a command substitution nested in another command's arguments -- but it prints
+        a "No such file or directory" line to stderr that has nothing to do with the
+        fault under test (issue #38)."""
+        for script, _command, extra_env in SMOKE_SCRIPTS:
+            stub = extra_env.get("BZR_LIVE_BZR")
+            if stub is None:
+                continue
+            with self.subTest(script=script):
+                self.assertTrue(
+                    os.path.isfile(stub) and os.access(stub, os.X_OK),
+                    f"{script}'s BZR_LIVE_BZR stub {stub!r} does not exist or is "
+                    f"not executable on this host")
 
     def test_no_script_indexes_an_array_from_the_end(self):
         for script, _command, _env in SMOKE_SCRIPTS:
