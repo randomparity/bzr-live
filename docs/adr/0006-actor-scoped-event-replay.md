@@ -313,7 +313,7 @@ per ADR 0013's least-privilege choice), and `groups_mandatory` selects `CONTROLM
 while a default group needs `CONTROLMAPDEFAULT`. A mapping written at either of those values
 would call for comparing `groups` by containment instead — a mode this reconciler does not
 have and would have to grow. `_UPDATE_COMPARE_SETS` compares every field by equality
-(`src/bzr_live/replay/actions.py:453`), `cc` included. The containment `cc` carries in
+(`src/bzr_live/replay/actions.py`, in `reconcile`, `:454`), `cc` included. The containment `cc` carries in
 `src/bzr_live/verify/checks.py:84` belongs to the verifier and answers an unrelated question
 — a flag requestee landing on the CC list, and a server-derived CC set that equality would
 assert the exclusion of (PR #23) — not a product widening a set.
