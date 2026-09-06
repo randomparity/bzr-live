@@ -263,8 +263,8 @@ Depends on Task 1 having landed the fold arm; nothing else crosses between them.
    "groups": ("groups", lambda context, ref: ref.name),
    ```
 
-   The set table, not `_UPDATE_COMPARE`, and equality rather than `cc`'s containment — the
-   spec records both grounds.
+   The set table, not `_UPDATE_COMPARE`, and equality, which is what that table applies to
+   every field it holds — the spec records both grounds.
 
 6. **Replace the `_UPDATE_ALWAYS_RETRY` comment** so each field names its own ground; the
    tuple is unchanged and both fields stay. `estimated_hours`: Bugzilla gates the
