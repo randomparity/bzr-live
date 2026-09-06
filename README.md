@@ -172,16 +172,17 @@ Two tiers prove it. The offline tier needs no server and runs with the rest of t
 
     uv run --python 3.11 python -m unittest tests.test_smoke_scenario
 
-Fourteen assertions cover the topology and coverage invariants, including the scenario
-digest, which is pinned so that editing the fixture is a deliberate change. Five are guards:
+Fifteen assertions cover the topology and coverage invariants, including the scenario
+digest, which is pinned so that editing the fixture is a deliberate change. Six are guards:
 the insider group behind private comments, the 255-byte attachment summary ceiling, the rule
 that any create declaring an assignee or a dependency edge is filed by an actor declaring
-`editbugs`, the rule that every actor touching a group-restricted bug holds that group, and
-the rule that such a bug declares no private comment. All but the third move failures a
-live run would raise anyway into a container-free run; only the third targets a substitution
-Bugzilla makes silently, and on this image even that is unreachable, because stock Bugzilla
-grants `editbugs` to every account by regexp. The offline tier's value is speed and no
-Docker, not extra reach.
+`editbugs`, and three around bug groups — that every actor touching a group-restricted bug
+holds that group, that such a bug declares no private comment, and that the actor the
+verifier reads back as holds every group any bug is restricted to. All but the third move
+failures a live run would raise anyway into a container-free run; only the third targets a
+substitution Bugzilla makes silently, and on this image even that is unreachable, because
+stock Bugzilla grants `editbugs` to every account by regexp. The offline tier's value is
+speed and no Docker, not extra reach.
 
 The live tier runs ten stages against the running fixture:
 

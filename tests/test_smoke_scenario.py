@@ -1,6 +1,6 @@
 """Offline invariants over the committed smoke scenario (issue #19).
 
-These assertions run with no server and no Docker. Five are guards, and what each
+These assertions run with no server and no Docker. Six are guards, and what each
 one buys differs -- the honest accounting, because an overstated rationale is how a
 test keeps being trusted for a reason it does not earn:
 
@@ -21,11 +21,13 @@ test keeps being trusted for a reason it does not earn:
   every account is granted it automatically. The assertion tests the *declared*
   group set, which is the property the scenario controls, and it would bite if that
   regexp were ever cleared.
-- `test_group_restricted_bugs_are_only_touched_by_members` and
-  `test_group_restricted_bugs_declare_no_private_comment` are the same *loud*
-  shift as the first guard, one for a Bugzilla refusal mid-replay and one for a
-  verifier read that cannot be issued at all. Each states its own reason where
-  it is written.
+- `test_group_restricted_bugs_are_only_touched_by_members`,
+  `test_group_restricted_bugs_declare_no_private_comment` and
+  `test_the_verifier_reader_holds_every_restricted_bugs_group` are the same *loud*
+  shift as the first guard, covering the three ways a declared bug group aborts a
+  live run: a Bugzilla refusal mid-replay, a visibility read that cannot be issued
+  at all, and a reader that cannot open the bug every check reads through. Each
+  states its own reason where it is written.
 
 See docs/workflow/specs/2026-09-01-smoke-scenario-design.md, "Proof".
 """
@@ -41,6 +43,7 @@ from bzr_live.replay.actions import (
     render_attachment_summary,
 )
 from bzr_live.scenario import load_scenario
+from bzr_live.verify.expected import INSIDER_GROUP
 
 SCENARIO = Path(__file__).resolve().parent.parent / "scenarios" / "smoke"
 
@@ -156,10 +159,25 @@ class SmokeScenarioTest(unittest.TestCase):
         declared = event.expected_postcondition["values"].get("groups") or ()
         return {ref.name for ref in declared}
 
+    def _restrictions(self):
+        """alias -> the group set the last declaring event leaves the bug in.
+
+        A declaration replaces rather than extends, exactly as `BugUpdateHandler.build`'s
+        add/remove delta does on the server, so the last one wins.
+        """
+        final: dict[str, set[str]] = {}
+        for event in self.scenario.events:
+            alias, declared = self._touched_bug(event), self._declared_groups(event)
+            if alias is not None and declared:
+                final[alias] = declared
+        return final
+
     def _restricted_bugs(self):
         """The aliases of every bug some event declares a group on."""
-        return {self._touched_bug(event) for event in self.scenario.events
-                if self._declared_groups(event)} - {None}
+        return set(self._restrictions())
+
+    def _groups_of(self, alias):
+        return self._restrictions()[alias]
 
     def test_digest_matches_the_pinned_value(self):
         self.assertEqual(
@@ -309,10 +327,12 @@ class SmokeScenarioTest(unittest.TestCase):
         `check_visibility` proves a private comment is withheld by re-reading the
         thread as an actor outside the insider group (`verify/runner.py`). That actor
         is outside the restricting group too, so Bugzilla refuses the whole read
-        rather than returning a thread with the private comment dropped, and
-        `ServerReader._object` raises on the refusal instead of reporting a finding.
-        Declaring both on one bug asserts comment privacy through a bug the reader
-        may not open, which reads as a fixture fault rather than the scenario's own.
+        rather than returning a thread with the private comment dropped. The refusal
+        raises out of `BzrClient.read` -- api_code 102 at exit 4, which
+        `BUG_ABSENT_CODES` deliberately excludes -- before `ServerReader` inspects a
+        payload at all. Declaring both on one bug asserts comment privacy through a
+        bug the reader may not open, which reads as a fixture fault rather than the
+        scenario's own.
         """
         private = {
             event.expected_postcondition["target"].name
@@ -325,6 +345,37 @@ class SmokeScenarioTest(unittest.TestCase):
                 alias, private,
                 f"{alias!r} is declared group-restricted and also carries a private "
                 "comment, so the outsider visibility read cannot reach it")
+
+    def test_the_verifier_reader_holds_every_restricted_bugs_group(self):
+        """Guard: the reader every check reads through must be able to open the bug.
+
+        `Verifier._read_all` reads each bug as `insider or outsider`, and
+        `check_reader_keys` proves only that the pick has an API key -- never that it
+        can see a restricted bug. Nothing else covers this: the membership guard above
+        iterates event *actors*, and the reader is chosen from the resource list by
+        `expected._reader`, so it need not act on any event at all. Left unguarded,
+        `bug view` on the restricted bug answers api_code 102 and the run aborts in the
+        live tier, which is the cost these guards exist to avoid.
+
+        The pick is reproduced here rather than imported because `_reader` returns the
+        first matching actor in declaration order, which is the property under test.
+        """
+        insider = next(
+            (name for name, resource in self.actors.items()
+             if INSIDER_GROUP in self._groups(name)), None)
+        outsider = next(
+            (name for name, resource in self.actors.items()
+             if INSIDER_GROUP not in self._groups(name)), None)
+        reader = insider or outsider
+        self.assertIsNotNone(reader, "the scenario declares no actor to read it back")
+        held = self._groups(reader)
+        for alias in sorted(self._restricted_bugs()):
+            for name in sorted(self._groups_of(alias)):
+                self.assertIn(
+                    name, held,
+                    f"{alias!r} is restricted to group {name!r}, which the verifier's "
+                    f"reader {reader!r} does not hold, so every check on that bug "
+                    "reads as an actor the server will refuse")
 
     def test_attachment_summaries_fit(self):
         """Guard: Bugzilla truncates an over-length description instead of refusing."""
