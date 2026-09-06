@@ -90,9 +90,12 @@ ROOT = Path(__file__).resolve().parent.parent
 # /bin/true on Linux, and the rows below need only a value that is non-empty and, for
 # smoke_scenario.sh, actually executable -- it execs "$BZR" --version for real before
 # ever reaching its shadowed command (issue #38). Every POSIX host ships `true` on
-# PATH, so a `None` here means the host itself cannot run these scripts.
+# PATH, so a `None` here means the host itself cannot run these scripts. Raised rather
+# than asserted: `python -O` strips a bare `assert`, which would silently hand every
+# SMOKE_SCRIPTS row a `None` `BZR_LIVE_BZR` instead of failing here with the reason.
 TRUE_BINARY = shutil.which("true")
-assert TRUE_BINARY, "no `true` executable found on PATH"
+if TRUE_BINARY is None:
+    raise RuntimeError("no `true` executable found on PATH")
 
 # Distinguishable from 0 and from 1, so the command-failure mode separates "the
 # cleanup preserved the failing status" from "the cleanup re-exited with a literal".
