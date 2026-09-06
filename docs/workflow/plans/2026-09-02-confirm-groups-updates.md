@@ -52,7 +52,8 @@ not assert — the silent gap issue #27 exists to close.
 | `src/bzr_live/replay/actions.py` | modify — refusal table, `build` delta loop, set-comparison table, always-retry comment |
 | `tests/fixtures/verify-groups-update/{scenario.json,resources.json,events.jsonl}` | create — the scenario the fold test folds |
 | `tests/test_verify_expected.py` | modify — fold regression test; correct the stale D3 comment at `:172-174` |
-| `tests/test_replay.py` | modify — **delete** `test_update_rejects_groups`, add four tests, correct the stale D3 comment at `:640-642` |
+| `tests/test_replay.py` | modify — **delete** `test_update_rejects_groups`, add four tests, correct the stale D3 comments at `:486-487` and `:640-642` |
+| `tests/test_fault_injection.py` | modify — correct the stale D3 comment at `:461-464`, which cites the finding by name |
 | `docs/bzr-findings.md` | modify — D3's two now-false paragraphs, new D10 entry and table row, G11's dangling "not yet recorded in this file" |
 | `docs/adr/0006-actor-scoped-event-replay.md` | modified in the design phase |
 | `docs/workflow/specs/2026-09-02-confirm-groups-updates-design.md` | created in the design phase |
@@ -295,10 +296,24 @@ Depends on Task 1 having landed the fold arm; nothing else crosses between them.
    than the previous one: written in Task 1 it would have asserted a table state that did not
    exist yet.
 
-8. **Correct the same stale claim at `tests/test_replay.py:640-642`**, which explains
-   `test_set_retries_when_a_declared_field_is_unreadable` with "it declares
-   `remaining_hours`, which bzr bug view never serializes". Replace with the field's real
-   ground: Bugzilla decrements `remaining_time` by logged work. Behaviour unchanged.
+8. **Correct the same stale claim at its three remaining sites**, all explaining why a
+   `remaining_hours` payload can only reconcile as `retry`, and all giving D3's dead reason
+   for it. Replace each with the field's real ground — Bugzilla decrements `remaining_time`
+   by logged work, so the declared value is not the server's final state. Behaviour unchanged
+   at every site; these are comments.
+
+   - `tests/test_replay.py:640-642` — "it declares `remaining_hours`, which bzr bug view
+     never serializes".
+   - `tests/test_replay.py:486-487` — `_set_event`'s "which bzr bug view never serializes and
+     would force retry regardless of what this checks".
+   - `tests/test_fault_injection.py:461-464` — `_readable_update`'s "`remaining_hours`, which
+     `bzr bug view` never serializes (finding D3)". **This one cites D3 by name**, so the
+     Global Constraint "cite D3 nowhere after this change" fails without it. It is the only
+     D3 citation outside `actions.py` and the register.
+
+   Found by sweeping `rg 'never serializes|_UPDATE_UNSUPPORTED|does not return groups'` over
+   `src tests docs README.md` rather than by trusting this plan's earlier file map, which
+   named only the first.
 
 9. **Run the tests and confirm they pass.**
 
@@ -331,6 +346,7 @@ Depends on Task 1 having landed the fold arm; nothing else crosses between them.
   as a claim the field can never be read.
 - `_update_other`'s docstring names only `version`, in the same commit that leaves only
   `version` in the table.
+- `rg 'finding D3' src tests` returns nothing outside `docs/`.
 - `test_update_rejects_groups` is gone rather than failing, and no comment in
   `tests/test_replay.py` still claims `bug view` omits the time fields.
 
