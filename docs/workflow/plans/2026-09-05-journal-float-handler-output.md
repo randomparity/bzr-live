@@ -15,7 +15,7 @@ values stay rejected on both layers.
 Spec: `docs/workflow/specs/2026-09-05-journal-float-handler-output-design.md` ·
 ADR: `docs/adr/0014-journal-handler-output-json-numbers.md`
 
-Expected implementation size: 70–95 changed lines (S) — from the file map below: ~21 source lines across three files, ~50 in `tests/test_journal.py`, ~7 in `tests/test_scenario_events.py`.
+Expected implementation size: 70–95 changed lines (S) — from the file map below: ~18 source lines across three files, ~51 in `tests/test_journal.py`, ~7 in `tests/test_scenario_events.py`.
 
 ## Global Constraints
 
@@ -40,23 +40,34 @@ Expected implementation size: 70–95 changed lines (S) — from the file map be
 | `tests/test_journal.py` | `completed()` helper takes `handler_output`; three new tests. |
 | `tests/test_scenario_events.py` | One new test: a float in an `events.jsonl` line still fails. |
 
-## Task 1 — the journal round-trips a finite float
+## One task — admit finite floats, keep rejecting the rest
 
-**Interfaces.** Defines, for Task 2:
+One task, because the validator branch, the decoder opt-in, and the four tests are one
+deliverable no reviewer would accept in halves: the validator fix alone *is* the write-only
+record the change exists to avoid.
+
+**Interfaces.** Defines
 `_decode_json_bytes(content: bytes, source: str, field: str = "$", *, allow_float: bool = False) -> object`;
 `JsonValue: TypeAlias = bool | int | float | str | tuple["JsonValue", ...] | Mapping[str, "JsonValue"] | None`;
 `JournalTests.completed(self, attempt: int = 1, next_action: str = "advance", handler_output: object | None = None) -> CompletedRecord`.
-Relies on these, confirmed present at `226b607b`:
-`JournalStore.write_in_flight(record, *, known_secrets=()) -> Path`,
-`JournalStore.replace_completed(record, *, known_secrets=()) -> Path`,
-`JournalStore.read(event, attempt=None) -> InFlightRecord | CompletedRecord | None`, and
-`CompletedRecord`, `InFlightRecord`, `ScenarioValidationError`, `freeze_planned` already
-imported by `tests/test_journal.py`.
+Relies on these, confirmed present at `226b607b`: `JournalStore.write_in_flight(record, *,
+known_secrets=()) -> Path`; `JournalStore.replace_completed(record, *, known_secrets=()) ->
+Path`, returning `comment.000001.json` for these fixtures; `JournalStore.read(event,
+attempt=None)`; `CompletedRecord`, `InFlightRecord`, `ScenarioValidationError`,
+`freeze_planned`, already imported by `tests/test_journal.py`; `ScenarioEventTests.write()`
+and its `self.events` list of dicts, plus `load_scenario(path)` and
+`ScenarioValidationError`, already imported by `tests/test_scenario_events.py`.
 
-### 1.1 Parametrize the test helper
+**The one command**, referred to below as *the focused run*:
+
+```
+uv run --python 3.11 python -m unittest tests.test_journal tests.test_scenario_events -v
+```
+
+### 1. Parametrize the test helper
 
 In `tests/test_journal.py`, replace `JournalTests.completed`'s signature line and its
-`handler_output=` line with:
+`handler_output=` line, leaving every other line of the helper alone:
 
 ```python
     def completed(
@@ -71,9 +82,7 @@ In `tests/test_journal.py`, replace `JournalTests.completed`'s signature line an
             handler_output=freeze_planned({"ok": True}) if handler_output is None else handler_output,
 ```
 
-Leave every other line of the helper alone.
-
-### 1.2 Write the failing round-trip test
+### 2. Write the failing round-trip test, and confirm it fails
 
 Append to `JournalTests`:
 
@@ -93,14 +102,10 @@ Append to `JournalTests`:
         self.assertIn('"estimated_time":8.0', path.read_text(encoding="utf-8"))
 ```
 
-### 1.3 Confirm it fails
-
-`uv run --python 3.11 python -m unittest tests.test_journal -v -k round_trips_finite`
-
-Expect `FAILED (errors=1)` with
+The focused run must report this test failing with
 `journal:$.handler_output.estimated_time: contains an unsupported JSON value`.
 
-### 1.4 Admit finite floats in the validator
+### 3. Admit finite floats in the validator, and watch the error change
 
 In `src/bzr_live/scenario/journal.py`, add `import math` to the standard-library import
 block, between `import json` and `import os`. Then insert a branch in `_validate_json`,
@@ -116,14 +121,13 @@ immediately after the existing `if value is None or type(value) in (bool, int):`
         return value
 ```
 
-### 1.5 Confirm the write path passes and the read path still fails
-
-Rerun 1.3's command. Expect `FAILED (errors=1)` still, now with a *different* error —
+The focused run must still fail that test, now with a **different** error:
 `journal:$: floating-point numbers are not supported`, raised from `_decode_json_bytes`.
 That is layer two, and observing it here is the proof that the validator fix alone produces
-a write-only record.
+a write-only record. A run that goes green at this step means the read path was not
+exercised, and the test is wrong.
 
-### 1.6 Opt the journal read path into float decoding
+### 4. Opt the journal read path into float decoding
 
 In `src/bzr_live/scenario/loader.py`, replace `_decode_json_bytes`'s signature and the two
 `parse_*` lines of its `json.loads` call:
@@ -154,27 +158,11 @@ In `src/bzr_live/scenario/model.py`, replace the `JsonValue` alias line:
 JsonValue: TypeAlias = bool | int | float | str | tuple["JsonValue", ...] | Mapping[str, "JsonValue"] | None
 ```
 
-### 1.7 Confirm it passes, then commit
+The focused run must now report `OK`.
 
-Rerun 1.3's command; expect `OK` with 1 test run. Then:
+### 5. Write the two non-finite tests
 
-`git add -A && git commit -m "fix(journal): accept finite JSON numbers in handler output"`
-
-**Acceptance.** A completed record carrying `estimated_time: 8.0` and `remaining_time: 0.0`
-writes and re-reads; the re-read values are exactly `float`, the sibling `id` stays exactly
-`int`, `scenario_digest` is unchanged, and the on-disk record holds `"estimated_time":8.0`.
-
-## Task 2 — non-finite stays rejected on both layers; authored input is unchanged
-
-**Interfaces.** Consumes every name Task 1 defined; defines nothing further. Relies on
-these, confirmed present at `226b607b`: `JournalStore._filename` yields
-`comment.000001.json`, which `replace_completed` returns; `ScenarioEventTests.write()` and
-its `self.events` list of dicts in `tests/test_scenario_events.py`; `load_scenario(path)` and
-`ScenarioValidationError`, already imported there.
-
-### 2.1 The non-finite write path
-
-Append to `JournalTests` in `tests/test_journal.py`:
+Append both to `JournalTests` in `tests/test_journal.py`:
 
 ```python
     def test_completed_record_rejects_non_finite_numbers_before_writing(self) -> None:
@@ -189,13 +177,7 @@ Append to `JournalTests` in `tests/test_journal.py`:
             with self.assertRaises(ScenarioValidationError):
                 store.replace_completed(self.completed(handler_output={"t": float("nan")}))
             self.assertIsInstance(store.read("comment"), InFlightRecord)
-```
 
-### 2.2 The non-finite read path
-
-Append to `JournalTests`:
-
-```python
     def test_record_file_holding_a_non_finite_number_fails_to_decode(self) -> None:
         with JournalStore(self.state) as store:
             store.write_in_flight(self.in_flight())
@@ -210,7 +192,7 @@ Append to `JournalTests`:
         self.assertIn("floating-point numbers are not supported", str(caught.exception))
 ```
 
-### 2.3 Authored input is unchanged
+### 6. Write the authored-input test
 
 Append to `ScenarioEventTests` in `tests/test_scenario_events.py`:
 
@@ -223,46 +205,46 @@ Append to `ScenarioEventTests` in `tests/test_scenario_events.py`:
         self.assertIn("floating-point numbers are not supported", str(caught.exception))
 ```
 
-### 2.4 Confirm all three pass
+The focused run must report `OK` with all four new test names in the listing.
 
-`uv run --python 3.11 python -m unittest tests.test_journal tests.test_scenario_events -v`
-
-Expect `OK` with the three new test names in the listing.
-
-### 2.5 Verify the tests bite
+### 7. Verify the tests bite
 
 Four controlled faults, each reverted immediately after observing red, with the observed
 output recorded in the build ledger:
 
-1. `journal.py`: change `if not math.isfinite(value):` to `if False:`. Expect
+1. `journal.py`: `if not math.isfinite(value):` → `if False:`. Expect
    `test_completed_record_rejects_non_finite_numbers_before_writing` red.
 2. `journal.py` `_read_file`: drop `allow_float=True`. Expect
    `test_completed_record_round_trips_finite_time_tracking_numbers` red with
    `floating-point numbers are not supported`.
-3. `loader.py`: change `parse_constant=_reject_number(source, field)` to
-   `parse_constant=float`. Expect `test_record_file_holding_a_non_finite_number_fails_to_decode`
-   red.
-4. `loader.py`: change the `allow_float` default to `True`. Expect
-   `test_rejects_a_float_in_an_event_line` and
-   `ScenarioResourceTests::test_rejects_floats_and_non_finite_numbers` red — the fault that
-   proves the default is what preserves ADR 0002.
+3. `loader.py`: `parse_constant=_reject_number(source, field)` → `parse_constant=float`.
+   Expect `test_record_file_holding_a_non_finite_number_fails_to_decode` red.
+4. `loader.py`: `allow_float` default → `True`. Expect `test_rejects_a_float_in_an_event_line`
+   and `ScenarioResourceTests::test_rejects_floats_and_non_finite_numbers` red — the fault
+   that proves the default is what preserves ADR 0002.
 
-### 2.6 Guardrails, bare, then commit
+### 8. Guardrails, bare, then commit
 
 `make check` — expect exit 0. `make test` — expect exit 0 and `OK` (409 tests at `226b607b`,
 413 now). Then:
 
-`git add -A && git commit -m "test(journal): cover finite and non-finite JSON numbers"`
+```
+git add -A
+git commit -m "fix(journal): accept finite JSON numbers in handler output"
+```
 
-**Acceptance.** Non-finite is refused on write with `must be a finite number` and on read
-with `floating-point numbers are not supported`; a float in an `events.jsonl` line still
-fails to load; `tests/test_scenario_resources.py` is unmodified and green; both guardrails
-green run bare.
+**Acceptance.** A completed record carrying `estimated_time: 8.0` and `remaining_time: 0.0`
+writes and re-reads, the values exactly `float`, a sibling `id` exactly `int`,
+`scenario_digest` unchanged, the on-disk record holding `"estimated_time":8.0`. Non-finite is
+refused on write with `must be a finite number` and on read with `floating-point numbers are
+not supported`. A float in an `events.jsonl` line still fails to load,
+`tests/test_scenario_resources.py` is unmodified and green, and both guardrails are green run
+bare.
 
 ## Rollback
 
 Every change is a validator branch, a keyword-only parameter with a policy-preserving
-default, and a type alias. Reverting the two commits restores `226b607b` behaviour exactly;
-no state or on-disk record needs migrating, and a record written under this change is
+default, and a type alias. Reverting the commit restores `226b607b` behaviour exactly; no
+state or on-disk record needs migrating, and a record written under this change is
 unreadable by an older build only if it actually carries a float — which is the abort this
 change removes.
