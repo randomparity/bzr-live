@@ -76,19 +76,9 @@ def _decode_pairs(value: object, source: str, field: str) -> object:
     return value
 
 
-def _reject_number(source: str, field: str) -> Callable[[str], object]:
+def _reject_number(source: str, field: str, message: str) -> Callable[[str], object]:
     def reject(_: str) -> object:
-        raise _error(source, field, "floating-point numbers are not supported")
-
-    return reject
-
-
-def _reject_constant(source: str, field: str) -> Callable[[str], object]:
-    # Separate from `_reject_number` because it fires on both decode policies: the journal
-    # path supports floats, so "floating-point numbers are not supported" would be false
-    # there. Non-finite is the thing neither path accepts.
-    def reject(_: str) -> object:
-        raise _error(source, field, "non-finite numbers are not supported")
+        raise _error(source, field, message)
 
     return reject
 
@@ -105,12 +95,15 @@ def _decode_json_bytes(
             text,
             object_pairs_hook=_Pairs,
             # Authored scenario input excludes floats (ADR 0002); captured journal handler
-            # output admits finite ones (ADR 0014). `parse_constant` is unconditional, so the
-            # bare NaN/Infinity tokens are refused in both modes -- but an overflow literal
-            # like 1e400 reaches parse_float, not parse_constant, and is caught downstream by
-            # `_validate_json`'s math.isfinite branch.
-            parse_float=float if allow_float else _reject_number(source, field),
-            parse_constant=_reject_constant(source, field),
+            # output admits finite ones (ADR 0014). `parse_constant` is unconditional -- its
+            # message says "non-finite" rather than "floating-point" because it also fires on
+            # the journal path, where floats are supported. An overflow literal like 1e400
+            # reaches parse_float instead, and is caught downstream by `_validate_json`.
+            parse_float=(
+                float if allow_float
+                else _reject_number(source, field, "floating-point numbers are not supported")
+            ),
+            parse_constant=_reject_number(source, field, "non-finite numbers are not supported"),
         )
     except ScenarioValidationError:
         raise

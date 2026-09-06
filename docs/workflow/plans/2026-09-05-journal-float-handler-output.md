@@ -28,7 +28,7 @@ Expected implementation size: 74–88 changed lines (S) — from the file map: ~
 
 | File | Change |
 |---|---|
-| `src/bzr_live/scenario/loader.py` | `_decode_json_bytes` gains keyword-only `allow_float: bool = False`; a new `_reject_constant` gives `parse_constant` its own message, since the journal path does support floats. |
+| `src/bzr_live/scenario/loader.py` | `_decode_json_bytes` gains keyword-only `allow_float: bool = False`; `_reject_number` gains a `message` parameter so `parse_constant` gets its own wording, since the journal path does support floats. |
 | `src/bzr_live/scenario/journal.py` | `import math`; `_validate_json` finite-`float` branch; `_read_file` passes `allow_float=True`. |
 | `src/bzr_live/scenario/model.py` | `JsonValue` alias gains `float`. |
 | `tests/test_journal.py` | `completed()` helper takes `handler_output`; three new tests. |
@@ -110,16 +110,14 @@ the test is wrong.
 
 ### 4. Opt the journal read path into float decoding
 
-In `src/bzr_live/scenario/loader.py`, add `_reject_constant` beside `_reject_number`, then
-replace `_decode_json_bytes`'s signature and the two `parse_*` lines of its `json.loads` call:
+In `src/bzr_live/scenario/loader.py`, give `_reject_number` a `message` parameter so one
+factory serves both hooks, then replace `_decode_json_bytes`'s signature and the two
+`parse_*` lines of its `json.loads` call:
 
 ```python
-def _reject_constant(source: str, field: str) -> Callable[[str], object]:
-    # Separate from `_reject_number` because it fires on both decode policies: the journal
-    # path supports floats, so "floating-point numbers are not supported" would be false
-    # there. Non-finite is the thing neither path accepts.
+def _reject_number(source: str, field: str, message: str) -> Callable[[str], object]:
     def reject(_: str) -> object:
-        raise _error(source, field, "non-finite numbers are not supported")
+        raise _error(source, field, message)
 
     return reject
 ```
@@ -132,12 +130,15 @@ def _decode_json_bytes(
 
 ```python
             # Authored scenario input excludes floats (ADR 0002); captured journal handler
-            # output admits finite ones (ADR 0014). `parse_constant` is unconditional, so the
-            # bare NaN/Infinity tokens are refused in both modes -- but an overflow literal
-            # like 1e400 reaches parse_float, not parse_constant, and is caught downstream by
-            # `_validate_json`'s math.isfinite branch.
-            parse_float=float if allow_float else _reject_number(source, field),
-            parse_constant=_reject_constant(source, field),
+            # output admits finite ones (ADR 0014). `parse_constant` is unconditional -- its
+            # message says "non-finite" rather than "floating-point" because it also fires on
+            # the journal path, where floats are supported. An overflow literal like 1e400
+            # reaches parse_float instead, and is caught downstream by `_validate_json`.
+            parse_float=(
+                float if allow_float
+                else _reject_number(source, field, "floating-point numbers are not supported")
+            ),
+            parse_constant=_reject_number(source, field, "non-finite numbers are not supported"),
 ```
 
 In `src/bzr_live/scenario/journal.py`, replace `JournalStore._read_file`'s return line. Leave
