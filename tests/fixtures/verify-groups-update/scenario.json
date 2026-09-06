@@ -1,0 +1,1 @@
+{"format_version":1,"name":"verify-groups-update","description":"A declared groups set replaced on bug.update: the fold rule verify-cc-order cannot exercise without destroying its own create-only case"}

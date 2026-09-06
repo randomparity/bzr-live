@@ -21,10 +21,12 @@ CHAIN_FIELDS = frozenset(
     {"status", "resolution", "assigned_to", "target_milestone", "summary"})
 
 # Declared field -> the reason it cannot be asserted. Printed verbatim by the report.
-# 'groups' is NOT here: bzr a7f6ab70 (PR #646, closing bzr#641) exposes it in bug view,
-# README pins make smoke at 63abb94e, which contains it, and the REST reply does carry a
-# groups key. No scenarios/smoke bug declares one, so that assertion has unit coverage
-# only -- the live tier has never exercised it.
+# 'groups' is NOT here, and that is now measured rather than inferred from bzr a7f6ab70
+# (PR #646, closing bzr#641). At 63abb94e, the floor README pins make smoke at, a
+# default-transport bug view returns [] for an unrestricted bug and the real member list
+# for a bug restricted to a group: the restricted read draws HTTP 401 and bzr's
+# alternate-auth retry recovers it. No scenarios/smoke bug declares one, so that
+# assertion still has unit coverage only -- the live tier has never exercised it.
 UNVERIFIABLE_FIELDS: Mapping[str, str] = {
     "remaining_hours":
         "Bugzilla decrements remaining_time by logged work, so the declared value is not "
@@ -36,10 +38,18 @@ UNVERIFIABLE_FIELDS: Mapping[str, str] = {
     # 63abb94e with the insider's own valid key on a freshly replayed fixture: the default
     # transport and --api hybrid both return a bug view with no estimated_time, while
     # `--api xmlrpc` returns 8.0 and `GET /rest/bug/1?Bugzilla_api_key=...` returns 8.
+    #
+    # A GROUP-RESTRICTED bug is the exception, and the entry is worded as a floor because
+    # of it: there the 401 is raised for the whole read, so the same alternate-auth retry
+    # that recovers groups authenticates, and the time fields return with the rest of the
+    # bug. Measured at 63abb94e as an insider on a restricted bug: bug view carries
+    # estimated_time and remaining_time alongside groups. Every scenarios/smoke bug is
+    # anonymously readable, so the general case is the one this entry states.
     "estimated_hours":
         "Bugzilla gates estimated_time on timetrackinggroup ('editbugs' here) and finding "
         "D8 leaves bzr's REST reads unauthenticated, so bug view returns no "
-        "estimated_time on this verifier's transport; only --api xmlrpc reads it back",
+        "estimated_time for a bug this reader could have read anonymously; --api xmlrpc "
+        "reads it back, as does any read of a bug whose restriction forces authentication",
 }
 WORKTIME_UNVERIFIABLE = (
     "Bugzilla gates time-tracking fields on timetrackinggroup (issue #22), so logged "
@@ -54,7 +64,7 @@ _SCALARS: Mapping[str, tuple[str, str]] = {
     "milestone": ("target_milestone", "target_milestone"),
 }
 # Set-valued declared fields that compare by name or email.
-_NAME_SETS = ("cc", "keywords")
+_NAME_SETS = ("cc", "keywords", "groups")
 # Set-valued declared fields whose members are bug aliases.
 _EDGE_SETS = ("depends_on", "blocks")
 # The inverse Bugzilla materializes on the other endpoint. dupe_of has no stock inverse:
@@ -184,7 +194,7 @@ def _create(event: PlannedEvent, values: Mapping[str, object], bugs: dict[str, _
             bug.scalars[view_key] = _project(values[key], emails)
     if values["estimated_hours"] is not None:
         _unverifiable(bug, "estimated_hours")
-    for key in (*_NAME_SETS, "groups"):
+    for key in _NAME_SETS:
         if values[key]:
             bug.names[key] = {_project(ref, emails) for ref in values[key]}
     bugs[bug.alias] = bug
