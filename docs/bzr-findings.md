@@ -36,10 +36,10 @@ already-filed one (D5).
 | [G10](#g10) | gap | `bug update` addresses bugs by numeric id only, where `bug view` accepts aliases too | — |
 | [D6](#d6) | defect (fixed upstream) | `component view` reports `default_assignee: null` for a component Bugzilla says has one | fixed by `5fb99362` |
 | [D7](#d7) | defect | `bug history` attributes a `comment_id` to a change that carried no comment | hold: recording only, filing declined |
-| [D8](#d8) | defect | The auth probe concludes header auth works when it does not, so REST reads run effectively unauthenticated | hold: recording only |
-| [D9](#d9) | defect | On Bugzilla >= 5.1 the auto-detected `rest` mode never takes the XML-RPC path `bzr` documents as the only one returning a full comment thread or attachment `data` | not filed |
+| [D8](#d8) | defect | The auth probe concludes header auth works when it does not, so REST reads run effectively unauthenticated | [bzr#713](https://github.com/randomparity/bzr/issues/713) |
+| [D9](#d9) | defect | On Bugzilla >= 5.1 the auto-detected `rest` mode never takes the XML-RPC path `bzr` documents as the only one returning a full comment thread or attachment `data` | [bzr#714](https://github.com/randomparity/bzr/issues/714) |
 | [G11](#g11) | gap | No command makes a bug group settable on a product, because Bugzilla's WebService does not expose group controls at all | — |
-| [D11](#d11) | defect | The alternate-auth retry is judged by HTTP status alone, so a policy refusal that is also 401 is discarded and surfaces as `410 "You must log in"` | not filed: needs operator decision |
+| [D11](#d11) | defect | The alternate-auth retry is judged by HTTP status alone, so a policy refusal that is also 401 is discarded and surfaces as `410 "You must log in"` | [bzr#715](https://github.com/randomparity/bzr/issues/715) |
 
 ---
 
@@ -446,7 +446,10 @@ reads: `--api hybrid` makes `bzr` *attempt* XML-RPC, and the package makes the f
 to REST on the transport failure and the data is lost again — which is what
 `check_comment_transport` (`src/bzr_live/verify/runner.py`) refuses on, naming the package.
 
-Filing upstream on `randomparity/bzr` is not authorized; this entry is the record.
+**Upstream.** [bzr#714](https://github.com/randomparity/bzr/issues/714), filed 2026-09-06 on
+the operator's authorization. The issue puts the contradiction as this entry does: the two call
+sites document XML-RPC as their only complete source, and the dispatch gate excludes it on every
+Bugzilla the fixture targets.
 
 ## D7
 
@@ -560,7 +563,12 @@ here and not taken.
 **Class: defect** — the probe's success signal does not discriminate, and it overrides a
 server response that was correct.
 
-**Upstream.** Not filed; recording only is what the operator authorized.
+**Upstream.** [bzr#713](https://github.com/randomparity/bzr/issues/713), filed 2026-09-06 on
+the operator's authorization, superseding the earlier recording-only ruling. The issue names the
+mechanism this entry establishes: `verify_header_auth_via_rest`
+(`src/client/auth/valid_login.rs:195-228` at `v0.9.0`) probes `rest/bug?limit=1` and treats any
+2xx as proof header auth works, but that endpoint answers 200 anonymously, so the probe cannot
+fail for the condition it verifies and overrides a correct negative from `rest/valid_login`.
 
 **What the fixture does.** It refutes the premise that a positive read observes the state the
 issuing actor would see, so the design states that boundary rather than assuming it. Note
@@ -705,11 +713,12 @@ this masking is reachable on any of them that the server refuses on policy groun
 group writes. Any Bugzilla fault mapping to `STATUS_NOT_AUTHORIZED` is masked the same way;
 `Constants.pm:270-284` lists fifteen such codes.
 
-**Upstream.** Not filed, and no operator ruling exists yet. A search of `randomparity/bzr`
-issues in all states for the retry predicate, the group-restriction refusal and the reported
-message found nothing covering this behaviour, so it is unreported upstream rather than a
-duplicate. Filing it is a separate decision that needs the operator's word, which `AGENTS.md`
-requires before any upstream filing.
+**Upstream.** [bzr#715](https://github.com/randomparity/bzr/issues/715), filed 2026-09-06 on
+the operator's authorization. The search recorded above found nothing covering this behaviour,
+so it was unreported rather than a duplicate. The issue carries the evidence split this entry
+draws — both reported errors measured, the discarded-body leg read from source and named as
+inferred — and leads on the departure from `bzr` ADR 0015, which is what makes it a defect
+rather than a judgement call.
 
 **What the fixture does.** Nothing: there is no client-side substitution to make, and inventing
 one would destroy the evidence. The fixture takes its unmasked group-control measurements over
