@@ -40,6 +40,7 @@ already-filed one (D5).
 | [D9](#d9) | defect | On Bugzilla >= 5.1 the auto-detected `rest` mode never takes the XML-RPC path `bzr` documents as the only one returning a full comment thread or attachment `data` | [bzr#714](https://github.com/randomparity/bzr/issues/714) |
 | [G11](#g11) | gap | No command makes a bug group settable on a product, because Bugzilla's WebService does not expose group controls at all | — |
 | [D11](#d11) | defect | The alternate-auth retry is judged by HTTP status alone, so a policy refusal that is also 401 is discarded and surfaces as `410 "You must log in"` | [bzr#715](https://github.com/randomparity/bzr/issues/715) |
+| [D12](#d12) | defect | `bug links` reports a group-restricted bug as not found to a member who can read it through `bug view`, because its REST arm reads Bugzilla's search endpoint | hold: not filed |
 
 ---
 
@@ -730,3 +731,74 @@ the wrong cause.
 The identifier `D10` is deliberately unused. This behaviour circulated in issues and working
 notes under that name for several days without ever being written here, and numbering it `D10`
 now would make those citations look retroactively correct; bzr-live#39 records that history.
+
+## D12
+
+**`bug links` reports a group-restricted bug as not found, to the same caller `bug view`
+serves it to.** *Observed against a running fixture on 2026-09-06, provisioned and replayed
+from `scenarios/smoke` by `make smoke`, as `admin-ops` — a member of the restricting group,
+holding a valid API key. Reproduced identically at `bzr 0.8.3-dev (63abb94e)`, the revision
+`README.md` pins `make smoke` at, and at `bzr 0.9.0 (173772b3)`. Source read at `63abb94e`.*
+
+`scenarios/smoke`'s `restrict-refund-rounding` restricts one bug to `restricted`. On that bug,
+one read succeeds and another denies the bug exists:
+
+| Read, as `admin-ops` | Exit | Reply |
+|---|---|---|
+| `bug view --fields=id,groups,estimated_time <id>` | 0 | `{"id":11,"groups":["restricted"],"estimated_time":0.0}` |
+| `bug history <id>` | 0 | the `groups` change, `old_value` `""`, `new_value` `"restricted"` |
+| `bug links <id>` | 2 | `{"error":{"resource":"bug","identifier":"11","type":"not_found","message":"bug not found: 11","exit_code":2}}` |
+| `--api hybrid bug links <id>` | 2 | the same `not_found` |
+| `--api xmlrpc bug links <id>` | 0 | `[]` |
+
+The bug carries no edges, so the correct answer is the empty list the XML-RPC arm returns. On
+an unrestricted bug that does carry edges, the default and XML-RPC arms return byte-identical
+results, so the disagreement is the restriction and nothing else.
+
+**Mechanism.** The two commands read different Bugzilla endpoints, and only one of them faults
+for a caller who may not see the bug.
+
+`get_bug_links_nodes` (`src/client/resources/bug.rs:490-508`) routes both `Rest` and `Hybrid`
+to `get_bug_links_nodes_rest` (`:510-524`), which issues
+`GET /rest/bug?id=<id>&include_fields=…` — Bugzilla's **search** endpoint. That path filters
+bugs the caller cannot see into an empty `200` instead of faulting; `bzr`'s own regression test
+records exactly that behaviour in its heading (`src/client/resources/bug_tests.rs:1327-1336`,
+"Bugzilla's search path filters bugs the caller cannot see into an empty 200 result instead of
+faulting"). No error status is returned, so `retry_with_alternate_auth`
+(`src/client/transport.rs:121-135`) never fires and the read stays effectively unauthenticated
+— which is [D8](#d8). `handle` then fails the whole command, because the root is missing from
+the reply (`src/commands/bug/links.rs:25-31`, `BzrError::NotFound`).
+
+`bug view` reads `/rest/bug/<id>` — the direct path — which answers **401** for a bug the
+anonymous caller may not see. That status is what fires the retry, the retry authenticates, and
+the bug comes back with its `groups` and its time fields. The `XmlRpc` arm of
+`get_bug_links_nodes` takes the same direct shape, one `get_bug` per id, which is why it
+succeeds where the REST arm does not.
+
+**Class: defect.** `get_bug_links_nodes`'s doc comment states the conflation deliberately —
+"Inaccessible/nonexistent ids are omitted from the result; the caller decides whether an
+omission is fatal (root not found) or skippable (a related bug)" — so the client layer's
+behaviour is designed. What is not defensible is the user-visible result: a caller who can read
+the bug through one subcommand is told by another that it does not exist. Two things would each
+close it independently, which is why this is recorded as one entry and not two:
+
+- Fixing [D8](#d8) would make the search request authenticated, so Bugzilla would stop
+  filtering the bug out and `bug links` would answer correctly with no change to this code.
+- Distinguishing "the search returned nothing" from "the root is inaccessible" — by reading the
+  root through the direct path, as `bug view` and the XML-RPC arm already do — would close it
+  even while D8 stands.
+
+Not checked against `bzr`'s own `docs/adr/` or its open issues, and **not filed**: this entry
+was produced by issue #42's first live run, and filing upstream needs the operator's
+authorization, which has not been given. `bzr` ADR 0015, "A server error is never masked by an
+empty result", is adjacent but does not settle this one: here Bugzilla sends no error at all,
+which is the part that makes the empty result indistinguishable from absence at this layer.
+
+**What the fixture does.** Not yet decided, and that decision is the operator's. The verifier
+reads every bug's topology unconditionally (`src/bzr_live/verify/runner.py`,
+`ServerReader.links`), so any scenario declaring a bug group aborts `verify` on this entry
+whatever else it gets right. Two responses are open, and issue #42 is parked on the choice:
+route the links reads through `--api xmlrpc`, as `observed.py` already routes comments and
+attachments through `--api hybrid` for a documented transport reason; or report a restricted
+bug's links as `unverifiable` with this entry as the reason, as `UNVERIFIABLE_FIELDS` already
+does for the time-tracking fields. No substitution is made in the meantime.
