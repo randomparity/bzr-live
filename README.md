@@ -235,7 +235,7 @@ intervals and are not included.
 [D12](docs/bzr-findings.md#d12).** Since the scenario began declaring a bug group, `verify`
 refuses at `bug links` on the restricted bug — `bzr` reads links through Bugzilla's search
 endpoint, which hides a bug the caller cannot see instead of faulting — so the run stops
-there and the six stages after it do not execute. The refusal is deliberate: it names the
+there and the seven stages after it do not execute. The refusal is deliberate: it names the
 defect and its upstream issue, and is neither waived nor routed around. The figures taken
 before it, describing the 47-event scenario, were 47 events replayed in 72.80s, 69 checks
 verified in 56.94s, and 69 checks re-verified in 59.02s after the checkpoint round trip, each
@@ -254,10 +254,18 @@ any (issue #22). Every other declared value on all 20 bugs is asserted — subje
 stops the run before those assertions are reached.
 
 The live tier proves both that the parts compose and that the state they leave behind is
-the one the scenario declares — up to D12, which currently stops it after replay. What it
-still establishes is the whole write path, including the group restriction: all 48 events
-execute, and reading the restricted bug back through `bug view` returns
-`groups: ["restricted"]` while `bug history` carries the change attributed to `admin-ops`.
+the one the scenario declares — up to D12, which currently stops it after replay.
+
+Be precise about what that leaves. The replay stage still proves the whole write path,
+including the group restriction: all 48 events execute against a real Bugzilla. The verify
+stage proves nothing at present, and not only for the restricted bug. `Verifier.run` prints
+its findings only after every read has returned, so the refusal discards the findings already
+collected — the restricted bug's `groups` comparison among them — and `pay-refund-rounding` is
+the eleventh of twenty bugs in fold order, so the nine after it are never read at all. This is
+not a false green: the run exits non-zero either way. It does mean the only live evidence that
+`bug view` reads `groups: ["restricted"]` back, and that `bug history` carries the change
+attributed to `admin-ops`, is the hand-run table in
+[D12](docs/bzr-findings.md#d12) — measured once at `63abb94e`, not asserted by `make smoke`.
 
 **It is now a merge gate.** `Container lifecycle`'s `x86_64-linux` job compiles `bzr` at the
 pinned revision above and runs this same `make smoke` on every pull request touching

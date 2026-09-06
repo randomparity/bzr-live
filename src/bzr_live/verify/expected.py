@@ -26,8 +26,10 @@ CHAIN_FIELDS = frozenset(
 # default-transport bug view returns [] for an unrestricted bug and the real member list
 # for a bug restricted to a group: the restricted read draws HTTP 401 and bzr's
 # alternate-auth retry recovers it. scenarios/smoke's restrict-refund-rounding declares one
-# (issue #42), so make smoke drives that assertion against the fixture rather than leaving
-# it to the unit suite.
+# (issue #42), so the fold does compare it against a live reply -- but make smoke does not
+# report the result yet: finding D12 stops the run at the same bug's links read, and run()
+# emits its findings only once every read has returned. The live evidence for the read-back
+# is the hand-run table at docs/bzr-findings.md#d12, not the automated tier.
 UNVERIFIABLE_FIELDS: Mapping[str, str] = {
     "remaining_hours":
         "Bugzilla decrements remaining_time by logged work, so the declared value is not "

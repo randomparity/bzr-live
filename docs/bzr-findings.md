@@ -40,7 +40,7 @@ already-filed one (D5).
 | [D9](#d9) | defect | On Bugzilla >= 5.1 the auto-detected `rest` mode never takes the XML-RPC path `bzr` documents as the only one returning a full comment thread or attachment `data` | [bzr#714](https://github.com/randomparity/bzr/issues/714) |
 | [G11](#g11) | gap | No command makes a bug group settable on a product, because Bugzilla's WebService does not expose group controls at all | — |
 | [D11](#d11) | defect | The alternate-auth retry is judged by HTTP status alone, so a policy refusal that is also 401 is discarded and surfaces as `410 "You must log in"` | [bzr#715](https://github.com/randomparity/bzr/issues/715) |
-| [D12](#d12) | defect | `bug links` reports a group-restricted bug as not found to a member who can read it through `bug view`, because its REST arm reads Bugzilla's search endpoint, which filters silently | hold: not filed; blocked on #30 |
+| [D12](#d12) | defect | `bug links` reports a group-restricted bug as not found to a member who can read it through `bug view`, because its REST arm reads Bugzilla's search endpoint, which filters silently | [bzr#719](https://github.com/randomparity/bzr/issues/719) |
 
 ---
 
@@ -801,21 +801,30 @@ close it independently, which is why this is recorded as one entry and not two:
   root through the direct path, as `bug view` and the XML-RPC arm already do — would close it
   even while D8 stands.
 
-Not checked against `bzr`'s own `docs/adr/` or its open issues, and **not filed**: this entry
-was produced by issue #42's first live run, and filing upstream needs the operator's
-authorization, which has not been given. `bzr` ADR 0015, "A server error is never masked by an
-empty result", is adjacent but does not settle this one: here Bugzilla sends no error at all,
-which is the part that makes the empty result indistinguishable from absence at this layer.
+Checked against `bzr`'s own records before filing, as the preamble to this file requires.
+`bzr` ADR 0015, "A server error is never masked by an empty result", is adjacent and does not
+settle this one: here Bugzilla sends no error at all, which is the part that makes the empty
+result indistinguishable from absence at this layer.
 
-**What the fixture does.** Nothing, and waits. The verifier reads every bug's topology
-unconditionally (`src/bzr_live/verify/runner.py`, `ServerReader.links`), so any scenario
-declaring a bug group aborts `verify` here whatever else it gets right — which is why issue #42
-is parked rather than shipped.
+**Upstream.** [bzr#719](https://github.com/randomparity/bzr/issues/719), filed 2026-09-06 on
+the operator's authorization. It cross-links [bzr#713](https://github.com/randomparity/bzr/issues/713)
+and argues the compounding: #713 leaves the read anonymous, and this entry makes an anonymous
+links read indistinguishable from a deleted bug.
 
-Routing the links reads through `--api xmlrpc` would make the abort go away, and is deliberately
-not done: it would leave `make smoke` green over a read `bzr` cannot perform on its default
-transport, which is the compensation `AGENTS.md` forbids. The measurement above is also what
-makes the wait cheap — row 2's query-parameter column already returns the bug, so **the moment
-the search request authenticates, `bug links` answers correctly with no change to this
-repository at all.** That makes this entry blocked on issue #30's auth work rather than on a
-fixture decision, and the loud abort is the correct behaviour until then.
+**What the fixture does.** Refuses, naming this entry and `bzr#719` at the point of failure
+(`src/bzr_live/verify/runner.py`, `Verifier._links`). The verifier reads every bug's topology
+unconditionally, so any scenario declaring a bug group stops `verify` here whatever else it
+gets right; `scenarios/smoke` declares one, so `make smoke` — a merge gate — is red for every
+pull request that runs it until `bzr#719` is fixed. That cost was weighed and accepted rather
+than discovered; see ADR 0008's *Considered & rejected*, which predicted it, and the record
+superseding that decision.
+
+The refusal retires itself: when the read succeeds the rewrite never fires, so nothing here
+has to be removed. Two alternatives were rejected. Routing the links reads through
+`--api xmlrpc` would make the abort go away and would leave `make smoke` green over a read
+`bzr` cannot perform on its default transport, which is the compensation `AGENTS.md` forbids.
+Reporting the read `unverifiable` would keep the gate green but pulls against issue #59, which
+exists to turn waivers into refusals. The measurement above is what makes waiting cheap: row
+2's query-parameter column already returns the bug, so **the moment the search request
+authenticates, `bug links` answers correctly with no change to this repository at all** — which
+is why the underlying fix belongs to issue #30 rather than here.
