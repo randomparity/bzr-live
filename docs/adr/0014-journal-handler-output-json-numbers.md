@@ -81,8 +81,11 @@ and no canonicalization step is added.
   `_read_file` decodes the entire file through that one call. The exact `int` guards at
   `journal.py:312` (attempt), `:413` (exit_status), `:424` (resolved_ids values) and `:628`
   (journal_version), plus `freeze_planned`'s `type(value) in (bool, int, str)`
-  (`model.py:69`), become the sole float refusal for every other field. Relaxing any of them
-  to `isinstance` would now admit a float there.
+  (`model.py:69`), become the sole float refusal for every other field. Each refuses a float
+  because `float` is not an `int` subclass, so the refactor that would reintroduce one is
+  dropping a guard or widening it to a number type (`(int, float)`, `numbers.Number`) — not
+  relaxing `type(...) is int` to `isinstance`, which still refuses a float and only admits
+  `bool` and `IntEnum`.
 - `JsonValue` gains `float`. The alias is exported from `bzr_live.scenario`; `handler_output`
   is produced by `replay/engine.py:228` and consumed by `replay/actions.py`, whose guards are
   `isinstance` on dict/list and `type(value) is int` for ids (`actions.py:181`), so none of

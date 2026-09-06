@@ -28,7 +28,7 @@ Expected implementation size: 74–88 changed lines (S) — from the file map: ~
 
 | File | Change |
 |---|---|
-| `src/bzr_live/scenario/loader.py` | `_decode_json_bytes` gains keyword-only `allow_float: bool = False`. |
+| `src/bzr_live/scenario/loader.py` | `_decode_json_bytes` gains keyword-only `allow_float: bool = False`; a new `_reject_constant` gives `parse_constant` its own message, since the journal path does support floats. |
 | `src/bzr_live/scenario/journal.py` | `import math`; `_validate_json` finite-`float` branch; `_read_file` passes `allow_float=True`. |
 | `src/bzr_live/scenario/model.py` | `JsonValue` alias gains `float`. |
 | `tests/test_journal.py` | `completed()` helper takes `handler_output`; three new tests. |
@@ -110,8 +110,19 @@ the test is wrong.
 
 ### 4. Opt the journal read path into float decoding
 
-In `src/bzr_live/scenario/loader.py`, replace `_decode_json_bytes`'s signature and the two
-`parse_*` lines of its `json.loads` call:
+In `src/bzr_live/scenario/loader.py`, add `_reject_constant` beside `_reject_number`, then
+replace `_decode_json_bytes`'s signature and the two `parse_*` lines of its `json.loads` call:
+
+```python
+def _reject_constant(source: str, field: str) -> Callable[[str], object]:
+    # Separate from `_reject_number` because it fires on both decode policies: the journal
+    # path supports floats, so "floating-point numbers are not supported" would be false
+    # there. Non-finite is the thing neither path accepts.
+    def reject(_: str) -> object:
+        raise _error(source, field, "non-finite numbers are not supported")
+
+    return reject
+```
 
 ```python
 def _decode_json_bytes(
@@ -126,7 +137,7 @@ def _decode_json_bytes(
             # like 1e400 reaches parse_float, not parse_constant, and is caught downstream by
             # `_validate_json`'s math.isfinite branch.
             parse_float=float if allow_float else _reject_number(source, field),
-            parse_constant=_reject_number(source, field),
+            parse_constant=_reject_constant(source, field),
 ```
 
 In `src/bzr_live/scenario/journal.py`, replace `JournalStore._read_file`'s return line. Leave
@@ -174,7 +185,7 @@ Append both to `JournalTests` in `tests/test_journal.py`:
         # `ScenarioValidationError` even if only `math.isfinite` were left.
         cases = (
             ('"estimated_time":8.0', '"estimated_time":NaN',
-             "journal:$: floating-point numbers are not supported"),
+             "journal:$: non-finite numbers are not supported"),
             ('"estimated_time":8.0', '"estimated_time":1e400',
              "journal:$.handler_output.estimated_time: must be a finite number"),
             ('"attempt":1', '"attempt":1.0', "journal:$.attempt: must be a positive integer"),

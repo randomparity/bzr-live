@@ -83,6 +83,16 @@ def _reject_number(source: str, field: str) -> Callable[[str], object]:
     return reject
 
 
+def _reject_constant(source: str, field: str) -> Callable[[str], object]:
+    # Separate from `_reject_number` because it fires on both decode policies: the journal
+    # path supports floats, so "floating-point numbers are not supported" would be false
+    # there. Non-finite is the thing neither path accepts.
+    def reject(_: str) -> object:
+        raise _error(source, field, "non-finite numbers are not supported")
+
+    return reject
+
+
 def _decode_json_bytes(
     content: bytes, source: str, field: str = "$", *, allow_float: bool = False
 ) -> object:
@@ -100,7 +110,7 @@ def _decode_json_bytes(
             # like 1e400 reaches parse_float, not parse_constant, and is caught downstream by
             # `_validate_json`'s math.isfinite branch.
             parse_float=float if allow_float else _reject_number(source, field),
-            parse_constant=_reject_number(source, field),
+            parse_constant=_reject_constant(source, field),
         )
     except ScenarioValidationError:
         raise

@@ -463,7 +463,7 @@ class JournalTests(unittest.TestCase):
         # `ScenarioValidationError` even if only `math.isfinite` were left.
         cases = (
             ('"estimated_time":8.0', '"estimated_time":NaN',
-             "journal:$: floating-point numbers are not supported"),
+             "journal:$: non-finite numbers are not supported"),
             ('"estimated_time":8.0', '"estimated_time":1e400',
              "journal:$.handler_output.estimated_time: must be a finite number"),
             ('"attempt":1', '"attempt":1.0', "journal:$.attempt: must be a positive integer"),
