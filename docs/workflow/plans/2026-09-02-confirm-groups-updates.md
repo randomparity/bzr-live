@@ -54,7 +54,7 @@ not assert — the silent gap issue #27 exists to close.
 | `tests/test_verify_expected.py` | modify — fold regression test; correct the stale D3 comment at `:172-174` |
 | `tests/test_replay.py` | modify — **delete** `test_update_rejects_groups`, add four tests, correct the stale D3 comments at `:486-487` and `:640-642` |
 | `tests/test_fault_injection.py` | modify — correct the stale D3 comment at `:461-464`, which cites the finding by name |
-| `docs/bzr-findings.md` | modify — D3's two now-false paragraphs, new D10 entry and table row, G11's dangling "not yet recorded in this file" |
+| `docs/bzr-findings.md` | modify — D3's two now-false paragraphs ONLY. The masking defect's entry and G11's dangling sentence both belong to issue #39 |
 | `docs/adr/0006-actor-scoped-event-replay.md` | modified in the design phase |
 | `docs/workflow/specs/2026-09-02-confirm-groups-updates-design.md` | created in the design phase |
 
@@ -379,27 +379,24 @@ fixture or **read** from source, the `bzr` source at a commit, a class verdict, 
    fields, which stay unread under D8 because Bugzilla omits them from a successful 200
    rather than erroring.
 
-2. **Add D10** — a section and a summary-table row: *`bzr` reports the first attempt's
-   error when the alternate-auth retry also draws 401.* Observed at `63abb94e`, request
-   captured through a local logging proxy: a `bug update --groups-add=admin` draws HTTP 401
-   with code 410 on the header-authenticated PUT, and the query-parameter retry *is*
-   authenticated and answered with code **120** ("not allowed to restrict bugs to this
-   group in the 'checkout' product") — but because that fallback is also HTTP 401, `bzr`
-   logs "auth fallback also failed, returning original 401" and reports the 410. The
-   operator is told to log in when the real fault is a configuration gap.
+2. **Do NOT add an entry for the masking defect, and do not mint an identifier for it.**
+   This run measured it completely — both halves on one fixture at the floor, on the add path
+   and the removal path — but **issue #39 owns recording it**, filed while this work was in
+   flight precisely because the identifier "D10" was cited across issues and campaign notes
+   and had never been written to this file. `rg '\bD10\b'` matches nothing in the tree; the
+   register runs D1 and D3-D9 plus G1-G11.
 
-   D10 is the **next free identifier**, not a renumbering: the register holds D1 and D3-D9
-   plus G1-G11, and nothing has ever occupied D10 — earlier campaign material cited it as an
-   existing entry, which was wrong. Two independent observations ground it: this design's
-   proxy capture, and issue #34's own measurement — which is why `G11` says, at `:602`,
-   "That masking is its own finding and is not yet recorded in this file." **Resolve that
-   dangling sentence in the same edit**: it points at an entry that did not exist.
+   Two consequences for this task. Nothing is added here. And `G11`'s sentence at `:602` —
+   "That masking is its own finding and is not yet recorded in this file" — is **left alone**:
+   it is a cross-reference #39 resolves when it writes the entry, and resolving it here would
+   leave it pointing at nothing.
 
-   Class **defect**; upstream `hold: recording only` — filing on `randomparity/bzr` is not
-   authorised for this campaign. What the fixture does: nothing to route around it. The path
-   is reachable now that #34 made a group settable — a `groups` write naming any *other*
-   group still draws 120, and `bzr` still reports 410 — so the register carries the mapping
-   from the message an operator will see to the cause it hides.
+   The evidence is handed to #39 rather than written: `bzr bug update --groups-add=editbugs`
+   reports `api_code 410` while the same write over raw REST with query-parameter auth reports
+   `code 120`; `WebService/Constants.pm:144-145` maps both `group_restriction_not_allowed` and
+   `group_invalid_removal` to 120 and `:276` maps 120 to `STATUS_NOT_AUTHORIZED`, so both the
+   add and the removal refusal draw HTTP 401 — and because the *fallback* is also 401, `bzr`
+   discards its body and reports the first attempt's error.
 
 3. **Run the guardrails, bare, and commit.**
 
@@ -417,9 +414,8 @@ fixture or **read** from source, the `bzr` source at a commit, a class verdict, 
   (the time fields, still unread under D8).
 - Neither of D3's two present-tense paragraphs still says `actions.py` refuses a `groups`
   update.
-- D10 exists with a table row, an observed-at revision, the captured evidence, a class
-  verdict, and `hold: recording only`.
-- G11 no longer ends on a cross-reference to an unrecorded finding.
+- No identifier is minted for the masking defect anywhere in this change, and `G11`'s `:602`
+  sentence is untouched — both belong to issue #39.
 
 ## Task 4 — the path is proven against the real fixture, once
 

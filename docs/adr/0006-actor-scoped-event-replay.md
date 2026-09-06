@@ -179,9 +179,8 @@ retry *and* the credential that retry carries is authorized for the bug; it is u
 when Bugzilla answers 200 and silently omits the field.** That is a property of the request
 rather than of the field: the loudness in the `groups` case comes from the bug's visibility,
 not from `groups` itself. The second disjunct's added clause is not hypothetical — when the
-retry's credential is *not* authorized, the fallback draws 401 in its turn and finding D10
-below reports the first attempt's error instead, which is the first of the three residuals
-recorded below.
+retry's credential is *not* authorized, the fallback draws 401 in its turn and `bzr` reports
+the first attempt's error instead, which is the first of the three residuals recorded below.
 
 **Follow that rule to its conclusion and it reaches the time fields too, which is why the
 always-retry entry for `estimated_hours` is a conservative floor and not an absolute.** On a
@@ -223,8 +222,12 @@ is a truthful report of what the server did.
 **One is `bzr`'s.** It masks Bugzilla's stated cause on a refused `groups` write: on the
 alternate-auth retry, a fallback response also carrying HTTP 401 makes it report the first
 attempt's error instead of the fallback's, so error 120 surfaces as 410 "You must log in" —
-the operator is sent to fix authentication on a request that was authenticated. That is
-finding D10.
+the operator is sent to fix authentication on a request that was authenticated. Measured on
+this fixture at the floor, both halves: `bzr bug update --groups-add=editbugs` reports
+`api_code 410` "You must log in", while the same write over raw REST with query-parameter
+auth reports `code 120`, "not allowed to restrict bugs to this group in the 'checkout'
+product". **Recording this in the findings register is issue #39's work, not this change's**,
+so it is described here rather than cited by identifier.
 
 **One is Bugzilla's, and it enforces the boundary rather than leaking past it.** A
 `bug.update` reaches groups by a different path from a `bug.create`, and only the create path
@@ -237,23 +240,33 @@ changes the product. `remove_group` refuses the same caller at `:3205-3211` unde
 bug is not in and at `:3199-3201` for a mandatory group. **Different errors, same wire code:**
 `Bugzilla/WebService/Constants.pm:144-145` maps both `group_invalid_removal` and
 `group_restriction_not_allowed` to **120**, and `:276` maps 120 to `STATUS_NOT_AUTHORIZED`.
-So D10's masking covers the removal path as well as the add path, and both were measured
-rather than inferred — see D10's entry. The engine cannot reach `:3189` in ordinary
+So the masking above covers the removal path as well as the add path, and both were measured
+rather than inferred. The engine cannot reach `:3189` in ordinary
 operation, because `_delta` (`src/bzr_live/replay/actions.py:119-123`) computes removals from
 *observed* state and so never names a group the bug is not in.
 
 So a declared `groups` update by an actor outside the group is refused **before any
-mutation** — which is the boundary holding, not leaking — and the residual is only that D10
+mutation** — which is the boundary holding, not leaking — and the residual is only that `bzr`
 masks the stated cause. The create path differs, and the reason is this fixture's own
 configuration rather than Bugzilla's model: `_check_groups` (`:1851-1887`, `VALIDATORS` at
 `:122`) carries no `in_group` call and gates solely through `Product::group_is_settable`,
 whose `groups_available` arm (`Bugzilla/Product.pm:659-693`) selects member groups behind
 `groups_in_sql()` but admits *other* groups on `othercontrol` alone, with no membership
 check, whenever that column is `CONTROLMAPSHOWN` or `CONTROLMAPDEFAULT`. #34's rows carry
-`CONTROLMAPSHOWN`, so here a non-member can restrict a bug out of its own visibility on
-`bug.create`. Under a stricter `othercontrol` the create/update asymmetry would disappear —
-it is the same row this record's equality consequence below rests on. That path predates this
-amendment and is not opened by it. All read from this fixture's own image.
+`CONTROLMAPSHOWN`. Under a stricter `othercontrol` the asymmetry would disappear — it is the
+same row this record's equality consequence below rests on.
+
+**The asymmetry was measured, not inferred from that source reading.** At the floor against
+this fixture, as `triager` — a smoke actor outside `restricted`, whose only member is
+`admin-ops`:
+
+| Path | Probe | Result |
+|---|---|---|
+| update | `bug update --groups-add=restricted -- 1` | **refused**, `api_code 410` masking `code 120` "not allowed to restrict bugs to this group in the 'checkout' product" |
+| create | `bug create --product checkout … --groups restricted` | **allowed**, bug 2 created and its `bug_group_map` row written |
+
+Same actor, same group, same product, opposite outcomes. The create path predates this
+amendment and is not opened by it.
 
 **One is this repository's own, and it is the residual this amendment newly opens.** Folding
 `groups` into the verifier's asserted state makes the verifier assert a field that decides
@@ -266,6 +279,15 @@ restricts a bug to a group the insider is outside makes `ServerReader.bug` read 
 whole verification** instead of producing one finding about one bug. The outsider reader,
 which is built on every run and read only where a scenario declares a private comment
 (`runner.py:175-178`), is outside `admin` by construction and carries the same exposure.
+
+**Measured, and the trigger is narrower than "outside the group".** Bugzilla also grants the
+bug's *reporter* access regardless of restriction (`reporter_accessible`, set on the bug row).
+So on the bug `triager` created and restricted to a group it is not in, `triager` still reads
+`groups: ['restricted']` — while `developer`, outside the group *and* not the reporter, gets
+`api_code 102` from the same read, both at the floor and over raw REST. The exposure is
+therefore a reader that is outside the restricting group **and** neither the reporter nor on
+the CC list, which is the case a scenario reaches as soon as its declaring actor and its
+insider differ.
 
 **The replay engine carries it too, and less gracefully.** Every later event on a restricted
 bug reads it as *its own* actor, not as the insider: `BugUpdateHandler.build`

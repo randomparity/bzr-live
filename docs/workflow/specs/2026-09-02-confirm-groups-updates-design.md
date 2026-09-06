@@ -146,7 +146,7 @@ credential that retry carries is authorized for the bug; this fixture does parse
 query-parameter credential as real auth. It is unconfirmable when Bugzilla answers **200**
 and silently omits the field, which is what it does to the time-tracking fields for a
 caller that has not cleared `timetrackinggroup`. Where the retry's credential is *not*
-authorized, the fallback 401s in its turn and finding D10 reports the first attempt's error
+authorized, the fallback 401s in its turn and `bzr` reports the first attempt's error
 instead — the residual the ADR records.
 
 The loudness in the `groups` case therefore comes from the bug's *visibility*, not from
@@ -228,14 +228,18 @@ Per `actions.py:18-22` its rationale names Bugzilla and cites no findings entry.
    401-then-retry mechanism, and states plainly that the fix is sufficient for `groups`
    and not for the time fields — the correction issue #20's live run forced.
 
-9. **A new entry, D10**, records a defect this design's measurement surfaced: on the
-   alternate-auth retry, when the fallback response also carries HTTP 401, `bzr` discards
-   the fallback's body and reports the *first* attempt's error. A captured
-   `bug update --groups-add` shows the fallback returning Bugzilla error **120** ("you are
-   not allowed to restrict bugs to this group in the 'checkout' product") while `bzr`
-   reports **410** ("You must log in"). The operator is sent to fix authentication when
-   the real fault is a product/group configuration gap. Class: defect. Recording only —
-   filing on `randomparity/bzr` is not authorised for this campaign.
+9. **No new entry, and no identifier minted.** This run's measurements surfaced a `bzr`
+   defect — on the alternate-auth retry, when the fallback response also carries HTTP 401,
+   `bzr` discards the fallback's body and reports the *first* attempt's error, so Bugzilla's
+   `code 120` reaches the operator as `api_code 410` "You must log in" and they are sent to
+   fix authentication on a request that was authenticated. **Recording it belongs to issue
+   #39**, which owns it; the evidence this run took is handed over rather than written here.
+
+   So this design *describes* the behaviour wherever it depends on it and cites no identifier
+   for it. Earlier drafts called it "D10". That identifier was never written to
+   `docs/bzr-findings.md` by anyone — the register runs D1 and D3-D9 plus G1-G11 — so citing
+   it pointed at a record that does not exist, and minting it here would collide with #39's
+   own numbering.
 
 ### `docs/adr/0006-actor-scoped-event-replay.md`
 
@@ -305,7 +309,7 @@ ADR records in full.
   (`Bugzilla/Bug.pm:3162-3167`) throws `group_restriction_not_allowed` for a caller outside
   the group; `remove_group` refuses the same caller at `:3205-3211` under a *different* error,
   `group_invalid_removal`. Both refusals are pre-mutation, so nothing is half-applied — and
-  both reach the operator as finding D10's 410 "You must log in", because
+  both reach the operator as `bzr`'s masked 410 "You must log in", because
   `WebService/Constants.pm:144-145` gives the two errors the same wire code 120 and `:276`
   maps 120 to `STATUS_NOT_AUTHORIZED`. Measured on both paths. (`_check_groups` at
   `:1851-1887` admits a non-member here, but it is the *create*-time validator only,
@@ -327,7 +331,7 @@ replay time. Nothing checks that a declared group's `products` list (ADR 0013's 
 the target bug's product. A `bug.update` declaring, say, `groups: [group:editbugs]` on a
 `checkout` bug is loader-valid, reaches Bugzilla, and is refused by `group_is_settable`
 (`Bugzilla/Product.pm:740-748` — a system group carries `isbuggroup = 0`) with error 120,
-which D10 again presents as an authentication message. A pre-mutation check is **declined
+which `bzr` again presents as an authentication message. A pre-mutation check is **declined
 here, not overlooked**: the scenario contract holds everything needed for it, but the ground
 would be Bugzilla's configuration rather than a `bzr` limitation, so per `actions.py:18-22` it
 does not belong in the refusal table, and the natural home — validating a scenario's declared
