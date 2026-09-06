@@ -1,8 +1,8 @@
 # Journal handler output accepts finite JSON numbers — design
 
 Issue [#44](https://github.com/randomparity/bzr-live/issues/44) · branch
-`feat/journal-float-handler-output-44` off `main` (`226b607b`) · guardrails `make check` and
-`make test`, run bare.
+`feat/journal-float-handler-output-44`, cut at `main` `226b607b`, merged up to `1c518f26` ·
+guardrails `make check` and `make test`, run bare.
 [ADR 0014](../../adr/0014-journal-handler-output-json-numbers.md) holds the problem, the
 decision, and the rejected alternatives; the plan holds the file-level changes. This spec
 carries the threat model and the criteria the work is accepted against.

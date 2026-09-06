@@ -13,8 +13,9 @@ Expected implementation size: 75–90 changed lines (S) — from the file map: ~
 ## Global Constraints
 
 - Python `>=3.11` (`pyproject.toml`); no runtime dependency may be added, `src/bzr_live/` is
-  standard-library only. Branch `feat/journal-float-handler-output-44`, base `main` at
-  `226b607b`.
+  standard-library only. Branch `feat/journal-float-handler-output-44`, cut at `main`
+  `226b607b` and merged up to `1c518f26`, which is the base every count below is measured
+  against. The `226b607b` citations elsewhere mark where a claim was verified, not the base.
 - Guardrails run **bare** — no pipes, no `|| true`: `make check`, then `make test`.
 - `tests/test_scenario_resources.py`: append the new test at the end of the class only;
   `test_rejects_floats_and_non_finite_numbers` stays byte-identical and at line 134.
@@ -253,8 +254,10 @@ than a tested guarantee.
 
 ### 8. Guardrails, bare, then commit
 
-`make check` — expect exit 0. `make test` — expect exit 0 and `OK` (409 tests at `226b607b`,
-414 now). Then:
+`make check` — expect exit 0. `make test` — expect exit 0 and `OK`. The baseline is **412
+tests**, measured bare on this branch's merged head with both guardrails green; the five new
+tests take it to **417**. The shift from 409 is not a regression — issues #38 and #40 added
+three tests to `main` after this branch was cut. Then:
 
 ```
 git add -A
