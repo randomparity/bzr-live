@@ -39,6 +39,7 @@ already-filed one (D5).
 | [D8](#d8) | defect | The auth probe concludes header auth works when it does not, so REST reads run effectively unauthenticated | hold: recording only |
 | [D9](#d9) | defect | On Bugzilla >= 5.1 the auto-detected `rest` mode never takes the XML-RPC path `bzr` documents as the only one returning a full comment thread or attachment `data` | not filed |
 | [G11](#g11) | gap | No command makes a bug group settable on a product, because Bugzilla's WebService does not expose group controls at all | — |
+| [D11](#d11) | defect | The alternate-auth retry is judged by HTTP status alone, so a policy refusal that is also 401 is discarded and surfaces as `410 "You must log in"` | not filed: needs operator decision |
 
 ---
 
@@ -528,8 +529,10 @@ insider `admin-ops@example.test`, with that actor's own valid key:
 | `bzr --api hybrid comment list 7` (XML-RPC) | present, `is_private: true` |
 
 So the comment is on the server and visible to a properly authenticated insider, and `bzr`'s
-preferred transport is the one that does not see it. Writes are unaffected: they draw a 401,
-which triggers `bzr`'s alternate-auth retry, which is why the replay works at all.
+preferred transport is the one that does not see it. Writes are unaffected *while the retry
+succeeds*: they draw a 401, which triggers `bzr`'s alternate-auth retry, which is why the replay
+works at all. Where the server refuses the retried write on policy grounds the retry is also a
+401, and `bzr` discards it and reports the first attempt's error instead — see [D11](#d11).
 
 **Second observed consequence: `bug view` withholds the time-tracking fields.** Found by the
 first live run of the verify stage (`make smoke`, 2026-09-02, `bzr 0.8.3-dev (63abb94e)`),
@@ -624,8 +627,97 @@ product". The provisioned group `restricted`, differing only in carrying the map
 contrast holds, except that the two refusals surface as `code 410 "You must log in"` rather
 than as error 120: the server's stated cause is replaced by an authentication message on a
 request that was authenticated, which is why the unmasked measurement above is taken over raw
-REST. That masking is its own finding and is not yet recorded in this file.
+REST. That masking is its own finding, recorded as [D11](#d11).
 
 A bug created with the group declared up front behaves the same way: `bug create --product
 checkout --component cart --groups restricted` succeeds and reads back `groups:
 ['restricted']`, while the same create naming an unmapped group is refused.
+
+## D11
+
+**The alternate-auth retry is judged by HTTP status alone, so a refusal that is authenticated
+but not permitted is discarded and reported as a login failure.** *Observed against a running
+fixture with `bzr 0.8.3-dev (63abb94e)` while proving issue #27, both halves on one fixture at
+the floor; recorded on [bzr-live#39](https://github.com/randomparity/bzr-live/issues/39),
+2026-09-06. Source read at `63abb94e`, the floor `README.md` documents, and byte-identical at
+`bzr` `f28f4570`.*
+
+Restricting a bug to a group the product does not allow is refused by Bugzilla with a specific,
+honest error. `bzr` reports it as a login prompt on a request that was authenticated:
+
+| Path | Reported |
+|---|---|
+| `bzr bug update <id> --groups-add=editbugs` | `api_code 410`, "You must log in" |
+| the same write, raw REST with query-parameter auth | `code 120`, "you are not allowed to restrict bugs to this group in the 'checkout' product" |
+
+The bug id is elided because the handed-over evidence did not preserve it — it is required, not
+optional, since `bug update` takes numeric ids only ([G10](#g10)). The paired raw-REST half of
+the same measurement was taken as `admin-ops` over `PUT /rest/bug/4`; see [G11](#g11), which
+records that side in full.
+
+**Which leg is observed, and which is read.** The two reported errors in the table above were
+both measured. That `bzr`'s *own* retry received the 120-carrying body and discarded it is
+**read from source** at `63abb94e` and inferred from the raw-REST half — no `bzr` transcript of
+the fallback was captured, so this entry quotes none. The inference rests on the retry
+authenticating the same way the raw-REST half does, which [D8](#d8) establishes independently.
+Confirming it outright would take one `RUST_LOG=debug` run showing the "auth fallback also
+failed, returning original 401" line. That run has not been made.
+
+**Mechanism.** Two unrelated Bugzilla faults share one HTTP status, and `bzr`'s fallback reads
+only that status.
+
+Bugzilla maps `group_restriction_not_allowed` and `group_invalid_removal` both to wire code
+**120** (`Bugzilla/WebService/Constants.pm:144-145`), and `login_required` to **410** (`:173`).
+It then maps both 120 (`:276`) and 410 (`:282`) to `STATUS_NOT_AUTHORIZED`, which is HTTP
+**401** (`:258`). Line numbers at the pinned Bugzilla SHA `644c66f4`
+(`containers/bugzilla/Dockerfile:4`). So "you are not logged in" and "you are logged in and may
+not do this" are indistinguishable by status.
+
+On the `bzr` side, `send_raw` sends the request with header auth, and on a 401 calls
+`retry_with_alternate_auth` (`src/client/transport.rs:121-135`). That retry re-sends with
+query-parameter auth — which on this fixture is the method that actually authenticates, per
+[D8](#d8) — and then tests the outcome with `alternate_auth_failed(retried.status())`
+(`:141-164`). That predicate is `status == UNAUTHORIZED || status == FORBIDDEN` (`:165-167`):
+**it inspects the status and never the body.** So a retry that authenticated fine and was then
+refused on policy grounds reads as "auth failed again": the retried response is dropped whole,
+error 120 with it, and `send_raw` returns the *original* 401 — whose body still carries the
+header attempt's stale `410 "You must log in"`.
+
+**Class: defect**, and a `bzr`-side one. Bugzilla answered with a specific error naming the real
+constraint; `bzr` discarded that answer and substituted a message about authentication for a
+request it had itself authenticated. The collision at 401 is Bugzilla's, but the decision to
+judge the retry by status alone — and to drop the body that disambiguates it — is `bzr`'s.
+Contrast [G11](#g11), which is classed a gap because the server API genuinely lacks the surface;
+here the server supplied the information and the client threw it away.
+
+Checked against `bzr`'s own records first, as the preamble to this file requires. `bzr`'s
+**Accepted** ADR 0015, "A server error is never masked by an empty result" (2026-08-04, `bzr`
+issue #504), settles the principle in the opposite direction: "A server error is surfaced
+whenever it is the only thing the server told us. `bzr` does not re-implement Bugzilla's
+disclosure policy." Its own Context names, as the second of two triggers, a retry path that
+"dropped the original error" — structurally the same defect as this one — and its Decision
+requires that fallback to preserve it. So this is a departure from an accepted upstream
+decision rather than a judgement call, which is what settles the class.
+
+This compounds [D8](#d8). D8 is why the *first* attempt draws a 401 at all — header auth does
+not authenticate against this fixture — so the fallback runs on every authenticated write, and
+this masking is reachable on any of them that the server refuses on policy grounds, not just on
+group writes. Any Bugzilla fault mapping to `STATUS_NOT_AUTHORIZED` is masked the same way;
+`Constants.pm:270-284` lists fifteen such codes.
+
+**Upstream.** Not filed, and no operator ruling exists yet. A search of `randomparity/bzr`
+issues in all states for the retry predicate, the group-restriction refusal and the reported
+message found nothing covering this behaviour, so it is unreported upstream rather than a
+duplicate. Filing it is a separate decision that needs the operator's word, which `AGENTS.md`
+requires before any upstream filing.
+
+**What the fixture does.** Nothing: there is no client-side substitution to make, and inventing
+one would destroy the evidence. The fixture takes its unmasked group-control measurements over
+raw REST instead — see [G11](#g11) — and this entry is why that detour exists rather than being
+an unexplained preference. It also explains a diagnostic cost already paid: issue #34 was hard
+to diagnose precisely because the honest server error was replaced by a login prompt pointing at
+the wrong cause.
+
+The identifier `D10` is deliberately unused. This behaviour circulated in issues and working
+notes under that name for several days without ever being written here, and numbering it `D10`
+now would make those citations look retroactively correct; bzr-live#39 records that history.
