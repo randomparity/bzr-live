@@ -21,7 +21,7 @@ test keeps being trusted for a reason it does not earn:
   every account is granted it automatically. The assertion tests the *declared*
   group set, which is the property the scenario controls, and it would bite if that
   regexp were ever cleared.
-- `test_group_restrictions_are_settable_by_their_actor` and
+- `test_group_restricted_bugs_are_only_touched_by_members` and
   `test_group_restricted_bugs_declare_no_private_comment` are the same *loud*
   shift as the first guard, one for a Bugzilla refusal mid-replay and one for a
   verifier read that cannot be issued at all. Each states its own reason where
@@ -127,22 +127,41 @@ class SmokeScenarioTest(unittest.TestCase):
     def _groups(self, actor_name):
         return {ref.name for ref in self.actors[actor_name].data["groups"]}
 
-    def _group_restrictions(self):
-        """(event, target bug alias, declared group names) per bug-group declaration.
+    @staticmethod
+    def _touched_bug(event):
+        """The bug alias an event acts on, or None where only the fold can say.
+
+        `expected_postcondition["target"]` is the bug for every action but the two
+        attachment ones; `bug.attach` names its bug in `values`, and
+        `attachment.update` reaches it through the attachment its attach event
+        registered -- a chain `expected._bug_of` owns and this module does not repeat.
+        """
+        target = event.expected_postcondition["target"]
+        if target.kind == "bug":
+            return target.name
+        if event.action == "bug.attach":
+            return event.expected_postcondition["values"]["bug"].name
+        return None
+
+    @staticmethod
+    def _declared_groups(event):
+        """The group names an event declares on its bug, empty where it declares none.
 
         Both payload forms land here. A create's postcondition carries every key, so
         an undeclared `groups` is an empty collection; an update's carries only the
-        keys its `set` block names. Emptiness is what marks a non-declaration in
-        either, so the guards below bind to the create form the day one declares a
-        group, without being written twice.
+        keys its `set` block names. Emptiness marks a non-declaration in either, so
+        the guards below bind to the create form the day one declares a group,
+        without being written twice.
         """
-        found = []
-        for event in self.scenario.events:
-            target = event.expected_postcondition["target"]
-            declared = event.expected_postcondition["values"].get("groups")
-            if target.kind == "bug" and declared:
-                found.append((event, target.name, {ref.name for ref in declared}))
-        return found
+        declared = event.expected_postcondition["values"].get("groups") or ()
+        return {ref.name for ref in declared}
+
+    def _group_restrictions(self):
+        """(event, bug alias, declared group names) per bug-group declaration."""
+        return [
+            (event, self._touched_bug(event), self._declared_groups(event))
+            for event in self.scenario.events
+            if self._touched_bug(event) is not None and self._declared_groups(event)]
 
     def test_digest_matches_the_pinned_value(self):
         self.assertEqual(
@@ -241,26 +260,50 @@ class SmokeScenarioTest(unittest.TestCase):
                 f"{event.name!r} posts a private comment as {event.actor.name!r}, "
                 "who is not in the insider group")
 
-    def test_group_restrictions_are_settable_by_their_actor(self):
-        """Guard: a non-member's restriction throws `group_restriction_not_allowed`.
+    def test_group_restricted_bugs_are_only_touched_by_members(self):
+        """Guard: from the restriction onward, a non-member's event is refused.
 
         `Bugzilla/Bug.pm::add_group` refuses a group the acting user is not a member
-        of, outside a product change, so a replay that has already mutated the
-        fixture aborts part-way -- and finding D11 renders that refusal as
-        `410 "You must log in"`, which does not name the real cause.
+        of, outside a product change; and once the bug carries the group, so is every
+        later event on it -- including the `bug view` `BugUpdateHandler.build` issues
+        to compute its delta. Either way a replay that has already mutated the fixture
+        aborts part-way, and finding D11 renders the refusal as `410 "You must log
+        in"`, which does not name the real cause. This is why the restriction is
+        declared last: nothing after it may reach the bug as another actor.
 
         Membership is the only half of `add_group` left to guard. Its other refusal,
         `group_is_settable` on a group the scenario did not map to the bug's product
         (ADR 0013), is already a load-time failure: `loader._update_set` raises
         "group is outside the target product" before an event exists to inspect.
+
+        Coverage is the events that name their bug directly -- every action but
+        `attachment.update`, which reaches its bug through the attachment its
+        `bug.attach` registered. Resolving that chain is `expected._bug_of`'s job and
+        is not repeated here; an `attachment.update` on a restricted bug would fail
+        live rather than at `make test`.
         """
-        for event, alias, groups in self._group_restrictions():
+        restricted: dict[str, set[str]] = {}
+        for event in self.scenario.events:
+            alias = self._touched_bug(event)
+            if alias is None:
+                continue
             held = self._groups(event.actor.name)
-            for name in sorted(groups):
+            for name in sorted(restricted.get(alias, set())):
+                self.assertIn(
+                    name, held,
+                    f"{event.name!r} acts on {alias!r} as {event.actor.name!r}, who "
+                    f"is not a member of group {name!r} an earlier event restricted "
+                    "the bug to")
+            declared = self._declared_groups(event)
+            for name in sorted(declared):
                 self.assertIn(
                     name, held,
                     f"{event.name!r} restricts {alias!r} to group {name!r} as "
                     f"{event.actor.name!r}, who is not a member of it")
+            if declared:
+                # A declaration replaces rather than extends, exactly as
+                # `BugUpdateHandler.build`'s add/remove delta does on the server.
+                restricted[alias] = declared
 
     def test_group_restricted_bugs_declare_no_private_comment(self):
         """Guard: the verifier's outsider read cannot open a group-restricted bug.

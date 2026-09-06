@@ -176,8 +176,8 @@ Fourteen assertions cover the topology and coverage invariants, including the sc
 digest, which is pinned so that editing the fixture is a deliberate change. Five are guards:
 the insider group behind private comments, the 255-byte attachment summary ceiling, the rule
 that any create declaring an assignee or a dependency edge is filed by an actor declaring
-`editbugs`, the rule that a bug group is only restricted by an actor holding it, and the rule
-that a group-restricted bug declares no private comment. All but the third move failures a
+`editbugs`, the rule that every actor touching a group-restricted bug holds that group, and
+the rule that such a bug declares no private comment. All but the third move failures a
 live run would raise anyway into a container-free run; only the third targets a substitution
 Bugzilla makes silently, and on this image even that is unreachable, because stock Bugzilla
 grants `editbugs` to every account by regexp. The offline tier's value is speed and no
