@@ -46,10 +46,12 @@ UNVERIFIABLE_FIELDS: Mapping[str, str] = {
     # of it: there the 401 is raised for the whole read, so the same alternate-auth retry
     # that recovers groups authenticates, and the time fields return with the rest of the
     # bug. Measured at 63abb94e as an insider on a restricted bug: bug view carries
-    # estimated_time and remaining_time alongside groups. pay-refund-rounding is the one
-    # scenarios/smoke bug that restriction applies to (issue #42) and it declares neither
-    # time field, so every bug this entry is reached for is anonymously readable and the
-    # general case is the one it states.
+    # estimated_time and remaining_time alongside groups. Three bugs in this repository
+    # are restricted -- scenarios/smoke's pay-refund-rounding (issue #42) and one in each
+    # of the verify-cc-order and verify-groups-update fixtures -- and none of the three
+    # declares a time field, so every bug this entry is reached for is anonymously
+    # readable and the general case is the one it states. A scenario that restricts a bug
+    # AND declares a time field on it would need this entry reworded.
     "estimated_hours":
         "Bugzilla gates estimated_time on timetrackinggroup ('editbugs' here) and finding "
         "D8 leaves bzr's REST reads unauthenticated, so bug view returns no "

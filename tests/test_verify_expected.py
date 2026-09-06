@@ -152,9 +152,11 @@ class CcOrderingTest(unittest.TestCase):
     No smoke bug declares `cc` after a requestee flag, so the ordering rule -- a later
     declaration replaces the running set and drops the requestee, matching the
     `--cc-remove` the replay engine would compute -- is pinned on a fixture written for
-    it rather than left until a scenario happens to hit it. The same fixture carries the
-    only *create-time* declared `groups` in the repository, for the same reason:
-    `scenarios/smoke/` declares its one group restriction on `bug.update` (issue #42).
+    it rather than left until a scenario happens to hit it. The same fixture declares
+    `groups` at create time and never updates it, which is the arm the other two cannot
+    cover: `verify-groups-update`'s create-time set exists only to be replaced by the
+    update it is written for, and `scenarios/smoke/` declares its one restriction on
+    `bug.update` (issue #42).
     """
 
     @classmethod

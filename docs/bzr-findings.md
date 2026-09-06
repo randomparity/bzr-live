@@ -802,9 +802,26 @@ close it independently, which is why this is recorded as one entry and not two:
   even while D8 stands.
 
 Checked against `bzr`'s own records before filing, as the preamble to this file requires.
-`bzr` ADR 0015, "A server error is never masked by an empty result", is adjacent and does not
-settle this one: here Bugzilla sends no error at all, which is the part that makes the empty
-result indistinguishable from absence at this layer.
+Two Accepted ADRs are adjacent and neither settles this entry.
+
+`bzr` ADR 0015, "A server error is never masked by an empty result", does not reach it: here
+Bugzilla sends no error at all, which is the part that makes the empty result
+indistinguishable from absence at this layer.
+
+`bzr` ADR 0006, "`bug links` uses an isolated relationship fetch" (Accepted 2026-06-26, issue
+#453), is the record that decided this very mechanism — the dedicated node type,
+`LINKS_INCLUDE_FIELDS`, id-chunked REST requests per level, and the `LINKS_MAX_NODES` cap this
+repository already cites at `src/bzr_live/verify/observed.py`. Its decision 4, "Graceful
+degradation over hard dependency on BMO fields", ends "Related bugs that cannot be fetched are
+silently skipped", and that is the sentence an upstream reader will reach for to call this
+by-design. **The distinction is root versus related.** ADR 0006 legislates for a *related* bug
+dropping out of a traversal; D12 is about the **root**, whose absence
+`src/commands/bug/links.rs:25-31` deliberately turns into a hard `NotFound` rather than
+skipping. Silently skipping a neighbour degrades a graph; reporting the root absent denies the
+bug exists. Note also that ADR 0006's *Considered & rejected* already declined "One REST
+request per related bug during traversal", which bears on the second remedy below — reading
+the **root** through the direct path is one extra request for one bug, not per neighbour, so
+it does not reopen what that entry rejected.
 
 **Upstream.** [bzr#719](https://github.com/randomparity/bzr/issues/719), filed 2026-09-06 on
 the operator's authorization. It cross-links [bzr#713](https://github.com/randomparity/bzr/issues/713)
@@ -815,9 +832,12 @@ links read indistinguishable from a deleted bug.
 (`src/bzr_live/verify/runner.py`, `Verifier._links`). The verifier reads every bug's topology
 unconditionally, so any scenario declaring a bug group stops `verify` here whatever else it
 gets right; `scenarios/smoke` declares one, so `make smoke` — a merge gate — is red for every
-pull request that runs it until `bzr#719` is fixed. That cost was weighed and accepted rather
-than discovered; see ADR 0008's *Considered & rejected*, which predicted it, and the record
-superseding that decision.
+pull request that runs it until `bzr#719` is fixed. Worse, the refusal unwinds `Verifier.run`
+before it prints, so the verify stage reports no assertions at all while this stands. That
+cost was weighed and accepted rather than discovered: ADR 0008's *Considered & rejected*
+predicted it in terms ("a gate that is always red is a gate nobody reads") and rejected this
+disposition, and the operator overrode that on 2026-09-06 with issue #59 as the reason a
+waiver is the worse direction.
 
 The refusal retires itself: when the read succeeds the rewrite never fires, so nothing here
 has to be removed. Two alternatives were rejected. Routing the links reads through

@@ -55,9 +55,11 @@ _UPDATE_DUPE_CONFLICTS = ("status", "resolution")
 # it, so finding D8's unauthenticated read never sees the value and no error status fires
 # bzr's alternate-auth retry. This is a floor over the common case, not an absolute: a
 # group-restricted bug 401s the whole read, so that retry does fire, authenticates, and
-# brings the time fields back with it (measured at 63abb94e). scenarios/smoke restricts one
-# bug (issue #42) and it declares neither time field, so every bug that reaches this table
-# is anonymously readable and the floor is what the code assumes.
+# brings the time fields back with it (measured at 63abb94e). Three bugs in this repository
+# are restricted -- one in scenarios/smoke (issue #42) and one in each of the
+# verify-cc-order and verify-groups-update fixtures -- and none declares a time field, so
+# every bug that reaches this table is anonymously readable and the floor is what the code
+# assumes.
 #
 # remaining_hours: Bugzilla decrements remaining_time by logged work, so the declared
 # value is not the fixture's final state. Bugzilla's own model, surviving any bzr fix.
