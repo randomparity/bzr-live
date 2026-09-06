@@ -226,26 +226,38 @@ So `5fb99362` is where the D6 defect stops, not a floor this repository has evid
 `bzr` revision as its first line for this reason — the same scenario passes or fails on that
 revision alone.
 
-Observed: **47 events replayed in 72.80s**, then **69 checks verified in 56.94s**, and after
-the checkpoint round trip the same **69 checks re-verified in 59.02s** — every run reporting
-0 divergences and 4 unverifiable claims. Each figure covers its own stage alone, excluding
-provisioning and `make up`. Measured on Apple M5 Max, macOS (Darwin 25.6.0, arm64), Docker
-29.7.2, with `bzr 0.8.3-dev (63abb94e)`, against a fixture reset immediately beforehand.
-Provisioning the 28 resources, `make up`, and the checkpoint save and restore are each
-separate intervals and are not included.
+Observed: **48 events replayed in 74.12s**, against a fixture reset immediately beforehand.
+Measured on Apple M5 Max, macOS (Darwin 25.6.0, arm64), Docker 29.7.2, with
+`bzr 0.8.3-dev (63abb94e)`. Provisioning the 29 resources and `make up` are separate
+intervals and are not included.
 
-Those figures were produced under `/bin/bash` 3.2.57, which `make smoke` resolves from
+**The stages after replay have no current figure, and that is finding
+[D12](docs/bzr-findings.md#d12).** Since the scenario began declaring a bug group, `verify`
+refuses at `bug links` on the restricted bug — `bzr` reads links through Bugzilla's search
+endpoint, which hides a bug the caller cannot see instead of faulting — so the run stops
+there and the six stages after it do not execute. The refusal is deliberate: it names the
+defect and its upstream issue, and is neither waived nor routed around. The figures taken
+before it, describing the 47-event scenario, were 47 events replayed in 72.80s, 69 checks
+verified in 56.94s, and 69 checks re-verified in 59.02s after the checkpoint round trip, each
+reporting 0 divergences and 4 unverifiable claims. Those are history rather than a current
+measurement, and they return when `bzr#719` is fixed.
+
+Every figure here was produced under `/bin/bash` 3.2.57, which `make smoke` resolves from
 `PATH` on this machine. Ordinary failures propagate correctly there — issue #20's run was
 proven to bite, a server-side summary edit producing exit 1 and restoring it exit 0 — but
 before the sentinel above, a fatal expansion error under `set -u` would have been
 indistinguishable from success. Nothing indicates one occurred.
 
-The four unverifiable claims are `cart-double-charge`'s `estimated_hours` (finding D8) and
-`remaining_hours` (PR #23), and the work-time hours on the two bugs that log any
-(issue #22). Every other declared value on all 20 bugs is asserted.
+The four unverifiable claims the fold declares are `cart-double-charge`'s `estimated_hours`
+(finding D8) and `remaining_hours` (PR #23), and the work-time hours on the two bugs that log
+any (issue #22). Every other declared value on all 20 bugs is asserted — subject to D12, which
+stops the run before those assertions are reached.
 
 The live tier proves both that the parts compose and that the state they leave behind is
-the one the scenario declares.
+the one the scenario declares — up to D12, which currently stops it after replay. What it
+still establishes is the whole write path, including the group restriction: all 48 events
+execute, and reading the restricted bug back through `bug view` returns
+`groups: ["restricted"]` while `bug history` carries the change attributed to `admin-ops`.
 
 **It is now a merge gate.** `Container lifecycle`'s `x86_64-linux` job compiles `bzr` at the
 pinned revision above and runs this same `make smoke` on every pull request touching
