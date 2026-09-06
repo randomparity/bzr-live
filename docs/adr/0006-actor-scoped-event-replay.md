@@ -311,8 +311,12 @@ is now narrower and more durable than "the map is empty": the bridge writes `mem
 and `othercontrol` as `CONTROLMAPSHOWN` and nothing else (`containers/bugzilla/bridge.pl`,
 per ADR 0013's least-privilege choice), and `groups_mandatory` selects `CONTROLMAPMANDATORY`
 while a default group needs `CONTROLMAPDEFAULT`. A mapping written at either of those values
-would move `groups` to containment beside `cc` — the exception `cc` already carries for the
-same class of reason.
+would call for comparing `groups` by containment instead — a mode this reconciler does not
+have and would have to grow. `_UPDATE_COMPARE_SETS` compares every field by equality
+(`src/bzr_live/replay/actions.py:453`), `cc` included. The containment `cc` carries in
+`src/bzr_live/verify/checks.py:84` belongs to the verifier and answers an unrelated question
+— a flag requestee landing on the CC list, and a server-derived CC set that equality would
+assert the exclusion of (PR #23) — not a product widening a set.
 
 **Four of those grounds are Bugzilla's, not bzr's, and saying so matters as much as naming
 the ones that are.** Charging bzr for a constraint it did not impose corrupts the register
@@ -507,7 +511,7 @@ defaults to reset *to*, and `resolution` and `dupe_of` are cleared by a status t
   either: a refusal here would have named Bugzilla's configuration, not a `bzr` limitation,
   and `AGENTS.md` puts a fixture-configuration gap in `containers/` rather than in a
   client-side refusal.
-- **Compare the declared `groups` set by containment, as `cc` is compared.** judgment:
+- **Compare the declared `groups` set by containment.** judgment:
   containment would silently accept a bug carrying groups the scenario never declared, and
   the widening it guards against — a product's mandatory or default bug groups — cannot
   occur while every `group_control_map` row this fixture writes carries `CONTROLMAPSHOWN` in

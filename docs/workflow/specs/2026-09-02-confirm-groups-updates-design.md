@@ -183,7 +183,7 @@ Per `actions.py:18-22` its rationale names Bugzilla and cites no findings entry.
    that matches the field's shape, and putting it in the scalar table would compare a
    `tuple` of references against a JSON list and never match.
 
-   It compares by **equality**, like `keywords`, not by containment like `cc`: Bugzilla can
+   It compares by **equality**, as every field in that table does: Bugzilla can
    widen the set behind the caller (`Bugzilla/Bug.pm:1883` and `:1860-1864`), but only
    through a product's mandatory or default bug groups, which this fixture has none of. That
    ground survived #34 and got narrower: the bridge writes `membercontrol` and `othercontrol`

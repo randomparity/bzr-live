@@ -78,10 +78,14 @@ _UPDATE_COMPARE = {
 
 # Bugzilla list fields compare as sets: the delta bzr applies is order-independent.
 _UPDATE_COMPARE_SETS = {
-    # Equality, like keywords, not cc's containment: Bugzilla widens the set behind the
-    # caller only through a product's mandatory or default bug groups, and every
-    # group_control_map row this fixture writes carries CONTROLMAPSHOWN in both control
-    # columns -- neither CONTROLMAPMANDATORY nor CONTROLMAPDEFAULT (ADR 0006, ADR 0013).
+    # Every field in this table compares by equality in reconcile below, cc included.
+    # Equality is
+    # right for groups because Bugzilla widens the set behind the caller only through a
+    # product's mandatory or default bug groups, and every group_control_map row this
+    # fixture writes carries CONTROLMAPSHOWN in both control columns -- neither
+    # CONTROLMAPMANDATORY nor CONTROLMAPDEFAULT (ADR 0006, ADR 0013). The containment
+    # comparison cc carries in verify/checks.py:84 is that module's alone and answers an
+    # unrelated question; there is no containment mode here to reach for.
     "groups": ("groups", lambda context, ref: ref.name),
     "cc": ("cc", lambda context, ref: context.actor_email(ref)),
     "keywords": ("keywords", lambda context, ref: ref.name),
