@@ -79,11 +79,17 @@ class FoldSmokeScenarioTest(unittest.TestCase):
         self.assertIn("timetrackinggroup", reason)
         self.assertIn("D8", reason)
 
-    def test_no_bug_declares_a_group_so_that_assertion_is_unit_covered_only(self) -> None:
+    def test_one_bug_declares_a_group_so_the_live_tier_asserts_it(self) -> None:
         # UNVERIFIABLE_FIELDS says so; this pins the claim rather than leaving it prose.
-        self.assertEqual(
-            [alias for alias, bug in self.expected.bugs.items() if "groups" in bug.names],
-            [])
+        # Exactly one, because the count is what the two comments narrowed on it rest on:
+        # the estimated_hours entry states the anonymously-readable case, and it is
+        # `pay-refund-rounding` declaring no time field that keeps that true (issue #42).
+        restricted = [
+            alias for alias, bug in self.expected.bugs.items() if "groups" in bug.names]
+        self.assertEqual(restricted, ["pay-refund-rounding"])
+        bug = self.expected.bugs["pay-refund-rounding"]
+        self.assertEqual(bug.names["groups"], frozenset({"restricted"}))
+        self.assertEqual(bug.unverifiable, ())
 
     def test_custom_fields_carry_their_cf_names(self) -> None:
         bug = self.expected.bugs["cart-double-charge"]
@@ -147,7 +153,8 @@ class CcOrderingTest(unittest.TestCase):
     declaration replaces the running set and drops the requestee, matching the
     `--cc-remove` the replay engine would compute -- is pinned on a fixture written for
     it rather than left until a scenario happens to hit it. The same fixture carries the
-    only non-empty declared `groups` in the repository, for the same reason.
+    only *create-time* declared `groups` in the repository, for the same reason:
+    `scenarios/smoke/` declares its one group restriction on `bug.update` (issue #42).
     """
 
     @classmethod

@@ -25,8 +25,9 @@ CHAIN_FIELDS = frozenset(
 # (PR #646, closing bzr#641). At 63abb94e, the floor README pins make smoke at, a
 # default-transport bug view returns [] for an unrestricted bug and the real member list
 # for a bug restricted to a group: the restricted read draws HTTP 401 and bzr's
-# alternate-auth retry recovers it. No scenarios/smoke bug declares one, so that
-# assertion still has unit coverage only -- the live tier has never exercised it.
+# alternate-auth retry recovers it. scenarios/smoke's restrict-refund-rounding declares one
+# (issue #42), so make smoke drives that assertion against the fixture rather than leaving
+# it to the unit suite.
 UNVERIFIABLE_FIELDS: Mapping[str, str] = {
     "remaining_hours":
         "Bugzilla decrements remaining_time by logged work, so the declared value is not "
@@ -43,8 +44,10 @@ UNVERIFIABLE_FIELDS: Mapping[str, str] = {
     # of it: there the 401 is raised for the whole read, so the same alternate-auth retry
     # that recovers groups authenticates, and the time fields return with the rest of the
     # bug. Measured at 63abb94e as an insider on a restricted bug: bug view carries
-    # estimated_time and remaining_time alongside groups. Every scenarios/smoke bug is
-    # anonymously readable, so the general case is the one this entry states.
+    # estimated_time and remaining_time alongside groups. pay-refund-rounding is the one
+    # scenarios/smoke bug that restriction applies to (issue #42) and it declares neither
+    # time field, so every bug this entry is reached for is anonymously readable and the
+    # general case is the one it states.
     "estimated_hours":
         "Bugzilla gates estimated_time on timetrackinggroup ('editbugs' here) and finding "
         "D8 leaves bzr's REST reads unauthenticated, so bug view returns no "

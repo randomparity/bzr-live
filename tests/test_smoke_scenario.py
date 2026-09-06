@@ -1,6 +1,6 @@
 """Offline invariants over the committed smoke scenario (issue #19).
 
-These assertions run with no server and no Docker. Three are guards, and what each
+These assertions run with no server and no Docker. Five are guards, and what each
 one buys differs -- the honest accounting, because an overstated rationale is how a
 test keeps being trusted for a reason it does not earn:
 
@@ -21,6 +21,11 @@ test keeps being trusted for a reason it does not earn:
   every account is granted it automatically. The assertion tests the *declared*
   group set, which is the property the scenario controls, and it would bite if that
   regexp were ever cleared.
+- `test_group_restrictions_are_settable_by_their_actor` and
+  `test_group_restricted_bugs_declare_no_private_comment` are the same *loud*
+  shift as the first guard, one for a Bugzilla refusal mid-replay and one for a
+  verifier read that cannot be issued at all. Each states its own reason where
+  it is written.
 
 See docs/workflow/specs/2026-09-01-smoke-scenario-design.md, "Proof".
 """
@@ -42,7 +47,7 @@ SCENARIO = Path(__file__).resolve().parent.parent / "scenarios" / "smoke"
 # Pinned so that editing the fixture is a deliberate two-file change. Every edit
 # changes this digest and invalidates any journal written against the old content
 # (ADR 0006), which is the consequence ADR 0007 records and this constant enforces.
-EXPECTED_DIGEST = "d91d3d34659ac72e209b5b3675aa6317624ee9f9c2ade8f4bd7880f8cd9dd8f5"
+EXPECTED_DIGEST = "832bc5a1049e116976be79f8d2d9a02fdbe896bc3f3aed68521bbf687af1fec1"
 
 # The chain and the diamond, named once so a topology edit fails here rather than
 # in a test body that reads like an incantation.
@@ -122,6 +127,23 @@ class SmokeScenarioTest(unittest.TestCase):
     def _groups(self, actor_name):
         return {ref.name for ref in self.actors[actor_name].data["groups"]}
 
+    def _group_restrictions(self):
+        """(event, target bug alias, declared group names) per bug-group declaration.
+
+        Both payload forms land here. A create's postcondition carries every key, so
+        an undeclared `groups` is an empty collection; an update's carries only the
+        keys its `set` block names. Emptiness is what marks a non-declaration in
+        either, so the guards below bind to the create form the day one declares a
+        group, without being written twice.
+        """
+        found = []
+        for event in self.scenario.events:
+            target = event.expected_postcondition["target"]
+            declared = event.expected_postcondition["values"].get("groups")
+            if target.kind == "bug" and declared:
+                found.append((event, target.name, {ref.name for ref in declared}))
+        return found
+
     def test_digest_matches_the_pinned_value(self):
         self.assertEqual(
             self.scenario.digest, EXPECTED_DIGEST,
@@ -169,6 +191,19 @@ class SmokeScenarioTest(unittest.TestCase):
             "CONFIRMED", statuses[resolved + 1:],
             f"no resolved-to-open transition in {statuses}")
 
+    def test_a_bug_group_restriction_is_declared(self):
+        """Issue #42: the groups write path is only proven live if something declares it.
+
+        The contract accepts `groups` on both bug payloads and the verifier folds it as
+        an asserted field, but a path no scenario declares is exercised by the unit
+        suite alone -- and `scenarios/smoke/` is the one CI replays against a real
+        Bugzilla.
+        """
+        self.assertTrue(
+            self._group_restrictions(),
+            "no event declares a bug 'groups' value, so no live run drives the groups "
+            "write path")
+
     def test_every_handler_action_is_exercised(self):
         self.assertEqual({event.action for event in self.scenario.events}, set(HANDLERS))
 
@@ -205,6 +240,50 @@ class SmokeScenarioTest(unittest.TestCase):
                 "admin", self._groups(event.actor.name),
                 f"{event.name!r} posts a private comment as {event.actor.name!r}, "
                 "who is not in the insider group")
+
+    def test_group_restrictions_are_settable_by_their_actor(self):
+        """Guard: a non-member's restriction throws `group_restriction_not_allowed`.
+
+        `Bugzilla/Bug.pm::add_group` refuses a group the acting user is not a member
+        of, outside a product change, so a replay that has already mutated the
+        fixture aborts part-way -- and finding D11 renders that refusal as
+        `410 "You must log in"`, which does not name the real cause.
+
+        Membership is the only half of `add_group` left to guard. Its other refusal,
+        `group_is_settable` on a group the scenario did not map to the bug's product
+        (ADR 0013), is already a load-time failure: `loader._update_set` raises
+        "group is outside the target product" before an event exists to inspect.
+        """
+        for event, alias, groups in self._group_restrictions():
+            held = self._groups(event.actor.name)
+            for name in sorted(groups):
+                self.assertIn(
+                    name, held,
+                    f"{event.name!r} restricts {alias!r} to group {name!r} as "
+                    f"{event.actor.name!r}, who is not a member of it")
+
+    def test_group_restricted_bugs_declare_no_private_comment(self):
+        """Guard: the verifier's outsider read cannot open a group-restricted bug.
+
+        `check_visibility` proves a private comment is withheld by re-reading the
+        thread as an actor outside the insider group (`verify/runner.py`). That actor
+        is outside the restricting group too, so Bugzilla refuses the whole read
+        rather than returning a thread with the private comment dropped, and
+        `ServerReader._object` raises on the refusal instead of reporting a finding.
+        Declaring both on one bug asserts comment privacy through a bug the reader
+        may not open, which reads as a fixture fault rather than the scenario's own.
+        """
+        private = {
+            event.expected_postcondition["target"].name
+            for event in self.scenario.events
+            if event.action == "bug.comment"
+            and event.expected_postcondition["values"]["private"]
+        }
+        for _event, alias, _groups in self._group_restrictions():
+            self.assertNotIn(
+                alias, private,
+                f"{alias!r} is declared group-restricted and also carries a private "
+                "comment, so the outsider visibility read cannot reach it")
 
     def test_attachment_summaries_fit(self):
         """Guard: Bugzilla truncates an over-length description instead of refusing."""
